@@ -12,9 +12,35 @@ class FakeClock(
     override fun nowLocal(): LocalDateTime = local
     override fun wallClockMs(): Long = wall
 
-    /** Advance both monotonic + wall clocks together by [ms] (the untampered case). */
+    /**
+     * Advance both monotonic + wall clocks together by [ms] (the untampered case). Note [local] does
+     * NOT move — tests near the 4am boundary set it explicitly.
+     */
     fun advance(ms: Long) {
         elapsed += ms
         wall += ms
     }
+
+    /**
+     * Wall + local jump by [ms] (may be negative) without monotonic time passing — the "user set the
+     * date/time by hand" case the tamper guard must catch.
+     */
+    fun jumpWall(ms: Long) {
+        wall += ms
+        local = local.plusNanos(ms * 1_000_000L)
+    }
+
+    /** Monotonic-only advance (wall frozen) — the other direction of clock decoupling. */
+    fun advanceElapsedOnly(ms: Long) {
+        elapsed += ms
+    }
+}
+
+/** A hand-driven [ClockIntegrity]: flip [autoTime] / bump [boot] to simulate Settings changes. */
+class FakeIntegrity(
+    var autoTime: Boolean = true,
+    var boot: Int = 1,
+) : ClockIntegrity {
+    override fun autoTimeEnabled(): Boolean = autoTime
+    override fun bootCount(): Int = boot
 }

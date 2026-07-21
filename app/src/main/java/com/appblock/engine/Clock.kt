@@ -14,23 +14,15 @@ interface EngineClock {
 }
 
 /**
- * Guards the daily reset against the "set the clock forward to force a reset" cheat. Between ticks the
- * wall clock should advance by about the same as monotonic uptime; a large positive divergence is a jump.
+ * Platform signals the tamper guard needs beyond the raw clocks (see BudgetCoordinator.guardClocks):
+ * whether the wall clock is OS-synced (trusted) or user-set (the "change the date to reset the
+ * budget" attack surface), and how many times the device has booted (detects reboots even though
+ * elapsedRealtime restarts at 0). The Android impl reads Settings.Global; tests use a fake.
  */
-class ClockTamperMonitor(private val toleranceMs: Long = 90_000L) {
+interface ClockIntegrity {
+    /** True when the OS syncs date & time automatically (Settings.Global.AUTO_TIME == 1). */
+    fun autoTimeEnabled(): Boolean
 
-    private var lastWallMs: Long? = null
-    private var lastElapsedMs: Long? = null
-
-    /** Feed each tick's (wall, elapsed); returns true if this looks like a forward wall-clock jump. */
-    fun check(wallMs: Long, elapsedMs: Long): Boolean {
-        val lw = lastWallMs
-        val le = lastElapsedMs
-        lastWallMs = wallMs
-        lastElapsedMs = elapsedMs
-        if (lw == null || le == null) return false
-        val wallDelta = wallMs - lw
-        val elapsedDelta = elapsedMs - le
-        return wallDelta - elapsedDelta > toleranceMs
-    }
+    /** Boots since factory reset (Settings.Global.BOOT_COUNT) — strictly increases on every reboot. */
+    fun bootCount(): Int
 }

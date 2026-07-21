@@ -15,19 +15,25 @@ import com.appblock.ActiveRules
 import com.appblock.R
 import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
+import com.appblock.engine.AppTargets
 import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
 import com.appblock.engine.Target
 
 /**
- * The live blocker. Two inputs drive it:
- *  1. Foreground changes (TYPE_WINDOW_STATE_CHANGED) — tell the coordinator which app is on screen.
- *  2. A ~5s heartbeat while a budgeted app is foreground — so the block appears the *moment* the daily
- *     budget runs out, not only when the user next switches apps (accessibility events won't fire while
- *     they just keep scrolling).
+ * The live blocker. Three inputs drive it:
+ *  1. Window events (TYPE_WINDOW_STATE_CHANGED / TYPE_WINDOWS_CHANGED) — something on screen changed.
+ *  2. A window *scan* on every event and tick: a budgeted app counts as foreground if it occupies ANY
+ *     visible window, not just the focused one — split-screen / Samsung App Pairs can't park TikTok
+ *     in an unfocused pane for free.
+ *  3. A ~5s heartbeat while a budgeted app is on screen — so the block appears the *moment* the daily
+ *     budget runs out, not only when the user next switches apps.
  *
- * The decision itself (allow vs block) is the pure engine's; this class only maps it to the overlay.
- * Still the weak tier: force-stop / reboot / uninstall defeat it — that's what the friction layer and
+ * The decision itself (allow vs block) is the pure engine's; this class maps it to the overlay. If the
+ * overlay can't draw (permission revoked mid-session), blocking falls back to kicking the user to the
+ * home screen every tick — revoking "Display over other apps" must not silently disable blocking.
+ *
+ * Still the weak tier: force-stop / uninstall defeat it — that's what the watchdog notification and
  * the optional Device Owner tier are for (see STATUS.md).
  */
 class AppBlockerAccessibilityService : AccessibilityService() {
@@ -41,10 +47,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
+    private var lastForegroundPackage: String? = null
 
     private val tickRunnable = object : Runnable {
         override fun run() {
             if (!ticking) return
+            refreshForeground(eventPackage = null)   // re-scan: split panes change without events
             val decision = coordinator.tick()
             applyDecision(decision)
             if (decision.target != null) {
@@ -57,25 +65,62 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        isRunning = true
         val clock = AndroidEngineClock()
-        coordinator = BudgetCoordinator(clock, PrefsEngineStore(this, clock), ActiveRules.rules)
+        coordinator = BudgetCoordinator(
+            clock,
+            PrefsEngineStore(this, clock),
+            AndroidClockIntegrity(this),
+            ActiveRules.rules,
+        )
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-
-        val packageName = event.packageName?.toString() ?: return
-        if (packageName == getPackageName()) return
-
-        coordinator.onForeground(packageName)
+        if (event == null) return
+        val type = event.eventType
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            type != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) {
+            return
+        }
+        refreshForeground(event.packageName?.toString())
         val decision = coordinator.tick()
         applyDecision(decision)
         if (decision.target != null) startTicking() else stopTicking()
     }
 
+    /**
+     * Resolve what's effectively foreground and inform the coordinator if it changed. The window scan
+     * wins (it sees budgeted apps in any visible pane, and it keeps the blocked target current while
+     * our own overlay is the top window); the event's package is the fallback when no budgeted window
+     * is visible. An event from our own package while the overlay is up is the overlay itself — never
+     * treat that as "the user left the app".
+     */
+    private fun refreshForeground(eventPackage: String?) {
+        val resolved = visibleTargetPackage()
+            ?: eventPackage?.takeIf { it != packageName || overlayView == null }
+            ?: return
+        if (resolved == lastForegroundPackage) return
+        lastForegroundPackage = resolved
+        coordinator.onForeground(resolved)
+    }
+
+    /** A package of any currently-visible window that maps to a budgeted target, else null. */
+    private fun visibleTargetPackage(): String? =
+        runCatching {
+            windows.firstNotNullOfOrNull { window ->
+                window.root?.packageName?.toString()
+                    ?.takeIf { AppTargets.targetFor(it) != null }
+            }
+        }.getOrNull()
+
     private fun applyDecision(decision: Decision) {
         if (decision.access == Access.BLOCK && decision.target != null) {
-            showOverlay(decision.target)
+            val overlayUp = showOverlay(decision.target)
+            if (!overlayUp) {
+                // Overlay permission revoked or addView failed: blocking must not silently vanish.
+                performGlobalAction(GLOBAL_ACTION_HOME)
+            }
         } else {
             hideOverlay()
         }
@@ -92,13 +137,19 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(tickRunnable)
     }
 
-    private fun showOverlay(target: Target) {
-        if (overlayView != null) return
-        if (!Settings.canDrawOverlays(this)) return
+    /** Returns true when the block overlay is up (already or newly added). */
+    private fun showOverlay(target: Target): Boolean {
+        if (overlayView != null) return true
+        if (!Settings.canDrawOverlays(this)) return false
 
         val view = LayoutInflater.from(this).inflate(R.layout.overlay_block, null)
+        val tamper = coordinator.tamperReason() != null
         view.findViewById<TextView>(R.id.block_message).text =
-            getString(R.string.block_message_budget, labelFor(target))
+            if (tamper) {
+                getString(R.string.block_message_tamper)
+            } else {
+                getString(R.string.block_message_budget, labelFor(target))
+            }
         view.findViewById<Button>(R.id.block_close).setOnClickListener {
             hideOverlay()
             performGlobalAction(GLOBAL_ACTION_HOME)
@@ -114,6 +165,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
         runCatching { windowManager.addView(view, params) }
             .onSuccess { overlayView = view }
+        return overlayView != null
     }
 
     private fun hideOverlay() {
@@ -134,12 +186,18 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         stopTicking()
         hideOverlay()
         super.onDestroy()
     }
 
-    private companion object {
-        const val TICK_MS = 5_000L
+    companion object {
+        private const val TICK_MS = 5_000L
+
+        /** Liveness flag for the watchdog: true only while the system has this service running. */
+        @Volatile
+        var isRunning: Boolean = false
+            private set
     }
 }

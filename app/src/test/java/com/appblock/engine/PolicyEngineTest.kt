@@ -32,21 +32,21 @@ class PolicyEngineTest {
 
     @Test fun `active exception raises the cap`() {
         val usage = BudgetUsage(secondsUsed = 25 * 60L, dayKey = friday) // over normal 15
-        val exc = ExceptionState.Active(Target.X, extraMinutes = 20, windowEndElapsedMs = Long.MAX_VALUE)
+        val exc = ExceptionState.Active(Target.X, extraMinutes = 20, windowEndElapsedMs = Long.MAX_VALUE, dayKey = friday)
         // effective cap = min(15 + 20, 40) = 35 → 25 < 35 → allow
         assertEquals(Access.ALLOW, PolicyEngine.decide(x, usage, exc, friday))
     }
 
     @Test fun `exception cannot exceed the per-app max`() {
         val usage = BudgetUsage(secondsUsed = 41 * 60L, dayKey = friday)
-        val exc = ExceptionState.Active(Target.X, extraMinutes = 999, windowEndElapsedMs = Long.MAX_VALUE)
+        val exc = ExceptionState.Active(Target.X, extraMinutes = 999, windowEndElapsedMs = Long.MAX_VALUE, dayKey = friday)
         // effective cap capped at 40 → 41 >= 40 → block
         assertEquals(Access.BLOCK, PolicyEngine.decide(x, usage, exc, friday))
     }
 
     @Test fun `an exception for another app is ignored`() {
         val usage = BudgetUsage(secondsUsed = 15 * 60L, dayKey = friday)
-        val excForTikTok = ExceptionState.Active(Target.TIKTOK, extraMinutes = 30, windowEndElapsedMs = Long.MAX_VALUE)
+        val excForTikTok = ExceptionState.Active(Target.TIKTOK, extraMinutes = 30, windowEndElapsedMs = Long.MAX_VALUE, dayKey = friday)
         assertEquals(Access.BLOCK, PolicyEngine.decide(x, usage, excForTikTok, friday))
     }
 

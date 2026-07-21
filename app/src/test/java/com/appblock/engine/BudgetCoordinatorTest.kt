@@ -12,7 +12,7 @@ class BudgetCoordinatorTest {
     private val minute = 60_000L
 
     private fun coordinator(clock: FakeClock, store: EngineStore = InMemoryEngineStore()) =
-        BudgetCoordinator(clock, store)
+        BudgetCoordinator(clock, store, FakeIntegrity())
 
     @Test fun `non-budgeted foreground is always allowed and untargeted`() {
         val clock = FakeClock()

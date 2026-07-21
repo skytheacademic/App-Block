@@ -21,9 +21,10 @@ class EngineCodecTest {
     }
 
     @Test fun `exception states round-trip`() {
+        val day = LocalDate.of(2026, 7, 24)
         val none: ExceptionState = ExceptionState.None
-        val pending: ExceptionState = ExceptionState.Pending(Target.TIKTOK, 30, 120, 9_999L)
-        val active: ExceptionState = ExceptionState.Active(Target.X, 25, 5_000L)
+        val pending: ExceptionState = ExceptionState.Pending(Target.TIKTOK, 30, 120, 9_999L, day)
+        val active: ExceptionState = ExceptionState.Active(Target.X, 25, 5_000L, day)
         assertEquals(none, EngineCodec.decodeException(EngineCodec.encodeException(none)))
         assertEquals(pending, EngineCodec.decodeException(EngineCodec.encodeException(pending)))
         assertEquals(active, EngineCodec.decodeException(EngineCodec.encodeException(active)))
@@ -33,7 +34,12 @@ class EngineCodecTest {
         assertEquals(ExceptionState.None, EngineCodec.decodeException(null))
         assertEquals(ExceptionState.None, EngineCodec.decodeException(""))
         assertEquals(ExceptionState.None, EngineCodec.decodeException("pending|tiktok|30")) // too few fields
-        assertEquals(ExceptionState.None, EngineCodec.decodeException("active|nosuchtarget|1|2"))
+        assertEquals(ExceptionState.None, EngineCodec.decodeException("active|nosuchtarget|1|2|2026-07-24"))
         assertEquals(ExceptionState.None, EngineCodec.decodeException("garbage"))
+    }
+
+    @Test fun `legacy day-less exception formats decode to None (stricter), not garbage`() {
+        assertEquals(ExceptionState.None, EngineCodec.decodeException("pending|tiktok|30|120|9999"))
+        assertEquals(ExceptionState.None, EngineCodec.decodeException("active|x|25|5000"))
     }
 }

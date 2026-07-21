@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
         <intent>
@@ -10,8 +11,13 @@
         </intent>
     </queries>
 
+    <!-- Backups are a bypass: snapshot fresh budget state once, restore it whenever blocked.
+         allowBackup=false plus explicit exclude-all extraction rules keeps adb backup, cloud
+         backup, and Smart Switch device transfer away from the engine's SharedPreferences. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/full_backup_content"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"

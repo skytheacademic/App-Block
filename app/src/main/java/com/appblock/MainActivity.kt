@@ -1,9 +1,13 @@
 package com.appblock
 
+import android.Manifest
+import android.content.pm.ApplicationInfo
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,7 +46,9 @@ import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.ExceptionState
 import com.appblock.engine.Target
 import com.appblock.engine.TargetStatus
+import com.appblock.service.AndroidClockIntegrity
 import com.appblock.service.AndroidEngineClock
+import com.appblock.service.Watchdog
 import com.appblock.ui.theme.AppBlockTheme
 import com.appblock.util.accessibilitySettingsIntent
 import com.appblock.util.isAccessibilityServiceEnabled
@@ -55,8 +61,16 @@ class MainActivity : ComponentActivity() {
     private val accessibilityEnabled = mutableStateOf(false)
     private val overlayGranted = mutableStateOf(false)
 
+    // The watchdog's "blocking died" notification needs this on Android 13+; a denial just means no nag.
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Watchdog.schedule(this)
+        if (Build.VERSION.SDK_INT >= 33) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         setContent {
             AppBlockTheme {
                 Surface(
@@ -78,6 +92,10 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         accessibilityEnabled.value = isAccessibilityServiceEnabled(this)
         overlayGranted.value = Settings.canDrawOverlays(this)
+        if (accessibilityEnabled.value && overlayGranted.value) {
+            // Both special permissions seen granted once → the watchdog may nag if they ever lapse.
+            Watchdog.markSetupCompleted(this)
+        }
     }
 }
 
@@ -93,16 +111,23 @@ private fun HomeScreen(
     // state). It never calls onForeground, so it only reads usage and advances/edits exceptions.
     val coordinator = remember {
         val clock = AndroidEngineClock()
-        BudgetCoordinator(clock, PrefsEngineStore(context, clock), ActiveRules.rules)
+        BudgetCoordinator(
+            clock,
+            PrefsEngineStore(context, clock),
+            AndroidClockIntegrity(context),
+            ActiveRules.rules,
+        )
     }
 
     var statuses by remember { mutableStateOf<List<TargetStatus>>(emptyList()) }
+    var tamperReason by remember { mutableStateOf<String?>(null) }
     var dialogTarget by remember { mutableStateOf<TargetStatus?>(null) }
 
     // Poll once a second so time-left and exception countdowns tick live.
     LaunchedEffect(Unit) {
         while (true) {
             statuses = coordinator.snapshot()
+            tamperReason = coordinator.tamperReason()
             delay(1_000)
         }
     }
@@ -133,6 +158,14 @@ private fun HomeScreen(
                 onOpenAccessibility = onOpenAccessibility,
                 onOpenOverlay = onOpenOverlay,
             )
+        }
+
+        tamperReason?.let { reason ->
+            item { WarningCard(title = "Clock tampering detected", body = "$reason. All targets stay blocked until automatic date & time is turned back on in Settings.") }
+        }
+
+        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            item { WarningCard(title = "Debug build", body = "This build is debuggable — its data can be edited over ADB. Install a release build for real use.") }
         }
 
         items(statuses, key = { it.target.key }) { status ->
@@ -325,6 +358,25 @@ private fun Stepper(
                 style = MaterialTheme.typography.bodyLarge,
             )
             OutlinedButton(onClick = onPlus) { Text("+") }
+        }
+    }
+}
+
+@Composable
+private fun WarningCard(title: String, body: String) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

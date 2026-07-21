@@ -1,5 +1,8 @@
 package com.appblock.engine
 
+import java.time.LocalDate
+import kotlin.math.abs
+
 /** The decision for the app currently on screen. [target] is null when the foreground isn't budgeted. */
 data class Decision(val target: Target?, val access: Access)
 
@@ -29,37 +32,59 @@ data class TargetStatus(
  *
  * Timekeeping split (see Clock.kt): foreground time accrues off the **monotonic** clock so rewinding
  * the phone clock can't erase used minutes, while the day boundary and weekday/weekend read the
- * **wall** clock. A [ClockTamperMonitor] flags forward wall jumps.
+ * **wall** clock. The wall clock is only trusted while the OS syncs it ([ClockIntegrity]); with
+ * automatic time off, any divergence between the clocks latches the tamper flag and every budgeted
+ * target hard-blocks until automatic time is back on ([guardClocks]).
+ *
+ * Public methods are @Synchronized: today everything runs on the main looper, but nothing should
+ * silently lose accrual writes if a caller ever moves off it. (Two coordinator *instances* over the
+ * same store still rely on the shared main looper — keep new callers on it.)
  */
 class BudgetCoordinator(
     private val clock: EngineClock,
     private val store: EngineStore,
+    private val integrity: ClockIntegrity,
     private val rules: List<Rule> = DefaultRules.rules,
 ) {
     private var currentTarget: Target? = null
     private var lastAccrualElapsedMs: Long = clock.elapsedRealtimeMs()
-    private val tamperMonitor = ClockTamperMonitor()
+
+    /** Sub-second accrual remainders per target, so switching apps never truncates time away. */
+    private val carryMs = mutableMapOf<Target, Long>()
 
     /** The target the last decision blocked, if any — accrual freezes while its overlay is up. */
     private var blockedTarget: Target? = null
 
-    /** True if the last [tick] saw a suspicious forward wall-clock jump. Informational for now. */
-    var lastTamperDetected: Boolean = false
-        private set
+    /** Non-null while the tamper latch is set (the human-readable reason). */
+    fun tamperReason(): String? = store.loadTamper()
 
     /** Call when the foreground package changes. Flushes the outgoing target's time, then switches. */
+    @Synchronized
     fun onForeground(packageName: String?) {
         val newTarget = packageName?.let { AppTargets.targetFor(it) }
-        bankTime()                      // bank the app we're leaving
+        if (store.loadTamper() != null) {
+            lastAccrualElapsedMs = clock.elapsedRealtimeMs()  // latched: consume the gap, count nothing
+        } else {
+            bankTime()                  // bank the app we're leaving
+        }
         currentTarget = newTarget
         blockedTarget = null            // a fresh foreground isn't blocked until the next decision
         lastAccrualElapsedMs = clock.elapsedRealtimeMs()
     }
 
-    /** Periodic heartbeat while an app is foreground: advance exceptions, bank time, decide. */
+    /** Periodic heartbeat while an app is foreground: guard the clocks, advance exceptions, decide. */
+    @Synchronized
     fun tick(): Decision {
-        lastTamperDetected = tamperMonitor.check(clock.wallClockMs(), clock.elapsedRealtimeMs())
+        guardClocks()
         advanceExceptions()
+        if (store.loadTamper() != null) {
+            // Latched: freeze accrual (the block screen is up; behind it isn't real usage) and block
+            // every budgeted target until the wall clock is trustworthy again.
+            lastAccrualElapsedMs = clock.elapsedRealtimeMs()
+            val t = currentTarget ?: return Decision(null, Access.ALLOW)
+            blockedTarget = t
+            return Decision(t, Access.BLOCK)
+        }
         bankTime()
         val decision = decideCurrent()
         blockedTarget = if (decision.access == Access.BLOCK) decision.target else null
@@ -67,22 +92,37 @@ class BudgetCoordinator(
     }
 
     /** Start the 1-hour wait for a bounded raise on [target]. Persisted so the service picks it up. */
+    @Synchronized
     fun requestException(target: Target, extraMinutes: Int, windowMinutes: Int) {
         store.saveException(
             target,
-            ExceptionManager.request(target, extraMinutes, windowMinutes, clock.elapsedRealtimeMs()),
+            ExceptionManager.request(
+                target,
+                extraMinutes,
+                windowMinutes,
+                clock.elapsedRealtimeMs(),
+                DayBoundary.logicalDay(clock.nowLocal()),
+            ),
         )
     }
 
     /** Drop any exception on [target] (revert to the normal cap immediately). */
+    @Synchronized
     fun cancelException(target: Target) {
         store.saveException(target, ExceptionState.None)
     }
 
-    /** Per-target standing for the UI. Advances exceptions + banks current time so numbers are fresh. */
+    /** Per-target standing for the UI. Runs the same guards as [tick] so numbers are fresh + honest. */
+    @Synchronized
     fun snapshot(): List<TargetStatus> {
+        guardClocks()
         advanceExceptions()
-        bankTime()
+        val latched = store.loadTamper() != null
+        if (latched) {
+            lastAccrualElapsedMs = clock.elapsedRealtimeMs()
+        } else {
+            bankTime()
+        }
         val today = DayBoundary.logicalDay(clock.nowLocal())
         val dayType = DayBoundary.dayType(today)
         val now = clock.elapsedRealtimeMs()
@@ -99,7 +139,8 @@ class BudgetCoordinator(
                     val effCap = PolicyEngine.effectiveCapMinutes(mode, dayType, extra)
                     val capSeconds = effCap * 60L
                     val remaining = (capSeconds - used).coerceAtLeast(0L)
-                    val access = if (used >= capSeconds) Access.BLOCK else Access.ALLOW
+                    val access =
+                        if (latched || used >= capSeconds) Access.BLOCK else Access.ALLOW
                     val activatesIn = (exc as? ExceptionState.Pending)
                         ?.let { (it.activeAtElapsedMs - now).coerceAtLeast(0L) }
                     val endsIn = (exc as? ExceptionState.Active)
@@ -124,6 +165,60 @@ class BudgetCoordinator(
     // ---- internals ----
 
     /**
+     * The tamper guard. Runs before every decision/snapshot:
+     *  1. Reboot (boot count changed): monotonic anchors from the old boot are meaningless → drop all
+     *     in-flight exceptions (stricter cap). Rebooting with automatic time OFF also latches — a
+     *     reboot is how you'd launder a manual date change past the drift check below.
+     *  2. Drift (same boot, automatic time off): between passes the wall clock must advance by about
+     *     the same amount as monotonic uptime; divergence beyond [DRIFT_TOLERANCE_MS] in either
+     *     direction means the date/time was changed by hand → latch.
+     *  3. Automatic time ON: the OS owns the wall clock → trusted → the latch clears.
+     *  4. Corrupt stored usage: burn that target's day (usage := its exception ceiling) — a decode
+     *     failure must never become a fresh budget.
+     *  5. Day regression (stored dayKey ahead of today): the wall date was rolled back. Re-key the
+     *     stored count onto today so the earlier "future day" usage still counts, and latch if the
+     *     clock is manual.
+     * The anchor is persisted so none of this goes blind across process restarts.
+     */
+    private fun guardClocks() {
+        val nowWall = clock.wallClockMs()
+        val nowElapsed = clock.elapsedRealtimeMs()
+        val boot = integrity.bootCount()
+        val auto = integrity.autoTimeEnabled()
+        val anchor = store.loadClockAnchor()
+
+        if (anchor != null && anchor.bootCount != boot) {
+            rules.forEach { store.saveException(it.target, ExceptionState.None) }
+            if (!auto) store.saveTamper("Rebooted with automatic date & time off")
+        } else if (anchor != null && !auto) {
+            val drift = (nowWall - anchor.wallMs) - (nowElapsed - anchor.elapsedMs)
+            if (abs(drift) > DRIFT_TOLERANCE_MS) {
+                store.saveTamper("Clock changed while automatic date & time is off")
+            }
+        }
+        if (auto && store.loadTamper() != null) store.saveTamper(null)
+
+        val today = DayBoundary.logicalDay(clock.nowLocal())
+        for (rule in rules) {
+            if (store.usageCorrupt(rule.target)) {
+                val burnSeconds = when (val mode = rule.mode) {
+                    is RuleMode.DailyBudget -> mode.exceptionMaxMinutes * 60L
+                    is RuleMode.HardBlock -> 24L * 3600L
+                }
+                store.saveUsage(rule.target, BudgetUsage(burnSeconds, today))
+                continue
+            }
+            val usage = store.loadUsage(rule.target) ?: continue
+            if (usage.dayKey > today) {
+                if (!auto) store.saveTamper("Stored usage is dated ahead of today")
+                store.saveUsage(rule.target, BudgetUsage(usage.secondsUsed, today))
+            }
+        }
+
+        store.saveClockAnchor(ClockAnchor(nowWall, nowElapsed, boot))
+    }
+
+    /**
      * Bank time, but freeze accrual while the current target is the one we're actively blocking — the
      * overlay is covering it, so the user isn't really using it, and counting that time would make a
      * later exception pointless (usage would already be far past the raised cap).
@@ -138,17 +233,18 @@ class BudgetCoordinator(
 
     private fun advanceExceptions() {
         val now = clock.elapsedRealtimeMs()
+        val today = DayBoundary.logicalDay(clock.nowLocal())
         for (rule in rules) {
             val st = store.loadException(rule.target)
-            val next = ExceptionManager.tick(st, now)
+            val next = ExceptionManager.tick(st, now, today)
             if (next != st) store.saveException(rule.target, next)
         }
     }
 
     /**
-     * Bank foreground seconds for [currentTarget] since the last accrual. Uses whole seconds and
-     * advances the baseline only by the seconds consumed, so sub-second remainders carry forward
-     * instead of being truncated away each tick.
+     * Bank foreground milliseconds for [currentTarget] since the last accrual. Whole seconds are
+     * persisted; the sub-second remainder is carried per target in [carryMs], so neither heartbeat
+     * ticks nor app switches ever truncate time away.
      */
     private fun accrueCurrent() {
         val nowElapsed = clock.elapsedRealtimeMs()
@@ -157,16 +253,15 @@ class BudgetCoordinator(
             lastAccrualElapsedMs = nowElapsed
             return
         }
-        val totalDeltaMs = nowElapsed - lastAccrualElapsedMs
-        if (totalDeltaMs <= 0L) {
-            lastAccrualElapsedMs = nowElapsed     // clock stall / rewind: don't accrue, resync
-            return
-        }
-        val deltaSec = totalDeltaMs / 1000L
-        if (deltaSec <= 0L) return                // keep baseline; let the remainder accumulate
-        lastAccrualElapsedMs += deltaSec * 1000L
+        val deltaMs = nowElapsed - lastAccrualElapsedMs
+        lastAccrualElapsedMs = nowElapsed
+        if (deltaMs <= 0L) return                 // clock stall: nothing to accrue
+        val totalMs = deltaMs + (carryMs[t] ?: 0L)
+        val seconds = totalMs / 1000L
+        carryMs[t] = totalMs % 1000L
+        if (seconds <= 0L) return
         val today = DayBoundary.logicalDay(clock.nowLocal())
-        store.saveUsage(t, UsageTracker.accrue(store.loadUsage(t), deltaSec, today))
+        store.saveUsage(t, UsageTracker.accrue(store.loadUsage(t), seconds, today))
     }
 
     private fun decideCurrent(): Decision {
@@ -175,5 +270,10 @@ class BudgetCoordinator(
         val today = DayBoundary.logicalDay(clock.nowLocal())
         val access = PolicyEngine.decide(rule, store.loadUsage(t), store.loadException(t), today)
         return Decision(t, access)
+    }
+
+    private companion object {
+        /** How far the wall clock may diverge from monotonic uptime between passes (doze slop etc.). */
+        const val DRIFT_TOLERANCE_MS = 90_000L
     }
 }
