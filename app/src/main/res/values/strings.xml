@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">App-Block</string>
+    <string name="accessibility_label">App-Block detection</string>
+    <string name="accessibility_description">Detects when a blocked app comes to the foreground so App-Block can show the block screen. Reads only the package name of the foreground app; it does not read screen content.</string>
+    <string name="block_title">Blocked</string>
+    <string name="block_message">You chose to block this app. Take a breath and go back.</string>
+    <string name="block_go_back">Go back</string>
+</resources>
