@@ -13,9 +13,9 @@ Kotlin + Jetpack Compose · targets Android 15 (One UI 7).
 Deliberately weak at this stage — force-stop, reboot, or uninstall all defeat it. A friction layer (unlock cooldowns, delayed settings changes, externally-held passphrase) and an optional Device Owner hardening tier are the next steps.
 
 ## Build
-- Requirements: JDK 17 + Android SDK (platform 35). Android Studio (Ladybug or newer) recommended.
-- CLI: run `gradle wrapper` once to generate the wrapper, then `./gradlew assembleDebug`.
-  - `gradle-wrapper.jar` and the `gradlew` scripts are not committed — generate them locally.
+- Requirements: JDK 17 + Android SDK (platform 35). Android Studio (Ladybug or newer) optional.
+- CLI: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`. The Gradle wrapper is committed, so no separate Gradle install is needed.
+  - Create a `local.properties` with `sdk.dir` pointing at your Android SDK (gitignored; per machine).
 
 ## Install (sideload)
 1. Install the debug APK (`adb install`, or Android Studio Run).
