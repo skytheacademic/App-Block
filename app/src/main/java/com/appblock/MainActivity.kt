@@ -93,7 +93,7 @@ private fun HomeScreen(
     // state). It never calls onForeground, so it only reads usage and advances/edits exceptions.
     val coordinator = remember {
         val clock = AndroidEngineClock()
-        BudgetCoordinator(clock, PrefsEngineStore(context, clock))
+        BudgetCoordinator(clock, PrefsEngineStore(context, clock), ActiveRules.rules)
     }
 
     var statuses by remember { mutableStateOf<List<TargetStatus>>(emptyList()) }

@@ -14,6 +14,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        // Real caps everywhere by default; only the debugFast variant flips this on.
+        buildConfigField("boolean", "FAST_CAPS", "false")
     }
 
     buildTypes {
@@ -23,6 +26,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        // Throwaway QA build: 1-minute caps so the block can be verified in ~90s instead of 15 min.
+        // Same applicationId as debug, so installing it replaces the normal build (and vice-versa).
+        create("debugFast") {
+            initWith(getByName("debug"))
+            buildConfigField("boolean", "FAST_CAPS", "true")
         }
     }
 
@@ -37,6 +46,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

@@ -11,6 +11,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.TextView
+import com.appblock.ActiveRules
 import com.appblock.R
 import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
@@ -57,7 +58,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         val clock = AndroidEngineClock()
-        coordinator = BudgetCoordinator(clock, PrefsEngineStore(this, clock))
+        coordinator = BudgetCoordinator(clock, PrefsEngineStore(this, clock), ActiveRules.rules)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
