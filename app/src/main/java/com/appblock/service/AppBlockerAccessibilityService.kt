@@ -4,13 +4,16 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import com.appblock.ActiveRules
 import com.appblock.R
 import com.appblock.data.PrefsEngineStore
@@ -18,7 +21,9 @@ import com.appblock.engine.Access
 import com.appblock.engine.AppTargets
 import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
+import com.appblock.engine.SettingsWatch
 import com.appblock.engine.Target
+import com.appblock.security.DurableUnlockController
 
 /**
  * The live blocker. Three inputs drive it:
@@ -28,6 +33,9 @@ import com.appblock.engine.Target
  *     in an unfocused pane for free.
  *  3. A ~5s heartbeat while a budgeted app is on screen — so the block appears the *moment* the daily
  *     budget runs out, not only when the user next switches apps.
+ *  4. Self-defense (settings-watch, [SettingsWatch]): content + window events from system Settings are
+ *     scanned for screens about App-Block itself (the Accessibility toggle, App info, overlay page) —
+ *     found one → bounce Home, unless the durable-change window is open (that's the sanctioned path).
  *
  * The decision itself (allow vs block) is the pure engine's; this class maps it to the overlay. If the
  * overlay can't draw (permission revoked mid-session), blocking falls back to kicking the user to the
@@ -44,10 +52,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     private var overlayView: View? = null
     private lateinit var coordinator: BudgetCoordinator
+    private lateinit var unlockController: DurableUnlockController
 
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
     private var lastForegroundPackage: String? = null
+    private var lastBounceToastElapsedMs = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -73,20 +83,80 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             AndroidClockIntegrity(this),
             ActiveRules.ruleSource(this),
         )
+        unlockController = DurableUnlockController(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val type = event.eventType
-        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            type != AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        ) {
-            return
-        }
+        val windowEvent = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            type == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        if (!windowEvent && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
+        if (selfDefense(event)) return
+        if (!windowEvent) return  // content-changed events feed only the settings-watch
         refreshForeground(event.packageName?.toString())
         val decision = coordinator.tick()
         applyDecision(decision)
         if (decision.target != null) startTicking() else stopTicking()
+    }
+
+    /**
+     * The settings-watch (CONSTRAINTS lever A). A Settings screen about App-Block itself — the
+     * Accessibility toggle, its "Turn off?" dialog, App info with Force stop / Uninstall, the
+     * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a
+     * zero-friction escape. Stands down while setup is still incomplete (first-time permission
+     * granting must not be bounced) and while the durable-change window is open, which makes
+     * "switch the service off" a gated loosening like any other (CONSTRAINTS §6).
+     * Returns true when it bounced (the event needs no further handling).
+     */
+    private fun selfDefense(event: AccessibilityEvent): Boolean {
+        val pkg = event.packageName?.toString()
+        if (!SettingsWatch.isWatched(pkg)) return false
+        val standDown = !Watchdog.setupCompleted(this) || unlockController.isOpen()
+        if (standDown) return false
+        val bounce = SettingsWatch.shouldBounce(
+            packageName = pkg,
+            visibleTexts = visibleWatchedTexts(),
+            selfLabel = getString(R.string.app_name),
+            standDown = false,
+        )
+        if (!bounce) return false
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastBounceToastElapsedMs > BOUNCE_TOAST_THROTTLE_MS) {
+            lastBounceToastElapsedMs = now
+            Toast.makeText(this, getString(R.string.self_defense_bounce), Toast.LENGTH_SHORT).show()
+        }
+        return true
+    }
+
+    /** All visible text (text + contentDescription) of windows owned by watched settings packages. */
+    private fun visibleWatchedTexts(): List<CharSequence> {
+        val texts = ArrayList<CharSequence>(64)
+        runCatching {
+            var budget = NODE_BUDGET
+            for (window in windows) {
+                val root = window.root ?: continue
+                if (!SettingsWatch.isWatched(root.packageName?.toString())) continue
+                budget = collectTexts(root, texts, budget)
+                if (budget <= 0) break
+            }
+        }
+        return texts
+    }
+
+    /** Depth-first text collection, capped at [budget] nodes so a huge tree can't stall the service. */
+    private fun collectTexts(node: AccessibilityNodeInfo, out: MutableList<CharSequence>, budget: Int): Int {
+        if (budget <= 0) return 0
+        var remaining = budget - 1
+        node.text?.let { out.add(it) }
+        node.contentDescription?.let { out.add(it) }
+        for (i in 0 until node.childCount) {
+            if (remaining <= 0) break
+            val child = node.getChild(i) ?: continue
+            remaining = collectTexts(child, out, remaining)
+        }
+        return remaining
     }
 
     /**
@@ -194,6 +264,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TICK_MS = 5_000L
+        private const val NODE_BUDGET = 400
+        private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
 
         /** Liveness flag for the watchdog: true only while the system has this service running. */
         @Volatile

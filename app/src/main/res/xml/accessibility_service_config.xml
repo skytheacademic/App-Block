@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- flagRetrieveInteractiveWindows + canRetrieveWindowContent let the service scan getWindows() so a
      budgeted app is caught in ANY visible pane (split-screen / Samsung App Pairs), not just the
-     focused window. typeWindowsChanged fires when panes appear/disappear without a focus change. -->
+     focused window. typeWindowsChanged fires when panes appear/disappear without a focus change.
+     typeWindowContentChanged exists ONLY for the settings-watch: navigation inside the Settings app
+     doesn't reliably fire a window-state change, so content changes are scanned too - the handler
+     drops them immediately for every non-Settings package. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
