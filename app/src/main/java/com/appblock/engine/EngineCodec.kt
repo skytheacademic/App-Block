@@ -70,5 +70,53 @@ object EngineCodec {
         }
     }
 
+    // ---- DurableSettings ----
+    //
+    // Format (tagged, pipe-delimited): `durable1|<version>|<window>|<t>|<t>...`
+    // where each `<t>` is `key,enabled(0|1),weekday,weekend,exceptionMax`. Any malformed value decodes
+    // to null so the store can re-seed from source (strict — a lost config falls back to defaults, not
+    // to "no rules"). Unknown target keys are skipped.
+
+    fun encodeDurable(settings: DurableSettings): String {
+        val head = "durable1|${settings.version}|${settings.exceptionWindowMinutes}"
+        val targets = Target.entries.mapNotNull { target ->
+            settings.targets[target]?.let { s ->
+                "${target.key},${if (s.enabled) 1 else 0},${s.weekdayMinutes},${s.weekendMinutes},${s.exceptionMaxMinutes}"
+            }
+        }
+        return (listOf(head) + targets).joinToString("|")
+    }
+
+    fun decodeDurable(raw: String?): DurableSettings? {
+        if (raw.isNullOrBlank()) return null
+        val parts = raw.split('|')
+        if (parts.size < 3 || parts[0] != "durable1") return null
+        val version = parts[1].toIntOrNull() ?: return null
+        val window = parts[2].toIntOrNull() ?: return null
+        val targets = mutableMapOf<Target, TargetSettings>()
+        for (i in 3 until parts.size) {
+            val f = parts[i].split(',')
+            if (f.size != 5) return null
+            val target = targetForKey(f[0]) ?: continue           // unknown key: skip, don't fail
+            val enabled = when (f[1]) { "1" -> true; "0" -> false; else -> return null }
+            val wd = f[2].toIntOrNull() ?: return null
+            val we = f[3].toIntOrNull() ?: return null
+            val max = f[4].toIntOrNull() ?: return null
+            targets[target] = TargetSettings(enabled, wd, we, max)
+        }
+        return DurableSettings(version, targets, window)
+    }
+
+    // ---- KeyHash (the durable-change unlock verifier) ----
+
+    fun encodeKeyHash(keyHash: KeyHash): String = "${keyHash.salt}|${keyHash.hash}"
+
+    fun decodeKeyHash(raw: String?): KeyHash? {
+        if (raw.isNullOrBlank()) return null
+        val parts = raw.split('|')
+        if (parts.size != 2 || parts[0].isBlank() || parts[1].isBlank()) return null
+        return KeyHash(parts[0], parts[1])
+    }
+
     private fun targetForKey(key: String): Target? = Target.entries.firstOrNull { it.key == key }
 }

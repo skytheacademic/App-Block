@@ -1,14 +1,32 @@
 package com.appblock
 
+import android.content.Context
+import com.appblock.data.PrefsRuleStore
 import com.appblock.engine.DefaultRules
-import com.appblock.engine.Rule
+import com.appblock.engine.DurableSettings
+import com.appblock.engine.RuleSource
+import com.appblock.engine.RuleStore
 
 /**
- * The rule set the running app enforces. Kept out of the pure engine (which stays Android-free and
- * JVM-testable) because it reads [BuildConfig]: the throwaway `debugFast` variant uses 1-minute caps
- * for quick on-device verification, every other build uses the real CONSTRAINTS.md v1.1 caps.
+ * The durable rule set the running app enforces. Reads [BuildConfig] (kept out of the Android-free
+ * engine): the throwaway `debugFast` variant seeds 1-minute caps for quick on-device verification,
+ * every other build seeds the real CONSTRAINTS.md v1.1 caps.
+ *
+ * Rules are now editable + persisted (behind the durable-change lock), so the app reads them through a
+ * [RuleStore] rather than a constant. [seed] is the source-of-truth defaults used on first launch and
+ * whenever [DurableSettings.RULES_VERSION] is bumped (the computer re-seed path).
  */
 object ActiveRules {
-    val rules: List<Rule> =
-        if (BuildConfig.FAST_CAPS) DefaultRules.fastRules else DefaultRules.rules
+
+    /** The defaults for this build variant — what the store seeds from. */
+    val seed: DurableSettings =
+        DurableSettings.from(if (BuildConfig.FAST_CAPS) DefaultRules.fastRules else DefaultRules.rules)
+
+    fun ruleStore(context: Context): RuleStore = PrefsRuleStore(context, seed)
+
+    /** A live view of the persisted rules for [com.appblock.engine.BudgetCoordinator] (re-read each pass). */
+    fun ruleSource(context: Context): RuleSource {
+        val store = ruleStore(context)
+        return RuleSource { store.load().toRules() }
+    }
 }

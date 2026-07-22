@@ -69,6 +69,11 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("com.google.android.material:material:1.12.0")
 
+    // Pure-Java QR encoder (no camera, no Google Play Services, offline) — renders the durable-change
+    // "stash" QR at key setup. Scanning it back is a later on-device convenience; unlocking today is
+    // by entering the code the QR contains. Trust-minimal by design.
+    implementation("com.google.zxing:core:3.5.3")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     testImplementation("junit:junit:4.13.2")

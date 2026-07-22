@@ -44,7 +44,12 @@ class BudgetCoordinator(
     private val clock: EngineClock,
     private val store: EngineStore,
     private val integrity: ClockIntegrity,
-    private val rules: List<Rule> = DefaultRules.rules,
+    /**
+     * Read once per pass so a durable-rule edit (via the gated settings UI) is picked up by the
+     * long-lived service coordinator on its next tick — the same way it re-reads usage from the store.
+     * Defaults to the static [DefaultRules] so existing tests construct it with three args.
+     */
+    private val ruleSource: RuleSource = RuleSource { DefaultRules.rules },
 ) {
     private var currentTarget: Target? = null
     private var lastAccrualElapsedMs: Long = clock.elapsedRealtimeMs()
@@ -75,8 +80,9 @@ class BudgetCoordinator(
     /** Periodic heartbeat while an app is foreground: guard the clocks, advance exceptions, decide. */
     @Synchronized
     fun tick(): Decision {
-        guardClocks()
-        advanceExceptions()
+        val rules = ruleSource.rules()
+        guardClocks(rules)
+        advanceExceptions(rules)
         if (store.loadTamper() != null) {
             // Latched: freeze accrual (the block screen is up; behind it isn't real usage) and block
             // every budgeted target until the wall clock is trustworthy again.
@@ -86,7 +92,7 @@ class BudgetCoordinator(
             return Decision(t, Access.BLOCK)
         }
         bankTime()
-        val decision = decideCurrent()
+        val decision = decideCurrent(rules)
         blockedTarget = if (decision.access == Access.BLOCK) decision.target else null
         return decision
     }
@@ -115,8 +121,9 @@ class BudgetCoordinator(
     /** Per-target standing for the UI. Runs the same guards as [tick] so numbers are fresh + honest. */
     @Synchronized
     fun snapshot(): List<TargetStatus> {
-        guardClocks()
-        advanceExceptions()
+        val rules = ruleSource.rules()
+        guardClocks(rules)
+        advanceExceptions(rules)
         val latched = store.loadTamper() != null
         if (latched) {
             lastAccrualElapsedMs = clock.elapsedRealtimeMs()
@@ -180,7 +187,7 @@ class BudgetCoordinator(
      *     clock is manual.
      * The anchor is persisted so none of this goes blind across process restarts.
      */
-    private fun guardClocks() {
+    private fun guardClocks(rules: List<Rule>) {
         val nowWall = clock.wallClockMs()
         val nowElapsed = clock.elapsedRealtimeMs()
         val boot = integrity.bootCount()
@@ -231,7 +238,7 @@ class BudgetCoordinator(
         accrueCurrent()
     }
 
-    private fun advanceExceptions() {
+    private fun advanceExceptions(rules: List<Rule>) {
         val now = clock.elapsedRealtimeMs()
         val today = DayBoundary.logicalDay(clock.nowLocal())
         for (rule in rules) {
@@ -264,7 +271,7 @@ class BudgetCoordinator(
         store.saveUsage(t, UsageTracker.accrue(store.loadUsage(t), seconds, today))
     }
 
-    private fun decideCurrent(): Decision {
+    private fun decideCurrent(rules: List<Rule>): Decision {
         val t = currentTarget ?: return Decision(null, Access.ALLOW)
         val rule = rules.firstOrNull { it.target == t } ?: return Decision(t, Access.ALLOW)
         val today = DayBoundary.logicalDay(clock.nowLocal())

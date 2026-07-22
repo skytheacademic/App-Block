@@ -71,7 +71,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             clock,
             PrefsEngineStore(this, clock),
             AndroidClockIntegrity(this),
-            ActiveRules.rules,
+            ActiveRules.ruleSource(this),
         )
     }
 

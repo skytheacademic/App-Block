@@ -47,6 +47,7 @@ import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.ExceptionState
 import com.appblock.engine.Target
 import com.appblock.engine.TargetStatus
+import com.appblock.security.LockStore
 import com.appblock.service.AndroidClockIntegrity
 import com.appblock.service.AndroidEngineClock
 import com.appblock.service.Watchdog
@@ -78,12 +79,23 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    HomeScreen(
-                        accessibilityEnabled = accessibilityEnabled.value,
-                        overlayGranted = overlayGranted.value,
-                        onOpenAccessibility = { startActivity(accessibilitySettingsIntent()) },
-                        onOpenOverlay = { startActivity(overlayPermissionIntent(this)) },
-                    )
+                    var showSettings by remember { mutableStateOf(false) }
+                    if (showSettings) {
+                        val ctx = LocalContext.current
+                        SettingsScreen(
+                            ruleStore = remember { ActiveRules.ruleStore(ctx) },
+                            lockStore = remember { LockStore(ctx) },
+                            onBack = { showSettings = false },
+                        )
+                    } else {
+                        HomeScreen(
+                            accessibilityEnabled = accessibilityEnabled.value,
+                            overlayGranted = overlayGranted.value,
+                            onOpenAccessibility = { startActivity(accessibilitySettingsIntent()) },
+                            onOpenOverlay = { startActivity(overlayPermissionIntent(this)) },
+                            onOpenSettings = { showSettings = true },
+                        )
+                    }
                 }
             }
         }
@@ -106,6 +118,7 @@ private fun HomeScreen(
     overlayGranted: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val context = LocalContext.current
     // The UI's own coordinator over the same prefs store the service writes to (one process → shared
@@ -116,9 +129,10 @@ private fun HomeScreen(
             clock,
             PrefsEngineStore(context, clock),
             AndroidClockIntegrity(context),
-            ActiveRules.rules,
+            ActiveRules.ruleSource(context),
         )
     }
+    val ruleStore = remember { ActiveRules.ruleStore(context) }
 
     var statuses by remember { mutableStateOf<List<TargetStatus>>(emptyList()) }
     var tamperReason by remember { mutableStateOf<String?>(null) }
@@ -141,16 +155,25 @@ private fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Text(
-                text = "App-Block",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = "Daily budgets · resets 4am",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text(
+                        text = "App-Block",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        text = "Daily budgets · resets 4am",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = onOpenSettings) { Text("Settings") }
+            }
         }
 
         item {
@@ -180,10 +203,12 @@ private fun HomeScreen(
     }
 
     dialogTarget?.let { status ->
+        val windowMinutes = remember(status) { ruleStore.load().exceptionWindowMinutes }
         ExceptionDialog(
             status = status,
+            windowMinutes = windowMinutes,
             onDismiss = { dialogTarget = null },
-            onConfirm = { extraMinutes, windowMinutes ->
+            onConfirm = { extraMinutes ->
                 coordinator.requestException(status.target, extraMinutes, windowMinutes)
                 dialogTarget = null
             },
@@ -290,12 +315,12 @@ private fun ExceptionLine(status: TargetStatus) {
 @Composable
 private fun ExceptionDialog(
     status: TargetStatus,
+    windowMinutes: Int,
     onDismiss: () -> Unit,
-    onConfirm: (extraMinutes: Int, windowMinutes: Int) -> Unit,
+    onConfirm: (extraMinutes: Int) -> Unit,
 ) {
     val maxExtra = (status.exceptionMaxMinutes - status.normalCapMinutes).coerceAtLeast(EXTRA_STEP)
     var extra by remember { mutableStateOf(EXTRA_STEP.coerceAtMost(maxExtra)) }
-    var window by remember { mutableStateOf(DEFAULT_WINDOW_MINUTES) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -316,11 +341,10 @@ private fun ExceptionDialog(
                     onPlus = { extra = (extra + EXTRA_STEP).coerceAtMost(maxExtra) },
                 )
                 Spacer(Modifier.height(8.dp))
-                Stepper(
-                    label = "For",
-                    value = formatMinutesWindow(window),
-                    onMinus = { window = (window - WINDOW_STEP_MINUTES).coerceAtLeast(WINDOW_STEP_MINUTES) },
-                    onPlus = { window = (window + WINDOW_STEP_MINUTES).coerceAtMost(MAX_WINDOW_MINUTES) },
+                // The window length is a durable pre-set (CONSTRAINTS.md §5) — not chosen here. Only +N is.
+                Text(
+                    text = "Lasts ${formatMinutesWindow(windowMinutes)} once it starts (set in Settings).",
+                    style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
                 Text(
@@ -331,7 +355,7 @@ private fun ExceptionDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onConfirm(extra, window) }) { Text("Start 1-hour wait") }
+            Button(onClick = { onConfirm(extra) }) { Text("Start 1-hour wait") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
@@ -484,6 +508,3 @@ private fun formatMinutesWindow(minutes: Int): String {
 }
 
 private const val EXTRA_STEP = 5
-private const val WINDOW_STEP_MINUTES = 30
-private const val DEFAULT_WINDOW_MINUTES = 60
-private const val MAX_WINDOW_MINUTES = 24 * 60
