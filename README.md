@@ -46,5 +46,10 @@ Still the software-friction tier — force-stop or uninstall defeat it. The opti
   - `data/` — SharedPreferences-backed stores (engine state, durable rules)
   - `util/Permissions.kt` — special-permission checks + Settings intents
 
+## Process & reuse
+- [PLAYBOOK.md](PLAYBOOK.md) — how this project is planned and tracked: gated batches, the
+  progress-map visual, the docs split, and the template patterns worth reusing.
+- This repo doubles as the **base/template for future apps** — fork it and keep the playbook.
+
 ## License
 Personal project — no license granted yet. Add one if you want others to reuse it.

@@ -79,6 +79,11 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions {
+        // Robolectric: real resources + manifest in local unit tests (still JVM-only, no device).
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 dependencies {
@@ -95,11 +100,24 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
 
     // Pure-Java QR encoder (no camera, no Google Play Services, offline) — renders the durable-change
-    // "stash" QR at key setup. Scanning it back is a later on-device convenience; unlocking today is
-    // by entering the code the QR contains. Trust-minimal by design.
+    // "stash" QR at key setup. Trust-minimal by design.
     implementation("com.google.zxing:core:3.5.3")
+    // Embedded zxing camera scanner (still offline, no Play Services): scans the stashed QR back at
+    // unlock time. Typing the code stays as the fallback path.
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Provides the ComponentActivity that createComposeRule() launches; merged into the debug
+    // manifest, which is what Robolectric unit tests run against.
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     testImplementation("junit:junit:4.13.2")
+    // Robolectric UI/worker tests: real Android framework on the JVM — screens and workers get
+    // coverage without a device. SDK pinned in each test via @Config for JDK-17 compatibility.
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("androidx.work:work-testing:2.9.1")
 }

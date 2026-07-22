@@ -1,6 +1,7 @@
 package com.appblock
 
 import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -44,15 +45,18 @@ import com.appblock.engine.DurableUnlockManager
 import com.appblock.engine.DurableUnlockState
 import com.appblock.engine.RuleStore
 import com.appblock.engine.Schedule
+import com.appblock.engine.ScheduleEditorModel
 import com.appblock.engine.Target
 import com.appblock.engine.TargetSettings
-import com.appblock.engine.TimeWindow
+import com.appblock.engine.WindowRule
 import java.time.DayOfWeek
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.GeneratedKey
 import com.appblock.security.LockKeys
 import com.appblock.security.LockStore
 import com.appblock.security.qrBitmap
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.delay
 
 /**
@@ -330,18 +334,16 @@ private fun TargetEditor(
 }
 
 /**
- * A one-window-per-day schedule editor: a "limit to certain hours" toggle, day chips, and a single
- * From/To range applied to the selected days (blocked outside it, blocked entirely on unselected
- * days). The engine model supports richer per-day windows; this v1 UI edits the common single-window
- * shape and shows the first window if a richer schedule was set elsewhere.
+ * Schedule authoring on the engine's full per-day model: a list of window rules, each "these days,
+ * this From→To range". Stepping To past midnight (so To ≤ From) authors an overnight span in one
+ * gesture — [ScheduleEditorModel] compiles it to two engine windows (evening + next-day morning).
+ * Extra rules give different hours on different days, or several windows in one day.
  */
 @Composable
 private fun ScheduleEditor(
     schedule: Schedule?,
     onScheduleChange: (Schedule?) -> Unit,
 ) {
-    val editor = schedule.toEditor()
-
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -349,44 +351,116 @@ private fun ScheduleEditor(
     ) {
         Text("Limit to certain hours", style = MaterialTheme.typography.bodyLarge)
         Switch(
-            checked = editor != null,
+            checked = schedule != null,
             onCheckedChange = { on ->
-                onScheduleChange(if (on) DEFAULT_SCHEDULE_EDITOR.toSchedule() else null)
+                onScheduleChange(if (on) ScheduleEditorModel.toSchedule(listOf(DEFAULT_WINDOW_RULE)) else null)
             },
         )
     }
 
-    if (editor != null) {
-        Spacer(Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            for (day in DayOfWeek.entries) {
-                DayChip(
-                    label = dayLabel(day),
-                    selected = day in editor.days,
-                    onClick = {
-                        val days = if (day in editor.days) editor.days - day else editor.days + day
-                        onScheduleChange(editor.copy(days = days).toSchedule())
-                    },
-                )
-            }
+    if (schedule != null) {
+        // Local authoring state so a half-edited rule (say, no days picked yet — it compiles to
+        // nothing) survives recomposition; re-derived only when the schedule changed underneath us
+        // (Revert, the toggle, an external edit).
+        var rules by remember { mutableStateOf(ScheduleEditorModel.decompose(schedule)) }
+        if (ScheduleEditorModel.toSchedule(rules) != schedule) {
+            rules = ScheduleEditorModel.decompose(schedule)
         }
-        Spacer(Modifier.height(8.dp))
-        IntStepper("From", editor.startMin, formatHm(editor.startMin), 30, 0, editor.endMin - 30) { v ->
-            onScheduleChange(editor.copy(startMin = v).toSchedule())
+
+        fun update(newRules: List<WindowRule>) {
+            rules = newRules
+            onScheduleChange(ScheduleEditorModel.toSchedule(newRules))
         }
-        Spacer(Modifier.height(6.dp))
-        IntStepper("To", editor.endMin, formatHm(editor.endMin), 30, editor.startMin + 30, 24 * 60) { v ->
-            onScheduleChange(editor.copy(endMin = v).toSchedule())
+
+        rules.forEachIndexed { i, rule ->
+            Spacer(Modifier.height(8.dp))
+            WindowRuleEditor(
+                rule = rule,
+                showRemove = rules.size > 1,
+                onChange = { changed -> update(rules.toMutableList().also { it[i] = changed }) },
+                onRemove = { update(rules.filterIndexed { j, _ -> j != i }) },
+            )
         }
+        TextButton(onClick = { update(rules + DEFAULT_WINDOW_RULE) }) { Text("+ Add hours") }
         Text(
-            "Allowed only in this window, on the selected days. Blocked otherwise (and all day on unselected days).",
+            "Allowed only inside these hours on their days. Blocked otherwise — and all day on days no rule covers.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 6.dp),
         )
+    }
+}
+
+/** One window rule: its day chips, a wrapping From/To range, and (if removable) a remove action. */
+@Composable
+private fun WindowRuleEditor(
+    rule: WindowRule,
+    showRemove: Boolean,
+    onChange: (WindowRule) -> Unit,
+    onRemove: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        for (day in DayOfWeek.entries) {
+            DayChip(
+                label = dayLabel(day),
+                selected = day in rule.days,
+                onClick = {
+                    val days = if (day in rule.days) rule.days - day else rule.days + day
+                    onChange(rule.copy(days = days))
+                },
+            )
+        }
+    }
+    if (rule.days.isEmpty()) {
+        Text(
+            "Pick at least one day — with none, this window does nothing.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    ClockStepper("From", rule.startMin, skip = rule.endMin) { onChange(rule.copy(startMin = it)) }
+    Spacer(Modifier.height(6.dp))
+    ClockStepper("To", rule.endMin, skip = rule.startMin) { onChange(rule.copy(endMin = it)) }
+    if (rule.overnight) {
+        Text(
+            "Runs past midnight: ${formatHm(rule.startMin)} until ${formatHm(rule.endMin)} the next morning.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
+    if (showRemove) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = onRemove) { Text("Remove these hours") }
+        }
+    }
+}
+
+/**
+ * A 24-hour clock stepper in 30-min steps that wraps at midnight — stepping To past 23:30 rolls to
+ * 00:00 and onward, which is how an overnight window is authored in one gesture.
+ */
+@Composable
+private fun ClockStepper(label: String, value: Int, skip: Int, onChange: (Int) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = { onChange(ScheduleEditorModel.stepClock(value, -30, skip)) }) { Text("−") }
+            Text(
+                formatHm(value),
+                modifier = Modifier.width(84.dp).padding(horizontal = 8.dp),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            OutlinedButton(onClick = { onChange(ScheduleEditorModel.stepClock(value, +30, skip)) }) { Text("+") }
+        }
     }
 }
 
@@ -476,20 +550,41 @@ private fun StartWindowDialog(
     var code by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
 
+    // Camera path: scan the stashed QR instead of typing its code. The scan screen requests the
+    // CAMERA permission itself on first use; a match starts the wait immediately.
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val scanned = result.contents
+        if (scanned != null) {
+            code = scanned
+            if (verify(scanned)) onVerified() else error = true
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Start change window") },
         text = {
             Column {
                 Text(
-                    "Enter the code from your stashed QR to start the 2-hour wait. When it's up you'll get a notification and a 15-minute window for one change.",
+                    "Scan your stashed QR (or type its code) to start the 2-hour wait. When it's up you'll get a notification and a 15-minute window for one change.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        scanLauncher.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setPrompt("Point the camera at your stashed key QR")
+                                .setBeepEnabled(false),
+                        )
+                    },
+                ) { Text("Scan the stashed QR") }
+                Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = code,
                     onValueChange = { code = it; error = false },
-                    label = { Text("Key code") },
+                    label = { Text("Key code (typed fallback)") },
                     singleLine = true,
                     isError = error,
                 )
@@ -532,24 +627,8 @@ private fun formatHms(ms: Long): String {
 
 // ---- schedule editor helpers ----
 
-/** The single-window-per-day shape this UI edits: which days, and one From/To range. */
-private data class ScheduleEditorState(val days: Set<DayOfWeek>, val startMin: Int, val endMin: Int)
-
-private val DEFAULT_SCHEDULE_EDITOR = ScheduleEditorState(DayOfWeek.entries.toSet(), 18 * 60, 20 * 60)
-
-/** Read the editor shape out of a [Schedule] (null → no schedule; first window is the representative). */
-private fun Schedule?.toEditor(): ScheduleEditorState? {
-    if (this == null) return null
-    val firstWindow = allowedByDay.values.firstOrNull { it.isNotEmpty() }?.firstOrNull()
-    return ScheduleEditorState(
-        days = allowedByDay.filterValues { it.isNotEmpty() }.keys,
-        startMin = firstWindow?.startMinuteOfDay ?: DEFAULT_SCHEDULE_EDITOR.startMin,
-        endMin = firstWindow?.endMinuteOfDay ?: DEFAULT_SCHEDULE_EDITOR.endMin,
-    )
-}
-
-private fun ScheduleEditorState.toSchedule(): Schedule =
-    Schedule(days.associateWith { listOf(TimeWindow(startMin, endMin)) })
+/** The starter rule when a schedule is first toggled on: every day, 18:00–20:00. */
+private val DEFAULT_WINDOW_RULE = WindowRule(DayOfWeek.entries.toSet(), 18 * 60, 20 * 60)
 
 private fun dayLabel(day: DayOfWeek): String = when (day) {
     DayOfWeek.MONDAY -> "M"
