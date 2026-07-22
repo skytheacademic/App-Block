@@ -6,6 +6,7 @@ import com.appblock.BuildConfig
 import com.appblock.engine.DurableUnlockManager
 import com.appblock.engine.DurableUnlockState
 import com.appblock.engine.EngineCodec
+import com.appblock.engine.UnlockCategory
 import com.appblock.service.AndroidClockIntegrity
 import com.appblock.service.UnlockWindowWorker
 
@@ -34,17 +35,17 @@ class DurableUnlockStore(context: Context) {
 }
 
 /**
- * Android orchestration of the 2-hour, single-use change window (CONSTRAINTS.md §6, 2026-07-22): ticks
- * the state off the monotonic clock + boot count, persists it, and schedules / cancels the "window is
- * open" notification. The throwaway `debugFast` build uses short durations so the whole flow can be
- * verified on-device in minutes instead of hours.
+ * Android orchestration of the delayed, single-use change window (CONSTRAINTS.md §6, 2026-07-22):
+ * ticks the state off the monotonic clock + boot count, persists it, and schedules / cancels the
+ * "window is open" notification. The wait is per-category (apps 2 h · websites 72 h, §2). The
+ * throwaway `debugFast` build uses short durations so the whole flow can be verified on-device in
+ * minutes instead of hours/days.
  */
 class DurableUnlockController(private val context: Context) {
 
     private val store = DurableUnlockStore(context)
     private val integrity = AndroidClockIntegrity(context)
 
-    private val waitMs = if (BuildConfig.FAST_CAPS) FAST_WAIT_MS else DurableUnlockManager.DEFAULT_WAIT_MS
     private val windowMs = if (BuildConfig.FAST_CAPS) FAST_WINDOW_MS else DurableUnlockManager.DEFAULT_WINDOW_MS
 
     /** The current state, advanced past any elapsed deadline / reboot and persisted. */
@@ -55,13 +56,20 @@ class DurableUnlockController(private val context: Context) {
         return next
     }
 
+    /** Any window open, either category — see [DurableUnlockManager.isOpen] (stand-down concerns). */
     fun isOpen(): Boolean = state() is DurableUnlockState.Open
 
-    /** Start the 2-hour wait (call only after the stashed key verified) and schedule the notification. */
-    fun request() {
+    /** Whether a change of [category] is authorized right now — the open window must match. */
+    fun isOpenFor(category: UnlockCategory): Boolean =
+        DurableUnlockManager.isOpenFor(state(), category)
+
+    /** Start the per-category wait (call only after the stashed key verified) + schedule the notification. */
+    fun request(category: UnlockCategory = UnlockCategory.APPS) {
+        val waitMs = waitMsFor(category)
         val pending = DurableUnlockManager.request(
             SystemClock.elapsedRealtime(),
             integrity.bootCount(),
+            category,
             waitMs,
             windowMs,
         )
@@ -78,9 +86,20 @@ class DurableUnlockController(private val context: Context) {
     /** Cancel a wait/window without making a change (tightening direction — always allowed). */
     fun cancel() = consume()
 
+    private fun waitMsFor(category: UnlockCategory): Long =
+        if (BuildConfig.FAST_CAPS) {
+            when (category) {
+                UnlockCategory.APPS -> FAST_WAIT_MS
+                UnlockCategory.WEBSITES -> FAST_WEBSITES_WAIT_MS
+            }
+        } else {
+            category.defaultWaitMs
+        }
+
     companion object {
         /** Fast-build durations so the flow is verifiable on-device without waiting hours. */
-        const val FAST_WAIT_MS = 2L * 60L * 1000L      // 2-minute wait
-        const val FAST_WINDOW_MS = 60L * 1000L         // 1-minute window
+        const val FAST_WAIT_MS = 2L * 60L * 1000L           // apps: 2-minute wait
+        const val FAST_WEBSITES_WAIT_MS = 4L * 60L * 1000L  // websites: 4 min — visibly longer, proves the category wiring
+        const val FAST_WINDOW_MS = 60L * 1000L              // 1-minute window
     }
 }

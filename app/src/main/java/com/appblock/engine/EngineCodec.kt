@@ -149,17 +149,20 @@ object EngineCodec {
         Schedule(map)
     }
 
-    // ---- DurableUnlockState (the 2-hour, single-use change window) ----
+    // ---- DurableUnlockState (the delayed, single-use change window) ----
     //
-    // Formats: `locked` · `pending|activeAt|windowEnd|bootCount` · `open|windowEnd|bootCount`.
-    // Anything malformed decodes to Locked — a lost unlock state must fail *closed* (no change window).
+    // Formats: `locked` · `pending|activeAt|windowEnd|bootCount|category` ·
+    // `open|windowEnd|bootCount|category`. The category key is the trailing field (added with the
+    // per-category waits); the older, shorter forms without it still decode — as APPS, the only
+    // category that existed when they were written. Anything malformed (including an unknown
+    // category) decodes to Locked — a lost unlock state must fail *closed* (no change window).
 
     fun encodeUnlock(state: DurableUnlockState): String = when (state) {
         is DurableUnlockState.Locked -> "locked"
         is DurableUnlockState.Pending ->
-            "pending|${state.activeAtElapsedMs}|${state.windowEndElapsedMs}|${state.bootCount}"
+            "pending|${state.activeAtElapsedMs}|${state.windowEndElapsedMs}|${state.bootCount}|${state.category.key}"
         is DurableUnlockState.Open ->
-            "open|${state.windowEndElapsedMs}|${state.bootCount}"
+            "open|${state.windowEndElapsedMs}|${state.bootCount}|${state.category.key}"
     }
 
     fun decodeUnlock(raw: String?): DurableUnlockState {
@@ -167,21 +170,27 @@ object EngineCodec {
         val parts = raw.split('|')
         return when (parts[0]) {
             "pending" -> {
-                if (parts.size != 4) return DurableUnlockState.Locked
+                if (parts.size != 4 && parts.size != 5) return DurableUnlockState.Locked
                 val activeAt = parts[1].toLongOrNull() ?: return DurableUnlockState.Locked
                 val windowEnd = parts[2].toLongOrNull() ?: return DurableUnlockState.Locked
                 val boot = parts[3].toIntOrNull() ?: return DurableUnlockState.Locked
-                DurableUnlockState.Pending(activeAt, windowEnd, boot)
+                val category = unlockCategory(parts.getOrNull(4)) ?: return DurableUnlockState.Locked
+                DurableUnlockState.Pending(activeAt, windowEnd, boot, category)
             }
             "open" -> {
-                if (parts.size != 3) return DurableUnlockState.Locked
+                if (parts.size != 3 && parts.size != 4) return DurableUnlockState.Locked
                 val windowEnd = parts[1].toLongOrNull() ?: return DurableUnlockState.Locked
                 val boot = parts[2].toIntOrNull() ?: return DurableUnlockState.Locked
-                DurableUnlockState.Open(windowEnd, boot)
+                val category = unlockCategory(parts.getOrNull(3)) ?: return DurableUnlockState.Locked
+                DurableUnlockState.Open(windowEnd, boot, category)
             }
             else -> DurableUnlockState.Locked
         }
     }
+
+    /** Absent field = a pre-category string = APPS; a present-but-unknown key = null (fail closed). */
+    private fun unlockCategory(field: String?): UnlockCategory? =
+        if (field == null) UnlockCategory.APPS else UnlockCategory.forKey(field)
 
     // ---- KeyHash (the durable-change unlock verifier) ----
 
