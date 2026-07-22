@@ -19,6 +19,7 @@ import com.appblock.R
 import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
 import com.appblock.engine.AppTargets
+import com.appblock.engine.BlockReason
 import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
 import com.appblock.engine.SettingsWatch
@@ -51,6 +52,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     private var overlayView: View? = null
+    private var overlayReason: BlockReason? = null
     private lateinit var coordinator: BudgetCoordinator
     private lateinit var unlockController: DurableUnlockController
 
@@ -82,6 +84,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             PrefsEngineStore(this, clock),
             AndroidClockIntegrity(this),
             ActiveRules.ruleSource(this),
+            exceptionWaitMs = ActiveRules.exceptionWaitMs,
         )
         unlockController = DurableUnlockController(this)
     }
@@ -186,7 +189,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     private fun applyDecision(decision: Decision) {
         if (decision.access == Access.BLOCK && decision.target != null) {
-            val overlayUp = showOverlay(decision.target)
+            val overlayUp = showOverlay(decision.target, decision.reason)
             if (!overlayUp) {
                 // Overlay permission revoked or addView failed: blocking must not silently vanish.
                 performGlobalAction(GLOBAL_ACTION_HOME)
@@ -208,18 +211,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /** Returns true when the block overlay is up (already or newly added). */
-    private fun showOverlay(target: Target): Boolean {
-        if (overlayView != null) return true
+    private fun showOverlay(target: Target, reason: BlockReason?): Boolean {
+        overlayView?.let { view ->
+            if (reason != overlayReason) {
+                // The overlay outlived its original cause (e.g. budget block rolled into a schedule
+                // block) — refresh the message in place instead of showing a stale reason.
+                view.findViewById<TextView>(R.id.block_message).text = blockMessage(target, reason)
+                overlayReason = reason
+            }
+            return true
+        }
         if (!Settings.canDrawOverlays(this)) return false
 
         val view = LayoutInflater.from(this).inflate(R.layout.overlay_block, null)
-        val tamper = coordinator.tamperReason() != null
-        view.findViewById<TextView>(R.id.block_message).text =
-            if (tamper) {
-                getString(R.string.block_message_tamper)
-            } else {
-                getString(R.string.block_message_budget, labelFor(target))
-            }
+        view.findViewById<TextView>(R.id.block_message).text = blockMessage(target, reason)
         view.findViewById<Button>(R.id.block_close).setOnClickListener {
             hideOverlay()
             performGlobalAction(GLOBAL_ACTION_HOME)
@@ -234,14 +239,26 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         )
 
         runCatching { windowManager.addView(view, params) }
-            .onSuccess { overlayView = view }
+            .onSuccess {
+                overlayView = view
+                overlayReason = reason
+            }
         return overlayView != null
+    }
+
+    /** The overlay's explanation, matched to why the engine blocked (reason plumbing, TODO P2). */
+    private fun blockMessage(target: Target, reason: BlockReason?): CharSequence = when (reason) {
+        BlockReason.TAMPER -> getString(R.string.block_message_tamper)
+        BlockReason.SCHEDULE -> getString(R.string.block_message_schedule, labelFor(target))
+        BlockReason.HARD_BLOCK -> getString(R.string.block_message)
+        else -> getString(R.string.block_message_budget, labelFor(target))
     }
 
     private fun hideOverlay() {
         overlayView?.let { view ->
             runCatching { windowManager.removeView(view) }
             overlayView = null
+            overlayReason = null
         }
     }
 

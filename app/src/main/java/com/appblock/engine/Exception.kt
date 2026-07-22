@@ -38,19 +38,24 @@ object ExceptionManager {
     /** A window can be at most 1 day (and is cut short at the 4am day roll regardless). */
     const val MAX_WINDOW_MINUTES: Int = 24 * 60
 
-    /** Start the 1-hour wait for a bounded raise. [windowMinutes] is clamped to 1 day. */
+    /**
+     * Start the wait for a bounded raise. [windowMinutes] is clamped to 1 day. [waitMs] is injected
+     * (like [DurableUnlockManager.request]) so the throwaway `debugFast` build can use a short wait
+     * and exception *activation* is verifiable on-device; real builds keep the 1-hour [WAIT_MS].
+     */
     fun request(
         target: Target,
         extraMinutes: Int,
         windowMinutes: Int,
         nowElapsedMs: Long,
         day: LocalDate,
+        waitMs: Long = WAIT_MS,
     ): ExceptionState.Pending =
         ExceptionState.Pending(
             target = target,
             extraMinutes = extraMinutes.coerceAtLeast(0),
             windowMinutes = windowMinutes.coerceIn(1, MAX_WINDOW_MINUTES),
-            activeAtElapsedMs = nowElapsedMs + WAIT_MS,
+            activeAtElapsedMs = nowElapsedMs + waitMs,
             dayKey = day,
         )
 

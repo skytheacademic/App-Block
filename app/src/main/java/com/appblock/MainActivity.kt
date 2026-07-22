@@ -130,6 +130,7 @@ private fun HomeScreen(
             PrefsEngineStore(context, clock),
             AndroidClockIntegrity(context),
             ActiveRules.ruleSource(context),
+            exceptionWaitMs = ActiveRules.exceptionWaitMs,
         )
     }
     val ruleStore = remember { ActiveRules.ruleStore(context) }

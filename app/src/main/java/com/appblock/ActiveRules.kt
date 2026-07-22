@@ -4,6 +4,7 @@ import android.content.Context
 import com.appblock.data.PrefsRuleStore
 import com.appblock.engine.DefaultRules
 import com.appblock.engine.DurableSettings
+import com.appblock.engine.ExceptionManager
 import com.appblock.engine.RuleSource
 import com.appblock.engine.RuleStore
 
@@ -21,6 +22,10 @@ object ActiveRules {
     /** The defaults for this build variant — what the store seeds from. */
     val seed: DurableSettings =
         DurableSettings.from(if (BuildConfig.FAST_CAPS) DefaultRules.fastRules else DefaultRules.rules)
+
+    /** Exception wait: 1 hour for real builds; `debugFast` shrinks it to 1 min so activation is testable. */
+    val exceptionWaitMs: Long =
+        if (BuildConfig.FAST_CAPS) 60_000L else ExceptionManager.WAIT_MS
 
     fun ruleStore(context: Context): RuleStore = PrefsRuleStore(context, seed)
 

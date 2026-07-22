@@ -3,8 +3,11 @@ package com.appblock.engine
 import java.time.LocalDate
 import kotlin.math.abs
 
-/** The decision for the app currently on screen. [target] is null when the foreground isn't budgeted. */
-data class Decision(val target: Target?, val access: Access)
+/**
+ * The decision for the app currently on screen. [target] is null when the foreground isn't budgeted;
+ * [reason] is non-null exactly when [access] is BLOCK, so the overlay can say *why*.
+ */
+data class Decision(val target: Target?, val access: Access, val reason: BlockReason? = null)
 
 /** A UI-facing snapshot of one target's standing today. All times already resolved to plain numbers. */
 data class TargetStatus(
@@ -52,6 +55,8 @@ class BudgetCoordinator(
      * Defaults to the static [DefaultRules] so existing tests construct it with three args.
      */
     private val ruleSource: RuleSource = RuleSource { DefaultRules.rules },
+    /** Wait before an exception activates — injected so `debugFast` can shrink it (ActiveRules). */
+    private val exceptionWaitMs: Long = ExceptionManager.WAIT_MS,
 ) {
     private var currentTarget: Target? = null
     private var lastAccrualElapsedMs: Long = clock.elapsedRealtimeMs()
@@ -91,7 +96,7 @@ class BudgetCoordinator(
             lastAccrualElapsedMs = clock.elapsedRealtimeMs()
             val t = currentTarget ?: return Decision(null, Access.ALLOW)
             blockedTarget = t
-            return Decision(t, Access.BLOCK)
+            return Decision(t, Access.BLOCK, BlockReason.TAMPER)
         }
         bankTime()
         val decision = decideCurrent(rules)
@@ -99,7 +104,7 @@ class BudgetCoordinator(
         return decision
     }
 
-    /** Start the 1-hour wait for a bounded raise on [target]. Persisted so the service picks it up. */
+    /** Start the exception wait for a bounded raise on [target]. Persisted so the service picks it up. */
     @Synchronized
     fun requestException(target: Target, extraMinutes: Int, windowMinutes: Int) {
         store.saveException(
@@ -110,6 +115,7 @@ class BudgetCoordinator(
                 windowMinutes,
                 clock.elapsedRealtimeMs(),
                 DayBoundary.logicalDay(clock.nowLocal()),
+                waitMs = exceptionWaitMs,
             ),
         )
     }
@@ -281,9 +287,16 @@ class BudgetCoordinator(
         val rule = rules.firstOrNull { it.target == t } ?: return Decision(t, Access.ALLOW)
         val now = clock.nowLocal()
         // Schedule gate first: outside its allowed hours, the app is blocked regardless of budget.
-        if (!PolicyEngine.scheduleAllows(rule.schedule, now)) return Decision(t, Access.BLOCK)
+        if (!PolicyEngine.scheduleAllows(rule.schedule, now)) {
+            return Decision(t, Access.BLOCK, BlockReason.SCHEDULE)
+        }
         val access = PolicyEngine.decide(rule, store.loadUsage(t), store.loadException(t), DayBoundary.logicalDay(now))
-        return Decision(t, access)
+        val reason = when {
+            access != Access.BLOCK -> null
+            rule.mode is RuleMode.HardBlock -> BlockReason.HARD_BLOCK
+            else -> BlockReason.BUDGET
+        }
+        return Decision(t, access, reason)
     }
 
     private companion object {

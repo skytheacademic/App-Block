@@ -17,6 +17,14 @@ class ExceptionManagerTest {
         assertTrue(ExceptionManager.tick(pending, start + ExceptionManager.WAIT_MS, friday) is ExceptionState.Active)
     }
 
+    @Test fun `injected short wait is honored (debugFast path)`() {
+        val pending = ExceptionManager.request(
+            Target.TIKTOK, extraMinutes = 5, windowMinutes = 10, nowElapsedMs = 0L, day = friday, waitMs = 2_000L,
+        )
+        assertTrue(ExceptionManager.tick(pending, 1_999L, friday) is ExceptionState.Pending)
+        assertTrue(ExceptionManager.tick(pending, 2_000L, friday) is ExceptionState.Active)
+    }
+
     @Test fun `window is anchored to the end of the wait`() {
         val pending = ExceptionManager.request(Target.TIKTOK, extraMinutes = 20, windowMinutes = 30, nowElapsedMs = 0L, day = friday)
         val active = ExceptionManager.tick(pending, ExceptionManager.WAIT_MS, friday) as ExceptionState.Active

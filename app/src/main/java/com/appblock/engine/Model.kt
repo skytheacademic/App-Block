@@ -17,6 +17,9 @@ enum class DayType { WEEKDAY, WEEKEND }
 /** The allow/block outcome for whatever surface is on screen. */
 enum class Access { ALLOW, BLOCK }
 
+/** Why a BLOCK decision blocked — drives which message the overlay shows. */
+enum class BlockReason { BUDGET, SCHEDULE, TAMPER, HARD_BLOCK }
+
 /** How a target is limited. */
 sealed interface RuleMode {
 

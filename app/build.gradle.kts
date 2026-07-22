@@ -1,7 +1,18 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// Release signing: keystore + credentials live OUTSIDE git (*.jks and keystore.properties are
+// gitignored; backup copy in the Dropbox planning folder, see keystore-backup/). On a machine
+// without the file — fresh clone — release still builds, just unsigned, so nothing else breaks.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) FileInputStream(f).use { load(it) }
 }
 
 android {
@@ -19,6 +30,17 @@ android {
         buildConfigField("boolean", "FAST_CAPS", "false")
     }
 
+    signingConfigs {
+        if (keystoreProps.isNotEmpty()) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             // R8 on: smaller APK, and stripped metadata makes on-device bypass tinkering harder.
@@ -27,6 +49,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (keystoreProps.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         // Throwaway QA build: 1-minute caps so the block can be verified in ~90s instead of 15 min.
         // Its own applicationId so `adb install -r` can NEVER swap it in over the strict install

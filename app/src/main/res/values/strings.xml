@@ -5,6 +5,7 @@
     <string name="block_title">Blocked</string>
     <string name="block_message">You chose to block this app. Take a breath and go back.</string>
     <string name="block_message_budget">You\'ve used up today\'s time for %1$s. It resets at 4am.</string>
+    <string name="block_message_schedule">%1$s is outside its allowed hours right now. It opens again in its next window.</string>
     <string name="block_message_tamper">Clock tampering detected. Everything stays blocked until automatic date &amp; time is back on in Settings.</string>
     <string name="block_go_back">Go back</string>
     <string name="watchdog_channel_name">Blocking health</string>
