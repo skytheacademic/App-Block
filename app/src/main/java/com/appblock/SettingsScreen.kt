@@ -1,5 +1,6 @@
 package com.appblock
 
+import android.os.SystemClock
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -31,27 +32,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.appblock.engine.ChangeDirection
 import com.appblock.engine.ChangeResult
 import com.appblock.engine.DurableChangeGate
-import com.appblock.engine.DurableSettings
+import com.appblock.engine.DurableUnlockManager
+import com.appblock.engine.DurableUnlockState
 import com.appblock.engine.RuleStore
 import com.appblock.engine.Target
 import com.appblock.engine.TargetSettings
+import com.appblock.security.DurableUnlockController
 import com.appblock.security.GeneratedKey
 import com.appblock.security.LockKeys
 import com.appblock.security.LockStore
-import com.appblock.security.UnlockSession
 import com.appblock.security.qrBitmap
 import kotlinx.coroutines.delay
 
 /**
- * The gated durable-settings editor (CONSTRAINTS.md §6). You can always *tighten* (lower a cap, turn a
- * block on, shorten the exception window) — those save immediately. *Loosening* anything requires an
- * active unlock session opened by entering your stashed key. The gate is enforced at save via
- * [DurableChangeGate], and also surfaced live so the intent is clear before you tap Save.
+ * The gated durable-settings editor (CONSTRAINTS.md §6, model revised 2026-07-22). *Tightening* saves
+ * immediately, no key, no wait. *Loosening* requires the delayed single-use window: enter the stashed
+ * key → **2-hour wait** → **15-minute window** (announced by a notification) → one Accept, which
+ * applies the change and relocks. Miss it, or reboot during the wait, and the cycle restarts.
  */
 @Composable
 fun SettingsScreen(
@@ -59,26 +62,39 @@ fun SettingsScreen(
     lockStore: LockStore,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val unlockController = remember { DurableUnlockController(context) }
+
     var refresh by remember { mutableStateOf(0) }
     val current by remember(refresh) { mutableStateOf(ruleStore.load()) }
     var draft by remember(current) { mutableStateOf(current) }
     val configured by remember(refresh) { mutableStateOf(lockStore.isConfigured()) }
 
+    var unlockState by remember { mutableStateOf<DurableUnlockState>(DurableUnlockState.Locked) }
+    var remainingMs by remember { mutableStateOf(0L) }
     var showSetup by remember { mutableStateOf(false) }
-    var showUnlock by remember { mutableStateOf(false) }
+    var showStart by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
 
-    // Re-tick each second so the unlock countdown updates and the gate hint stays live.
-    var nowTick by remember { mutableStateOf(0L) }
+    // Advance + persist the unlock state each second; keep the live countdown fresh.
     LaunchedEffect(Unit) {
         while (true) {
-            nowTick = UnlockSession.remainingMs()
+            val s = unlockController.state()
+            unlockState = s
+            remainingMs = when (s) {
+                is DurableUnlockState.Pending -> DurableUnlockManager.msUntilOpen(s, SystemClock.elapsedRealtime())
+                is DurableUnlockState.Open -> DurableUnlockManager.msUntilClose(s, SystemClock.elapsedRealtime())
+                else -> 0L
+            }
             delay(1_000)
         }
     }
-    val unlocked = UnlockSession.isUnlocked()
+
+    val open = unlockState is DurableUnlockState.Open
     val direction = DurableChangeGate.classify(current, draft)
     val dirty = draft != current
+    val loosening = direction == ChangeDirection.LOOSEN
+    val canSave = dirty && (!loosening || open)
 
     fun updateTarget(target: Target, block: (TargetSettings) -> TargetSettings) {
         val ts = draft.targets[target] ?: return
@@ -98,20 +114,24 @@ fun SettingsScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "Settings",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Medium,
-                )
+                Text("Settings", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
                 TextButton(onClick = onBack) { Text("Done") }
             }
         }
 
-        item { LockStatusCard(configured, unlocked, onCreateKey = { showSetup = true }, onUnlock = { showUnlock = true }, onRelock = { UnlockSession.relock(); message = null }) }
+        item {
+            LockStatusCard(
+                configured = configured,
+                state = unlockState,
+                remainingMs = remainingMs,
+                onCreateKey = { showSetup = true },
+                onStart = { showStart = true },
+                onCancel = { unlockController.cancel(); message = "Change window cancelled." },
+            )
+        }
 
         message?.let { item { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) } }
 
-        // Per-target editors.
         for (target in Target.entries) {
             val ts = draft.targets[target] ?: continue
             item(key = "target_${target.key}") {
@@ -150,31 +170,34 @@ fun SettingsScreen(
         }
 
         item {
-            if (dirty && direction == ChangeDirection.LOOSEN && !unlocked) {
-                Text(
-                    "This loosens your limits — unlock with your stashed key to save.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
+            if (dirty && loosening && !open) {
+                val hint = when (unlockState) {
+                    is DurableUnlockState.Pending ->
+                        "This loosens your limits — it'll save once your window opens (in ${formatHms(remainingMs)})."
+                    else ->
+                        "This loosens your limits — start the change window above (2-hour wait) to save it."
+                }
+                Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(
-                    enabled = dirty,
+                    enabled = canSave,
                     onClick = {
-                        when (val result = DurableChangeGate.applyChange(current, draft, UnlockSession.isUnlocked())) {
+                        when (val result = DurableChangeGate.applyChange(current, draft, open)) {
                             is ChangeResult.Applied -> {
                                 ruleStore.save(result.settings)
+                                if (loosening) {
+                                    unlockController.consume()   // single-use: this was your one change
+                                    message = "Saved. That was your one change — it's locked again."
+                                } else {
+                                    message = "Saved."
+                                }
                                 refresh++
-                                message = "Saved."
                             }
-                            is ChangeResult.Blocked -> {
-                                message = null
-                                showUnlock = true
-                            }
+                            is ChangeResult.Blocked -> message = "That loosens your limits — start the change window first."
                         }
                     },
-                ) { Text(if (direction == ChangeDirection.LOOSEN && !unlocked) "Unlock to save" else "Save") }
+                ) { Text(if (loosening) "Accept one change" else "Save") }
                 OutlinedButton(enabled = dirty, onClick = { draft = current; message = null }) { Text("Revert") }
             }
         }
@@ -192,15 +215,15 @@ fun SettingsScreen(
         )
     }
 
-    if (showUnlock) {
-        UnlockDialog(
+    if (showStart) {
+        StartWindowDialog(
             verify = { code -> lockStore.verify(code) },
-            onUnlocked = {
-                UnlockSession.unlock()
-                showUnlock = false
-                message = "Unlocked for ${UnlockSession.DURATION_MS / 60_000} minutes."
+            onVerified = {
+                unlockController.request()
+                showStart = false
+                message = "Wait started. You'll get a notification when your change window opens."
             },
-            onDismiss = { showUnlock = false },
+            onDismiss = { showStart = false },
         )
     }
 }
@@ -208,10 +231,11 @@ fun SettingsScreen(
 @Composable
 private fun LockStatusCard(
     configured: Boolean,
-    unlocked: Boolean,
+    state: DurableUnlockState,
+    remainingMs: Long,
     onCreateKey: () -> Unit,
-    onUnlock: () -> Unit,
-    onRelock: () -> Unit,
+    onStart: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -226,23 +250,32 @@ private fun LockStatusCard(
                     )
                     Button(onClick = onCreateKey) { Text("Create lock key") }
                 }
-                unlocked -> {
+                state is DurableUnlockState.Pending -> {
                     Text(
-                        "Unlocked — ${formatMillis(UnlockSession.remainingMs())} left to make loosening changes.",
+                        "Change window opens in ${formatHms(remainingMs)}. Blocks stay on until then; you'll get a notification.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
+                    OutlinedButton(onClick = onCancel) { Text("Cancel wait") }
+                }
+                state is DurableUnlockState.Open -> {
+                    Text(
+                        "Open — ${formatHms(remainingMs)} left. Make ONE change below and tap Accept; it locks again after.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(vertical = 6.dp),
                     )
-                    OutlinedButton(onClick = onRelock) { Text("Relock now") }
+                    OutlinedButton(onClick = onCancel) { Text("Cancel window") }
                 }
                 else -> {
                     Text(
-                        "Locked. Tightening saves freely; loosening needs your stashed key.",
+                        "Locked. Tightening saves freely; loosening needs a 2-hour wait started with your stashed key.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(vertical = 6.dp),
                     )
-                    OutlinedButton(onClick = onUnlock) { Text("Unlock") }
+                    OutlinedButton(onClick = onStart) { Text("Start change window") }
                 }
             }
         }
@@ -329,11 +362,7 @@ private fun KeySetupDialog(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
-                Image(
-                    bitmap = qr.asImageBitmap(),
-                    contentDescription = "Lock key QR code",
-                    modifier = Modifier.size(220.dp),
-                )
+                Image(bitmap = qr.asImageBitmap(), contentDescription = "Lock key QR code", modifier = Modifier.size(220.dp))
                 Spacer(Modifier.height(12.dp))
                 Text("Code (the QR's contents):", style = MaterialTheme.typography.labelMedium)
                 Text(generated.code, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
@@ -351,9 +380,9 @@ private fun KeySetupDialog(
 }
 
 @Composable
-private fun UnlockDialog(
+private fun StartWindowDialog(
     verify: (String) -> Boolean,
-    onUnlocked: () -> Unit,
+    onVerified: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var code by remember { mutableStateOf("") }
@@ -361,11 +390,11 @@ private fun UnlockDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Unlock to loosen") },
+        title = { Text("Start change window") },
         text = {
             Column {
                 Text(
-                    "Enter the code from your stashed QR. Opens a ${UnlockSession.DURATION_MS / 60_000}-minute window to make loosening changes.",
+                    "Enter the code from your stashed QR to start the 2-hour wait. When it's up you'll get a notification and a 15-minute window for one change.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
@@ -382,7 +411,7 @@ private fun UnlockDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { if (verify(code)) onUnlocked() else error = true }) { Text("Unlock") }
+            Button(onClick = { if (verify(code)) onVerified() else error = true }) { Text("Start 2-hour wait") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -404,7 +433,11 @@ private fun formatWindow(minutes: Int): String {
     }
 }
 
-private fun formatMillis(ms: Long): String {
-    val totalSeconds = (ms / 1000).coerceAtLeast(0)
-    return "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
+/** h:mm:ss when there are whole hours left, else mm:ss. */
+private fun formatHms(ms: Long): String {
+    val s = (ms / 1000).coerceAtLeast(0)
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val sec = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
 }

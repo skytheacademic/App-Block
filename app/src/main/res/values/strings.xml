@@ -11,4 +11,7 @@
     <string name="watchdog_title">App-Block is not protecting you</string>
     <string name="watchdog_text_dead">The blocking service died (battery optimization or a crash). Open App-Block to bring it back.</string>
     <string name="watchdog_text_disabled">The Accessibility service is switched off, so nothing is blocked. Re-enable it in Settings.</string>
+    <string name="unlock_channel_name">Change window</string>
+    <string name="unlock_title">Your settings window is open</string>
+    <string name="unlock_text">You have 15 minutes to make one change to your limits, then it locks again.</string>
 </resources>

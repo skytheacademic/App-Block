@@ -1,7 +1,6 @@
 package com.appblock.security
 
 import android.content.Context
-import android.os.SystemClock
 import com.appblock.engine.EngineCodec
 import com.appblock.engine.Hasher
 import com.appblock.engine.KeyAuthority
@@ -94,33 +93,5 @@ class LockStore(context: Context) {
     private companion object {
         const val PREFS = "appblock_lock"
         const val KEY_HASH = "durable_key_hash"
-    }
-}
-
-/**
- * The unlock window opened by a successful key verification. In-memory and process-global on purpose:
- * it dies with the process, so the app relocks whenever it's killed — a durable/persisted session
- * would itself be a bypass surface. Timed off the monotonic clock so a wall-clock change can't extend
- * it.
- */
-object UnlockSession {
-
-    /** How long durable edits stay unlocked after a successful key entry. */
-    const val DURATION_MS: Long = 5 * 60 * 1000L
-
-    @Volatile
-    private var unlockedUntilElapsedMs: Long = 0L
-
-    fun unlock() {
-        unlockedUntilElapsedMs = SystemClock.elapsedRealtime() + DURATION_MS
-    }
-
-    fun isUnlocked(): Boolean = SystemClock.elapsedRealtime() < unlockedUntilElapsedMs
-
-    /** Ms left in the current unlock window (0 if relocked). */
-    fun remainingMs(): Long = (unlockedUntilElapsedMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-
-    fun relock() {
-        unlockedUntilElapsedMs = 0L
     }
 }

@@ -34,6 +34,17 @@ class DurableCodecTest {
         assertEquals(setOf(Target.TIKTOK), decoded!!.targets.keys)
     }
 
+    @Test fun `unlock state round-trips and fails closed on garbage`() {
+        val pending = DurableUnlockState.Pending(activeAtElapsedMs = 1000L, windowEndElapsedMs = 2000L, bootCount = 7)
+        assertEquals(pending, EngineCodec.decodeUnlock(EngineCodec.encodeUnlock(pending)))
+        val open = DurableUnlockState.Open(windowEndElapsedMs = 2000L, bootCount = 7)
+        assertEquals(open, EngineCodec.decodeUnlock(EngineCodec.encodeUnlock(open)))
+        assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock(EngineCodec.encodeUnlock(DurableUnlockState.Locked)))
+        assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock(null))
+        assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock("pending|1000|2000")) // too short
+        assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock("garbage"))
+    }
+
     @Test fun `key hash round-trips and rejects malformed`() {
         val kh = KeyHash(salt = "abc123", hash = "deadbeef")
         assertEquals(kh, EngineCodec.decodeKeyHash(EngineCodec.encodeKeyHash(kh)))

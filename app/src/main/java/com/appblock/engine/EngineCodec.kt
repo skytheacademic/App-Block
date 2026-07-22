@@ -107,6 +107,40 @@ object EngineCodec {
         return DurableSettings(version, targets, window)
     }
 
+    // ---- DurableUnlockState (the 2-hour, single-use change window) ----
+    //
+    // Formats: `locked` · `pending|activeAt|windowEnd|bootCount` · `open|windowEnd|bootCount`.
+    // Anything malformed decodes to Locked — a lost unlock state must fail *closed* (no change window).
+
+    fun encodeUnlock(state: DurableUnlockState): String = when (state) {
+        is DurableUnlockState.Locked -> "locked"
+        is DurableUnlockState.Pending ->
+            "pending|${state.activeAtElapsedMs}|${state.windowEndElapsedMs}|${state.bootCount}"
+        is DurableUnlockState.Open ->
+            "open|${state.windowEndElapsedMs}|${state.bootCount}"
+    }
+
+    fun decodeUnlock(raw: String?): DurableUnlockState {
+        if (raw.isNullOrBlank()) return DurableUnlockState.Locked
+        val parts = raw.split('|')
+        return when (parts[0]) {
+            "pending" -> {
+                if (parts.size != 4) return DurableUnlockState.Locked
+                val activeAt = parts[1].toLongOrNull() ?: return DurableUnlockState.Locked
+                val windowEnd = parts[2].toLongOrNull() ?: return DurableUnlockState.Locked
+                val boot = parts[3].toIntOrNull() ?: return DurableUnlockState.Locked
+                DurableUnlockState.Pending(activeAt, windowEnd, boot)
+            }
+            "open" -> {
+                if (parts.size != 3) return DurableUnlockState.Locked
+                val windowEnd = parts[1].toLongOrNull() ?: return DurableUnlockState.Locked
+                val boot = parts[2].toIntOrNull() ?: return DurableUnlockState.Locked
+                DurableUnlockState.Open(windowEnd, boot)
+            }
+            else -> DurableUnlockState.Locked
+        }
+    }
+
     // ---- KeyHash (the durable-change unlock verifier) ----
 
     fun encodeKeyHash(keyHash: KeyHash): String = "${keyHash.salt}|${keyHash.hash}"
