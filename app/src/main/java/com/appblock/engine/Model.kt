@@ -37,5 +37,9 @@ sealed interface RuleMode {
     }
 }
 
-/** A target plus how it's limited. */
-data class Rule(val target: Target, val mode: RuleMode)
+/**
+ * A target, how it's limited ([mode]), and optionally *when* it's allowed ([schedule]). A null
+ * schedule means no time-of-day restriction (budget-only). Budget and schedule compose: the target is
+ * open only if it's inside an allowed window AND under its cap.
+ */
+data class Rule(val target: Target, val mode: RuleMode, val schedule: Schedule? = null)

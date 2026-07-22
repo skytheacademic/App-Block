@@ -21,6 +21,8 @@ data class TargetStatus(
     val exceptionActivatesInMs: Long?,
     /** If an exception is Active: ms left in the raised window. Else null. */
     val exceptionEndsInMs: Long?,
+    /** True when the block is because the current time is outside this target's allowed schedule. */
+    val blockedBySchedule: Boolean = false,
 )
 
 /**
@@ -130,12 +132,14 @@ class BudgetCoordinator(
         } else {
             bankTime()
         }
-        val today = DayBoundary.logicalDay(clock.nowLocal())
+        val nowLocal = clock.nowLocal()
+        val today = DayBoundary.logicalDay(nowLocal)
         val dayType = DayBoundary.dayType(today)
         val now = clock.elapsedRealtimeMs()
         return rules.map { rule ->
             val exc = store.loadException(rule.target)
             val used = UsageTracker.secondsUsedOn(store.loadUsage(rule.target), today)
+            val scheduleBlocks = !PolicyEngine.scheduleAllows(rule.schedule, nowLocal)
             when (val mode = rule.mode) {
                 is RuleMode.HardBlock ->
                     TargetStatus(rule.target, 0, 0, 0, used, 0, Access.BLOCK, exc, null, null)
@@ -147,7 +151,7 @@ class BudgetCoordinator(
                     val capSeconds = effCap * 60L
                     val remaining = (capSeconds - used).coerceAtLeast(0L)
                     val access =
-                        if (latched || used >= capSeconds) Access.BLOCK else Access.ALLOW
+                        if (latched || scheduleBlocks || used >= capSeconds) Access.BLOCK else Access.ALLOW
                     val activatesIn = (exc as? ExceptionState.Pending)
                         ?.let { (it.activeAtElapsedMs - now).coerceAtLeast(0L) }
                     val endsIn = (exc as? ExceptionState.Active)
@@ -163,6 +167,7 @@ class BudgetCoordinator(
                         exception = exc,
                         exceptionActivatesInMs = activatesIn,
                         exceptionEndsInMs = endsIn,
+                        blockedBySchedule = scheduleBlocks,
                     )
                 }
             }
@@ -274,8 +279,10 @@ class BudgetCoordinator(
     private fun decideCurrent(rules: List<Rule>): Decision {
         val t = currentTarget ?: return Decision(null, Access.ALLOW)
         val rule = rules.firstOrNull { it.target == t } ?: return Decision(t, Access.ALLOW)
-        val today = DayBoundary.logicalDay(clock.nowLocal())
-        val access = PolicyEngine.decide(rule, store.loadUsage(t), store.loadException(t), today)
+        val now = clock.nowLocal()
+        // Schedule gate first: outside its allowed hours, the app is blocked regardless of budget.
+        if (!PolicyEngine.scheduleAllows(rule.schedule, now)) return Decision(t, Access.BLOCK)
+        val access = PolicyEngine.decide(rule, store.loadUsage(t), store.loadException(t), DayBoundary.logicalDay(now))
         return Decision(t, access)
     }
 

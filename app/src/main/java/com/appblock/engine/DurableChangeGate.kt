@@ -58,15 +58,58 @@ object DurableChangeGate {
             !o.enabled && n.enabled -> ChangeDirection.TIGHTEN
             // On → off: removed the limit entirely → looser.
             o.enabled && !n.enabled -> ChangeDirection.LOOSEN
-            // Both on: combine the per-cap directions (higher cap = looser).
+            // Both on: combine the per-cap directions (higher cap = looser) with the schedule direction.
             else -> reduce(
                 listOf(
                     numeric(o.weekdayMinutes, n.weekdayMinutes),
                     numeric(o.weekendMinutes, n.weekendMinutes),
                     numeric(o.exceptionMaxMinutes, n.exceptionMaxMinutes),
+                    scheduleDirection(o.schedule, n.schedule),
                 ),
             )
         }
+    }
+
+    /**
+     * Direction for a schedule change, by allowed time-of-day: any newly-allowed minute is looser
+     * (more access); strictly removing allowed minutes is tighter. Null = no schedule = all week
+     * allowed, so adding a schedule tightens and dropping one loosens. Compared over the full week as
+     * a minute mask — exact, and cheap since it only runs when the user saves.
+     */
+    private fun scheduleDirection(old: Schedule?, new: Schedule?): ChangeDirection {
+        if (old == new) return ChangeDirection.NEUTRAL
+        val oldMask = allowedMask(old)
+        val newMask = allowedMask(new)
+        var added = false
+        var removed = false
+        for (i in oldMask.indices) {
+            if (newMask[i] && !oldMask[i]) added = true
+            if (oldMask[i] && !newMask[i]) removed = true
+            if (added && removed) break
+        }
+        return when {
+            added -> ChangeDirection.LOOSEN
+            removed -> ChangeDirection.TIGHTEN
+            else -> ChangeDirection.NEUTRAL
+        }
+    }
+
+    /** A week of allowed minutes (7×1440). Null schedule = every minute allowed. */
+    private fun allowedMask(schedule: Schedule?): BooleanArray {
+        val mask = BooleanArray(7 * TimeWindow.DAY_MINUTES)
+        if (schedule == null) {
+            mask.fill(true)
+            return mask
+        }
+        for ((day, windows) in schedule.allowedByDay) {
+            val base = (day.value - 1) * TimeWindow.DAY_MINUTES
+            for (window in windows) {
+                val start = window.startMinuteOfDay.coerceIn(0, TimeWindow.DAY_MINUTES)
+                val end = window.endMinuteOfDay.coerceIn(0, TimeWindow.DAY_MINUTES)
+                for (m in start until end) mask[base + m] = true
+            }
+        }
+        return mask
     }
 
     /** Higher number = more access = looser. */

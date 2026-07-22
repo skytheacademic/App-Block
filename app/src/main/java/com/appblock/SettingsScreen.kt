@@ -3,6 +3,7 @@ package com.appblock
 import android.os.SystemClock
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +21,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,8 +43,11 @@ import com.appblock.engine.DurableChangeGate
 import com.appblock.engine.DurableUnlockManager
 import com.appblock.engine.DurableUnlockState
 import com.appblock.engine.RuleStore
+import com.appblock.engine.Schedule
 import com.appblock.engine.Target
 import com.appblock.engine.TargetSettings
+import com.appblock.engine.TimeWindow
+import java.time.DayOfWeek
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.GeneratedKey
 import com.appblock.security.LockKeys
@@ -142,6 +147,7 @@ fun SettingsScreen(
                     onWeekday = { v -> updateTarget(target) { it.copy(weekdayMinutes = v) } },
                     onWeekend = { v -> updateTarget(target) { it.copy(weekendMinutes = v) } },
                     onMax = { v -> updateTarget(target) { it.copy(exceptionMaxMinutes = v) } },
+                    onScheduleChange = { sched -> updateTarget(target) { it.copy(schedule = sched) } },
                 )
             }
         }
@@ -290,6 +296,7 @@ private fun TargetEditor(
     onWeekday: (Int) -> Unit,
     onWeekend: (Int) -> Unit,
     onMax: (Int) -> Unit,
+    onScheduleChange: (Schedule?) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -308,6 +315,8 @@ private fun TargetEditor(
                 IntStepper("Weekend cap", settings.weekendMinutes, "${settings.weekendMinutes} min", 5, 0, 24 * 60, onWeekend)
                 Spacer(Modifier.height(6.dp))
                 IntStepper("Exception ceiling", settings.exceptionMaxMinutes, "${settings.exceptionMaxMinutes} min", 5, 0, 24 * 60, onMax)
+                Spacer(Modifier.height(10.dp))
+                ScheduleEditor(schedule = settings.schedule, onScheduleChange = onScheduleChange)
             } else {
                 Text(
                     "Off — this app isn't limited.",
@@ -316,6 +325,85 @@ private fun TargetEditor(
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }
+        }
+    }
+}
+
+/**
+ * A one-window-per-day schedule editor: a "limit to certain hours" toggle, day chips, and a single
+ * From/To range applied to the selected days (blocked outside it, blocked entirely on unselected
+ * days). The engine model supports richer per-day windows; this v1 UI edits the common single-window
+ * shape and shows the first window if a richer schedule was set elsewhere.
+ */
+@Composable
+private fun ScheduleEditor(
+    schedule: Schedule?,
+    onScheduleChange: (Schedule?) -> Unit,
+) {
+    val editor = schedule.toEditor()
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Limit to certain hours", style = MaterialTheme.typography.bodyLarge)
+        Switch(
+            checked = editor != null,
+            onCheckedChange = { on ->
+                onScheduleChange(if (on) DEFAULT_SCHEDULE_EDITOR.toSchedule() else null)
+            },
+        )
+    }
+
+    if (editor != null) {
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            for (day in DayOfWeek.entries) {
+                DayChip(
+                    label = dayLabel(day),
+                    selected = day in editor.days,
+                    onClick = {
+                        val days = if (day in editor.days) editor.days - day else editor.days + day
+                        onScheduleChange(editor.copy(days = days).toSchedule())
+                    },
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        IntStepper("From", editor.startMin, formatHm(editor.startMin), 30, 0, editor.endMin - 30) { v ->
+            onScheduleChange(editor.copy(startMin = v).toSchedule())
+        }
+        Spacer(Modifier.height(6.dp))
+        IntStepper("To", editor.endMin, formatHm(editor.endMin), 30, editor.startMin + 30, 24 * 60) { v ->
+            onScheduleChange(editor.copy(endMin = v).toSchedule())
+        }
+        Text(
+            "Allowed only in this window, on the selected days. Blocked otherwise (and all day on unselected days).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    }
+}
+
+@Composable
+private fun DayChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.small,
+        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.size(38.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -441,3 +529,36 @@ private fun formatHms(ms: Long): String {
     val sec = s % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
 }
+
+// ---- schedule editor helpers ----
+
+/** The single-window-per-day shape this UI edits: which days, and one From/To range. */
+private data class ScheduleEditorState(val days: Set<DayOfWeek>, val startMin: Int, val endMin: Int)
+
+private val DEFAULT_SCHEDULE_EDITOR = ScheduleEditorState(DayOfWeek.entries.toSet(), 18 * 60, 20 * 60)
+
+/** Read the editor shape out of a [Schedule] (null → no schedule; first window is the representative). */
+private fun Schedule?.toEditor(): ScheduleEditorState? {
+    if (this == null) return null
+    val firstWindow = allowedByDay.values.firstOrNull { it.isNotEmpty() }?.firstOrNull()
+    return ScheduleEditorState(
+        days = allowedByDay.filterValues { it.isNotEmpty() }.keys,
+        startMin = firstWindow?.startMinuteOfDay ?: DEFAULT_SCHEDULE_EDITOR.startMin,
+        endMin = firstWindow?.endMinuteOfDay ?: DEFAULT_SCHEDULE_EDITOR.endMin,
+    )
+}
+
+private fun ScheduleEditorState.toSchedule(): Schedule =
+    Schedule(days.associateWith { listOf(TimeWindow(startMin, endMin)) })
+
+private fun dayLabel(day: DayOfWeek): String = when (day) {
+    DayOfWeek.MONDAY -> "M"
+    DayOfWeek.TUESDAY -> "T"
+    DayOfWeek.WEDNESDAY -> "W"
+    DayOfWeek.THURSDAY -> "T"
+    DayOfWeek.FRIDAY -> "F"
+    DayOfWeek.SATURDAY -> "S"
+    DayOfWeek.SUNDAY -> "S"
+}
+
+private fun formatHm(minutes: Int): String = "%02d:%02d".format(minutes / 60, minutes % 60)

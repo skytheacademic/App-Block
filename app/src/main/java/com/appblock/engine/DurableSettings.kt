@@ -15,6 +15,8 @@ data class TargetSettings(
     val weekendMinutes: Int,
     /** Hard ceiling a temporary exception can raise this app's cap to (CONSTRAINTS.md §5). */
     val exceptionMaxMinutes: Int,
+    /** Optional time-of-day allow-schedule. Null = allowed any time (budget-only). Composes with the caps. */
+    val schedule: Schedule? = null,
 )
 
 /**
@@ -45,6 +47,7 @@ data class DurableSettings(
                         weekendMinutes = s.weekendMinutes,
                         exceptionMaxMinutes = s.exceptionMaxMinutes,
                     ),
+                    s.schedule,
                 )
             }
         }
@@ -53,8 +56,9 @@ data class DurableSettings(
         /**
          * Bump this in source (with a defaults edit) to force the persisting store to re-seed on the
          * next launch — the "change durable rules from the computer" path (CONSTRAINTS.md §6).
+         * (v2: target entries gained an optional schedule.)
          */
-        const val RULES_VERSION: Int = 1
+        const val RULES_VERSION: Int = 2
 
         /** Default temporary-exception window (minutes) — a durable pre-set, editable behind the gate. */
         const val DEFAULT_EXCEPTION_WINDOW_MINUTES: Int = 60

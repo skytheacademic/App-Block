@@ -264,6 +264,14 @@ private fun TargetCard(
                 style = MaterialTheme.typography.bodyMedium,
             )
 
+            if (status.blockedBySchedule) {
+                Text(
+                    text = "Outside its allowed hours right now.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
             if (!AppTargets.isEnforced(status.target)) {
                 Text(
                     text = "Not enforced yet — needs on-device Reels/Explore detection.",

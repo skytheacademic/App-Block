@@ -3,6 +3,7 @@ package com.appblock.engine
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.DayOfWeek
 
 /**
  * The core of the commitment lock: loosening enforcement needs an unlock, tightening never does.
@@ -78,5 +79,50 @@ class DurableChangeGateTest {
     @Test fun `tightening is applied even while locked`() {
         val result = DurableChangeGate.applyChange(settings(wd = 30), settings(wd = 15), unlocked = false)
         assertTrue(result is ChangeResult.Applied)
+    }
+
+    // ---- schedule direction ----
+
+    private fun withSchedule(schedule: Schedule?) = DurableSettings(
+        version = 1,
+        targets = mapOf(Target.TIKTOK to TargetSettings(true, 30, 30, 60, schedule)),
+        exceptionWindowMinutes = 60,
+    )
+
+    private fun sched(vararg windows: TimeWindow) =
+        Schedule(mapOf(DayOfWeek.MONDAY to windows.toList()))
+
+    @Test fun `adding a schedule tightens and removing it loosens`() {
+        val none = withSchedule(null)
+        val scheduled = withSchedule(sched(TimeWindow(18 * 60, 20 * 60)))
+        assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(none, scheduled))
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(scheduled, none))
+    }
+
+    @Test fun `widening a window loosens and narrowing tightens`() {
+        val narrow = withSchedule(sched(TimeWindow(18 * 60, 20 * 60)))
+        val wide = withSchedule(sched(TimeWindow(17 * 60, 20 * 60)))
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(narrow, wide))
+        assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(wide, narrow))
+    }
+
+    @Test fun `adding an allowed day loosens`() {
+        val mon = withSchedule(Schedule(mapOf(DayOfWeek.MONDAY to listOf(TimeWindow.ALL_DAY))))
+        val monTue = withSchedule(
+            Schedule(
+                mapOf(
+                    DayOfWeek.MONDAY to listOf(TimeWindow.ALL_DAY),
+                    DayOfWeek.TUESDAY to listOf(TimeWindow.ALL_DAY),
+                ),
+            ),
+        )
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(mon, monTue))
+    }
+
+    @Test fun `loosening a schedule needs an unlock`() {
+        val narrow = withSchedule(sched(TimeWindow(18 * 60, 20 * 60)))
+        val wide = withSchedule(sched(TimeWindow(17 * 60, 20 * 60)))
+        assertTrue(DurableChangeGate.applyChange(narrow, wide, unlocked = false) is ChangeResult.Blocked)
+        assertTrue(DurableChangeGate.applyChange(narrow, wide, unlocked = true) is ChangeResult.Applied)
     }
 }
