@@ -51,6 +51,7 @@ import com.appblock.engine.TargetSettings
 import com.appblock.engine.UnlockCategory
 import com.appblock.engine.WindowRule
 import java.time.DayOfWeek
+import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.GeneratedKey
 import com.appblock.security.LockKeys
@@ -83,8 +84,12 @@ fun SettingsScreen(
     var unlockState by remember { mutableStateOf<DurableUnlockState>(DurableUnlockState.Locked) }
     var remainingMs by remember { mutableStateOf(0L) }
     var showSetup by remember { mutableStateOf(false) }
-    var showStart by remember { mutableStateOf(false) }
+    var startCategory by remember { mutableStateOf<UnlockCategory?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+
+    val blocklistStore = remember { BlocklistStore(context) }
+    val blocklist by remember(refresh) { mutableStateOf(blocklistStore.domains()) }
+    var newDomain by remember { mutableStateOf("") }
 
     // Advance + persist the unlock state each second; keep the live countdown fresh.
     LaunchedEffect(Unit) {
@@ -102,6 +107,8 @@ fun SettingsScreen(
 
     // This screen edits *app* rules, so only an APPS-category window authorizes a loosening here.
     val open = DurableUnlockManager.isOpenFor(unlockState, UnlockCategory.APPS)
+    // Blocklist removals are gated by the *websites* window (72-hour), a separate cycle from apps.
+    val webOpen = DurableUnlockManager.isOpenFor(unlockState, UnlockCategory.WEBSITES)
     val direction = DurableChangeGate.classify(current, draft)
     val dirty = draft != current
     val loosening = direction == ChangeDirection.LOOSEN
@@ -136,7 +143,7 @@ fun SettingsScreen(
                 state = unlockState,
                 remainingMs = remainingMs,
                 onCreateKey = { showSetup = true },
-                onStart = { showStart = true },
+                onStart = { startCategory = UnlockCategory.APPS },
                 onCancel = { unlockController.cancel(); message = "Change window cancelled." },
             )
         }
@@ -179,6 +186,35 @@ fun SettingsScreen(
                     )
                 }
             }
+        }
+
+        item {
+            BlocklistSection(
+                domains = blocklist,
+                webOpen = webOpen,
+                newDomain = newDomain,
+                onNewDomainChange = { newDomain = it; message = null },
+                onAdd = {
+                    val added = blocklistStore.add(newDomain)
+                    if (added != null) {
+                        newDomain = ""
+                        refresh++
+                        message = "Blocked $added."
+                    } else {
+                        message = "That doesn't look like a website address."
+                    }
+                },
+                onRemove = { domain ->
+                    if (blocklistStore.removeIfAuthorized(domain, webOpen)) {
+                        unlockController.consume()   // single-use: one site per website window
+                        refresh++
+                        message = "Removed $domain — that was your one change, locked again."
+                    } else {
+                        message = "Removing a site needs the 72-hour website window."
+                    }
+                },
+                onStartWebsiteWindow = { startCategory = UnlockCategory.WEBSITES },
+            )
         }
 
         item {
@@ -227,15 +263,16 @@ fun SettingsScreen(
         )
     }
 
-    if (showStart) {
+    startCategory?.let { category ->
         StartWindowDialog(
+            category = category,
             verify = { code -> lockStore.verify(code) },
             onVerified = {
-                unlockController.request()
-                showStart = false
+                unlockController.request(category)
+                startCategory = null
                 message = "Wait started. You'll get a notification when your change window opens."
             },
-            onDismiss = { showStart = false },
+            onDismiss = { startCategory = null },
         )
     }
 }
@@ -545,12 +582,15 @@ private fun KeySetupDialog(
 
 @Composable
 private fun StartWindowDialog(
+    category: UnlockCategory,
     verify: (String) -> Boolean,
     onVerified: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var code by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
+    val waitLabel = if (category == UnlockCategory.WEBSITES) "72-hour" else "2-hour"
+    val titleText = if (category == UnlockCategory.WEBSITES) "Start website-removal window" else "Start change window"
 
     // Camera path: scan the stashed QR instead of typing its code. The scan screen requests the
     // CAMERA permission itself on first use; a match starts the wait immediately.
@@ -564,11 +604,11 @@ private fun StartWindowDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Start change window") },
+        title = { Text(titleText) },
         text = {
             Column {
                 Text(
-                    "Scan your stashed QR (or type its code) to start the 2-hour wait. When it's up you'll get a notification and a 15-minute window for one change.",
+                    "Scan your stashed QR (or type its code) to start the $waitLabel wait. When it's up you'll get a notification and a 15-minute window for one change.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 Spacer(Modifier.height(12.dp))
@@ -596,10 +636,71 @@ private fun StartWindowDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { if (verify(code)) onVerified() else error = true }) { Text("Start 2-hour wait") }
+            Button(onClick = { if (verify(code)) onVerified() else error = true }) { Text("Start $waitLabel wait") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+@Composable
+private fun BlocklistSection(
+    domains: List<String>,
+    webOpen: Boolean,
+    newDomain: String,
+    onNewDomainChange: (String) -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (String) -> Unit,
+    onStartWebsiteWindow: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Blocked websites", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+            Text(
+                "Browse in Chrome or Brave only — other browsers are blocked. Adding a site is instant; " +
+                    "removing one takes the 72-hour window (one site per window).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = newDomain,
+                    onValueChange = onNewDomainChange,
+                    label = { Text("Add a domain (e.g. reddit.com)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                Button(enabled = newDomain.isNotBlank(), onClick = onAdd) { Text("Add") }
+            }
+            if (domains.isEmpty()) {
+                Text(
+                    "No blocked sites yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            } else {
+                Spacer(Modifier.height(4.dp))
+                for (domain in domains) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(domain, style = MaterialTheme.typography.bodyMedium)
+                        TextButton(enabled = webOpen, onClick = { onRemove(domain) }) { Text("Remove") }
+                    }
+                }
+                if (!webOpen) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = onStartWebsiteWindow) { Text("Start 72-hour removal window") }
+                }
+            }
+        }
+    }
 }
 
 private fun labelForSettings(target: Target): String = when (target) {

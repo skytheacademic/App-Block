@@ -1,7 +1,10 @@
 package com.appblock.service
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -20,31 +23,36 @@ import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
 import com.appblock.engine.AppTargets
 import com.appblock.engine.BlockReason
+import com.appblock.engine.BrowserPolicy
+import com.appblock.engine.BrowserTargets
 import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
+import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.Target
+import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
 
 /**
- * The live blocker. Three inputs drive it:
+ * The live blocker. Inputs that drive it:
  *  1. Window events (TYPE_WINDOW_STATE_CHANGED / TYPE_WINDOWS_CHANGED) — something on screen changed.
  *  2. A window *scan* on every event and tick: a budgeted app counts as foreground if it occupies ANY
  *     visible window, not just the focused one — split-screen / Samsung App Pairs can't park TikTok
  *     in an unfocused pane for free.
- *  3. A ~5s heartbeat while a budgeted app is on screen — so the block appears the *moment* the daily
- *     budget runs out, not only when the user next switches apps.
+ *  3. A ~5s heartbeat while a budgeted app / Instagram / a browser is on screen — so the block appears
+ *     the *moment* the budget runs out (or a reel opens, or a blocked URL loads), not only on the next
+ *     app switch.
  *  4. Self-defense (settings-watch, [SettingsWatch]): content + window events from system Settings are
- *     scanned for screens about App-Block itself (the Accessibility toggle, App info, overlay page) —
- *     found one → bounce Home, unless the durable-change window is open (that's the sanctioned path).
+ *     scanned for screens about App-Block itself; found one → bounce Home, unless a change window is open.
+ *  5. Website blocking (CONSTRAINTS §2, [BrowserPolicy]): on an allowlisted browser (Chrome/Brave) the
+ *     omnibox URL is matched against the private blocklist; any *other* browser is blocked outright.
  *
- * The decision itself (allow vs block) is the pure engine's; this class maps it to the overlay. If the
- * overlay can't draw (permission revoked mid-session), blocking falls back to kicking the user to the
- * home screen every tick — revoking "Display over other apps" must not silently disable blocking.
+ * The decision itself is the pure engine's; this class maps it to the overlay. If the overlay can't draw
+ * (permission revoked mid-session), blocking falls back to kicking the user Home every tick.
  *
- * Still the weak tier: force-stop / uninstall defeat it — that's what the watchdog notification and
- * the optional Device Owner tier are for (see STATUS.md).
+ * Still the weak tier: force-stop / uninstall defeat it — that's what the watchdog notification and the
+ * optional Device Owner tier are for (see STATUS.md).
  */
 class AppBlockerAccessibilityService : AccessibilityService() {
 
@@ -53,9 +61,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     private var overlayView: View? = null
-    private var overlayReason: BlockReason? = null
+    private var overlayKey: String? = null
     private lateinit var coordinator: BudgetCoordinator
     private lateinit var unlockController: DurableUnlockController
+    private lateinit var blocklistStore: BlocklistStore
 
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
@@ -63,8 +72,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** True while an Instagram window is visible — keeps the tick alive so a reel open is caught even
      *  when the current surface (e.g. the feed) isn't itself budgeted. */
     private var surfaceAppVisible = false
+    /** True while an allowlisted browser is visible — keeps the tick alive so navigation to a blocked
+     *  site is caught by re-reading the omnibox. */
+    private var browserVisible = false
     private var lastBounceToastElapsedMs = 0L
-    private var lastIgContentPumpElapsedMs = 0L
+    private var lastContentPumpElapsedMs = 0L
+    private var browserCache: Set<String> = emptySet()
+    private var browserCacheAtMs = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -86,6 +100,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             exceptionWaitMs = ActiveRules.exceptionWaitMs,
         )
         unlockController = DurableUnlockController(this)
+        blocklistStore = BlocklistStore(this)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -99,28 +114,28 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             pump()
             return
         }
-        // Content-changed: only Instagram needs these — its reel↔feed surface flips fire no window
-        // event, so poll (throttled) while Instagram is on screen to catch a reel opening promptly.
-        if (event.packageName?.toString() == InstagramSurface.PACKAGE) {
+        // Content-changed: Instagram (reel↔feed flips) and allowlisted browsers (navigating to a new URL)
+        // change what to block without a window event, so poll them (throttled) while they're on screen.
+        val pkg = event.packageName?.toString()
+        if (pkg == InstagramSurface.PACKAGE || (pkg != null && BrowserTargets.isAllowlisted(pkg))) {
             val now = SystemClock.elapsedRealtime()
-            if (now - lastIgContentPumpElapsedMs >= IG_CONTENT_THROTTLE_MS) {
-                lastIgContentPumpElapsedMs = now
+            if (now - lastContentPumpElapsedMs >= CONTENT_THROTTLE_MS) {
+                lastContentPumpElapsedMs = now
                 pump()
             }
         }
     }
 
     /**
-     * One decision cycle: resolve what's foreground (surface-aware for Instagram), tick the engine,
-     * apply the overlay, and keep ticking while anything budget-relevant — a live target OR a visible
-     * Instagram window — is on screen. Shared by window events, the heartbeat, and the throttled
-     * Instagram content poll.
+     * One decision cycle: resolve what's foreground (surface-aware for Instagram, URL-aware for
+     * browsers), tick the engine, apply the overlay, and keep ticking while anything blockable — a live
+     * target, a visible Instagram window, or a visible browser — is on screen.
      */
     private fun pump() {
-        refreshForeground()
+        val fg = refreshForeground()
         val decision = coordinator.tick()
-        applyDecision(decision)
-        if (decision.target != null || surfaceAppVisible) startTicking() else stopTicking()
+        applyDecision(decision, fg.webBlock, fg.webHost)
+        if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
 
     /**
@@ -185,40 +200,56 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Resolve what's effectively foreground (surface-aware for Instagram) and inform the coordinator if
-     * the *target* changed. The window scan sees budgeted apps in any visible pane and keeps the blocked
-     * target current while our own overlay is the top window. Tracking by target — not package — is what
-     * lets Instagram flip between budgeted (reel player) and free (feed/DMs) within the one package.
+     * Resolve what's foreground and inform the coordinator if the *target* changed. Tracking by target —
+     * not package — is what lets Instagram flip between budgeted (reel player) and free (feed/DMs) within
+     * the one package. Returns the full [Foreground] so [pump] also gets the website decision.
      */
-    private fun refreshForeground() {
+    private fun refreshForeground(): Foreground {
         val fg = resolveForeground()
         surfaceAppVisible = fg.instagramVisible
-        if (fg.target == lastForegroundTarget) return
-        lastForegroundTarget = fg.target
-        coordinator.onForegroundTarget(fg.target)
+        browserVisible = fg.browserVisible
+        if (fg.target != lastForegroundTarget) {
+            lastForegroundTarget = fg.target
+            coordinator.onForegroundTarget(fg.target)
+        }
+        return fg
     }
 
-    private data class Foreground(val target: Target?, val instagramVisible: Boolean)
+    private data class Foreground(
+        val target: Target?,
+        val instagramVisible: Boolean,
+        val browserVisible: Boolean = false,
+        val webBlock: BrowserPolicy.WebBlock? = null,
+        val webHost: String? = null,
+    )
 
     /**
-     * Scan the visible windows once. A whole-app target (TikTok / X) in any pane wins outright. Failing
-     * that, if an Instagram window is up, its on-screen resource-ids decide whether the current surface
-     * is the budgeted reel player ([InstagramSurface]); every other Instagram surface resolves to null
-     * (free). Also reports whether Instagram is visible at all, so the tick keeps polling for a reel
-     * open while the user sits on a free Instagram surface.
+     * Scan the visible windows once, resolving three things: the budgeted [Target] (a whole-app TikTok/X
+     * in any pane wins, else Instagram's reel surface), whether Instagram is visible, and the website
+     * decision (an allowlisted browser on a blocked URL, or any non-allowlisted browser at all).
      */
     private fun resolveForeground(): Foreground = runCatching {
         var packageTarget: Target? = null
         var instagramRoot: AccessibilityNodeInfo? = null
+        var browserVisible = false
+        var webBlock: BrowserPolicy.WebBlock? = null
+        var webHost: String? = null
+        val browsers = browserPackages()
         for (window in windows) {
             val root = window.root ?: continue
             val pkg = root.packageName?.toString() ?: continue
             if (packageTarget == null) AppTargets.targetFor(pkg)?.let { packageTarget = it }
             if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
+            if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
+                browserVisible = true
+                val url = if (BrowserTargets.isAllowlisted(pkg)) urlInBrowser(root, pkg) else null
+                webBlock = BrowserPolicy.decide(pkg, isBrowser = pkg in browsers, url = url, blocklist = blocklistStore.domains().toSet())
+                if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && url != null) webHost = DomainMatcher.host(url)
+            }
         }
         val target = packageTarget
             ?: instagramRoot?.let { InstagramSurface.targetFor(collectInstagramSignals(it)) }
-        Foreground(target, instagramVisible = instagramRoot != null)
+        Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost)
     }.getOrDefault(Foreground(null, instagramVisible = false))
 
     /**
@@ -244,10 +275,69 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return found
     }
 
-    private fun applyDecision(decision: Decision) {
-        if (decision.access == Access.BLOCK && decision.target != null) {
-            val overlayUp = showOverlay(decision.target, decision.reason)
-            if (!overlayUp) {
+    /** The URL shown in an allowlisted browser's omnibox ([BrowserTargets.urlBarId]), or null if
+     *  unreadable / a blank tab. Bounded DFS — the url_bar sits near the top of the tree. */
+    private fun urlInBrowser(root: AccessibilityNodeInfo, pkg: String): String? {
+        val id = BrowserTargets.urlBarId(pkg)
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        var budget = URL_NODE_BUDGET
+        while (stack.isNotEmpty() && budget-- > 0) {
+            val node = stack.removeLast()
+            if (node.viewIdResourceName == id) {
+                return node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            }
+            for (i in 0 until node.childCount) {
+                stack.addLast(node.getChild(i) ?: continue)
+            }
+        }
+        return null
+    }
+
+    /**
+     * Installed browsers = packages handling a wildcard http VIEW+BROWSABLE intent, cached for
+     * [BROWSER_CACHE_TTL_MS] so a freshly-installed browser is noticed within the minute without a
+     * per-tick query. The `.invalid` probe host matches only true wildcard browsers, not apps with
+     * specific http deep links. Needs the <queries> block in the manifest (Android 11+ visibility).
+     */
+    private fun browserPackages(): Set<String> {
+        val now = SystemClock.elapsedRealtime()
+        if (browserCache.isEmpty() || now - browserCacheAtMs > BROWSER_CACHE_TTL_MS) {
+            browserCache = runCatching {
+                val probe = Intent(Intent.ACTION_VIEW, Uri.parse("http://appblock.invalid"))
+                    .addCategory(Intent.CATEGORY_BROWSABLE)
+                packageManager.queryIntentActivities(probe, PackageManager.MATCH_ALL)
+                    .mapNotNull { it.activityInfo?.packageName }
+                    .toSet()
+            }.getOrDefault(browserCache)
+            browserCacheAtMs = now
+        }
+        return browserCache
+    }
+
+    /**
+     * Apply the combined decision. A website/browser block ([webBlock]) takes precedence — a browser is
+     * never itself a budgeted target, so the two don't really collide, but web-first is the clear rule.
+     */
+    private fun applyDecision(decision: Decision, webBlock: BrowserPolicy.WebBlock?, webHost: String?) {
+        val message: CharSequence?
+        val key: String?
+        when {
+            webBlock != null -> {
+                message = webMessage(webBlock, webHost)
+                key = "w:$webBlock:${webHost ?: ""}"
+            }
+            decision.access == Access.BLOCK && decision.target != null -> {
+                message = blockMessage(decision.target, decision.reason)
+                key = "t:${decision.target}:${decision.reason}"
+            }
+            else -> {
+                message = null
+                key = null
+            }
+        }
+        if (message != null && key != null) {
+            if (!showOverlay(message, key)) {
                 // Overlay permission revoked or addView failed: blocking must not silently vanish.
                 performGlobalAction(GLOBAL_ACTION_HOME)
             }
@@ -267,21 +357,23 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(tickRunnable)
     }
 
-    /** Returns true when the block overlay is up (already or newly added). */
-    private fun showOverlay(target: Target, reason: BlockReason?): Boolean {
+    /**
+     * Show (or refresh in place) the block overlay with [message]; [key] identifies what's currently
+     * shown, so a changed cause updates the text instead of leaving a stale one. Returns true when the
+     * overlay is up (already or newly added).
+     */
+    private fun showOverlay(message: CharSequence, key: String): Boolean {
         overlayView?.let { view ->
-            if (reason != overlayReason) {
-                // The overlay outlived its original cause (e.g. budget block rolled into a schedule
-                // block) — refresh the message in place instead of showing a stale reason.
-                view.findViewById<TextView>(R.id.block_message).text = blockMessage(target, reason)
-                overlayReason = reason
+            if (key != overlayKey) {
+                view.findViewById<TextView>(R.id.block_message).text = message
+                overlayKey = key
             }
             return true
         }
         if (!Settings.canDrawOverlays(this)) return false
 
         val view = LayoutInflater.from(this).inflate(R.layout.overlay_block, null)
-        view.findViewById<TextView>(R.id.block_message).text = blockMessage(target, reason)
+        view.findViewById<TextView>(R.id.block_message).text = message
         view.findViewById<Button>(R.id.block_close).setOnClickListener {
             hideOverlay()
             performGlobalAction(GLOBAL_ACTION_HOME)
@@ -298,12 +390,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         runCatching { windowManager.addView(view, params) }
             .onSuccess {
                 overlayView = view
-                overlayReason = reason
+                overlayKey = key
             }
         return overlayView != null
     }
 
-    /** The overlay's explanation, matched to why the engine blocked (reason plumbing, TODO P2). */
+    /** The overlay's explanation, matched to why the engine blocked a budgeted target. */
     private fun blockMessage(target: Target, reason: BlockReason?): CharSequence = when (reason) {
         BlockReason.TAMPER -> getString(R.string.block_message_tamper)
         BlockReason.SCHEDULE -> getString(R.string.block_message_schedule, labelFor(target))
@@ -311,11 +403,19 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         else -> getString(R.string.block_message_budget, labelFor(target))
     }
 
+    /** The overlay text for a website / browser block (CONSTRAINTS §2). */
+    private fun webMessage(webBlock: BrowserPolicy.WebBlock, host: String?): CharSequence = when (webBlock) {
+        BrowserPolicy.WebBlock.BLOCKED_SITE ->
+            if (host != null) getString(R.string.block_message_site_named, host)
+            else getString(R.string.block_message_site)
+        BrowserPolicy.WebBlock.NON_ALLOWLISTED_BROWSER -> getString(R.string.block_message_browser)
+    }
+
     private fun hideOverlay() {
         overlayView?.let { view ->
             runCatching { windowManager.removeView(view) }
             overlayView = null
-            overlayReason = null
+            overlayKey = null
         }
     }
 
@@ -342,8 +442,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** Instagram trees are large; cap the reel-signal walk and stop early once signals are found. */
         private const val IG_NODE_BUDGET = 1_200
         private val SIGNAL_COUNT = InstagramSurface.SIGNAL_IDS.size
-        /** Min gap between Instagram content-change polls, so per-frame scroll events don't thrash. */
-        private const val IG_CONTENT_THROTTLE_MS = 700L
+        /** Cap the omnibox search; the url_bar sits near the top, so this is plenty. */
+        private const val URL_NODE_BUDGET = 600
+        /** Min gap between content-change polls (Instagram + browsers), so per-frame events don't thrash. */
+        private const val CONTENT_THROTTLE_MS = 700L
+        /** How long the installed-browser set is cached before re-query (catches a new browser install). */
+        private const val BROWSER_CACHE_TTL_MS = 60_000L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
 
         /** Liveness flag for the watchdog: true only while the system has this service running. */

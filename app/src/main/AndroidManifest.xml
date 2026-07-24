@@ -16,6 +16,13 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- Enumerate installed web browsers (wildcard http handlers) so any browser NOT on the
+             allowlist can be blocked as an app (CONSTRAINTS §2). Android 11+ package visibility. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
     </queries>
 
     <!-- Backups are a bypass: snapshot fresh budget state once, restore it whenever blocked.

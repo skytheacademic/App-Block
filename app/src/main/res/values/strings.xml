@@ -1,12 +1,15 @@
 <resources>
     <string name="app_name">App-Block</string>
     <string name="accessibility_label">App-Block detection</string>
-    <string name="accessibility_description">Detects which apps are on screen (including split-screen panes) so App-Block can show the block screen when a budgeted app is visible. Reads which app owns each window, plus the text of system Settings screens so it can guard its own toggle; it does not read content from other apps.</string>
+    <string name="accessibility_description">Detects which apps are on screen (including split-screen panes) so App-Block can show the block screen when a budgeted app is visible. Reads which app owns each window, the text of system Settings screens so it can guard its own toggle, and — in your chosen web browsers — the address bar, so blocked websites can be caught. It does not read page content or other apps.</string>
     <string name="block_title">Blocked</string>
     <string name="block_message">You chose to block this app. Take a breath and go back.</string>
     <string name="block_message_budget">You\'ve used up today\'s time for %1$s. It resets at 4am.</string>
     <string name="block_message_schedule">%1$s is outside its allowed hours right now. It opens again in its next window.</string>
     <string name="block_message_tamper">Clock tampering detected. Everything stays blocked until automatic date &amp; time is back on in Settings.</string>
+    <string name="block_message_site">This site is on your blocklist. Removing it takes the 72-hour change window.</string>
+    <string name="block_message_site_named">%1$s is on your blocklist. Removing it takes the 72-hour change window.</string>
+    <string name="block_message_browser">This browser isn\'t on your allowed list. Use Chrome or Brave.</string>
     <string name="block_go_back">Go back</string>
     <string name="watchdog_channel_name">Blocking health</string>
     <string name="watchdog_title">App-Block is not protecting you</string>
