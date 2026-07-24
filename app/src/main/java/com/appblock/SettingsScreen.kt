@@ -48,6 +48,7 @@ import com.appblock.engine.Schedule
 import com.appblock.engine.ScheduleEditorModel
 import com.appblock.engine.Target
 import com.appblock.engine.TargetSettings
+import com.appblock.engine.UnlockCategory
 import com.appblock.engine.WindowRule
 import java.time.DayOfWeek
 import com.appblock.security.DurableUnlockController
@@ -99,7 +100,8 @@ fun SettingsScreen(
         }
     }
 
-    val open = unlockState is DurableUnlockState.Open
+    // This screen edits *app* rules, so only an APPS-category window authorizes a loosening here.
+    val open = DurableUnlockManager.isOpenFor(unlockState, UnlockCategory.APPS)
     val direction = DurableChangeGate.classify(current, draft)
     val dirty = draft != current
     val loosening = direction == ChangeDirection.LOOSEN

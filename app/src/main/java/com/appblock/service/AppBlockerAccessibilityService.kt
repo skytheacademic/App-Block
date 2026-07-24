@@ -135,6 +135,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun selfDefense(event: AccessibilityEvent): Boolean {
         val pkg = event.packageName?.toString()
         if (!SettingsWatch.isWatched(pkg)) return false
+        // Any-category isOpen on purpose: a websites window sat through the *longer* (72-h) wait,
+        // so letting it reach Settings is never a shortcut past the 2-h apps gate.
         val standDown = !Watchdog.setupCompleted(this) || unlockController.isOpen()
         if (standDown) return false
         val bounce = SettingsWatch.shouldBounce(

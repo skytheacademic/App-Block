@@ -74,6 +74,21 @@ class DurableCodecTest {
         assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock("garbage"))
     }
 
+    @Test fun `unlock category round-trips, legacy strings decode as APPS, unknown fails closed`() {
+        val webPending = DurableUnlockState.Pending(1000L, 2000L, 7, UnlockCategory.WEBSITES)
+        assertEquals(webPending, EngineCodec.decodeUnlock(EngineCodec.encodeUnlock(webPending)))
+        val webOpen = DurableUnlockState.Open(2000L, 7, UnlockCategory.WEBSITES)
+        assertEquals(webOpen, EngineCodec.decodeUnlock(EngineCodec.encodeUnlock(webOpen)))
+
+        // Strings persisted before the category field existed — must survive an app update as APPS.
+        assertEquals(DurableUnlockState.Pending(1000L, 2000L, 7), EngineCodec.decodeUnlock("pending|1000|2000|7"))
+        assertEquals(DurableUnlockState.Open(2000L, 7), EngineCodec.decodeUnlock("open|2000|7"))
+
+        // An unknown category can't be trusted with a change window — fail closed.
+        assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock("pending|1000|2000|7|games"))
+        assertEquals(DurableUnlockState.Locked, EngineCodec.decodeUnlock("open|2000|7|games"))
+    }
+
     @Test fun `key hash round-trips and rejects malformed`() {
         val kh = KeyHash(salt = "abc123", hash = "deadbeef")
         assertEquals(kh, EngineCodec.decodeKeyHash(EngineCodec.encodeKeyHash(kh)))
