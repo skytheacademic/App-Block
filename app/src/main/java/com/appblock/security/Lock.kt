@@ -28,39 +28,34 @@ data class GeneratedKey(val code: String, val salt: String)
 object LockKeys {
 
     private val random = SecureRandom()
-    private const val BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 
     /**
-     * A new random unlock secret: 20 bytes of entropy as a Base32 code (grouped in 4s for the human
-     * to read), plus a 16-byte hex salt. The QR encodes the grouped code; normalization drops the
-     * dashes, so scanning or typing either form verifies.
+     * Unlock-code alphabet: uppercase letters + digits with every easily-confused glyph removed — no
+     * O/0, no I/1/L, no Q (Gate A feedback 2026-07-22: these misread by eye and by OCR when the stashed
+     * code is read back or scanned). 30 symbols; drawn from directly rather than Base32-packed (which
+     * would force back in the ambiguous glyphs to reach 32). [KeyAuthority.normalize] uppercases, so
+     * lowercase input still verifies.
+     */
+    const val ALPHABET = "ABCDEFGHJKMNPRSTUVWXYZ23456789"
+
+    /** 24 chars × log2(30) ≈ 118 bits of entropy — ample for a stash-and-reenter commitment key. */
+    private const val CODE_LENGTH = 24
+
+    /**
+     * A new random unlock secret: [CODE_LENGTH] characters from [ALPHABET], grouped in 4s for the human
+     * to read (the QR encodes the grouped code; normalization drops the dashes, so scanning or typing
+     * either form verifies), plus a 16-byte hex salt. `nextInt(bound)` is rejection-sampled, so the draw
+     * is unbiased across the 30 symbols.
      */
     fun generate(): GeneratedKey {
-        val codeBytes = ByteArray(20).also(random::nextBytes)
-        val code = base32(codeBytes).chunked(4).joinToString("-")
+        val code = (0 until CODE_LENGTH)
+            .map { ALPHABET[random.nextInt(ALPHABET.length)] }
+            .joinToString("")
+            .chunked(4)
+            .joinToString("-")
         val saltBytes = ByteArray(16).also(random::nextBytes)
         val salt = saltBytes.joinToString("") { "%02x".format(it) }
         return GeneratedKey(code = code, salt = salt)
-    }
-
-    private fun base32(bytes: ByteArray): String {
-        val sb = StringBuilder()
-        var buffer = 0
-        var bitsLeft = 0
-        for (b in bytes) {
-            buffer = (buffer shl 8) or (b.toInt() and 0xff)
-            bitsLeft += 8
-            while (bitsLeft >= 5) {
-                val index = (buffer shr (bitsLeft - 5)) and 0x1f
-                sb.append(BASE32[index])
-                bitsLeft -= 5
-            }
-        }
-        if (bitsLeft > 0) {
-            val index = (buffer shl (5 - bitsLeft)) and 0x1f
-            sb.append(BASE32[index])
-        }
-        return sb.toString()
     }
 }
 

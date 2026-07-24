@@ -22,6 +22,7 @@ import com.appblock.engine.AppTargets
 import com.appblock.engine.BlockReason
 import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
+import com.appblock.engine.InstagramSurface
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.Target
 import com.appblock.security.DurableUnlockController
@@ -58,20 +59,18 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
-    private var lastForegroundPackage: String? = null
+    private var lastForegroundTarget: Target? = null
+    /** True while an Instagram window is visible — keeps the tick alive so a reel open is caught even
+     *  when the current surface (e.g. the feed) isn't itself budgeted. */
+    private var surfaceAppVisible = false
     private var lastBounceToastElapsedMs = 0L
+    private var lastIgContentPumpElapsedMs = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
             if (!ticking) return
-            refreshForeground(eventPackage = null)   // re-scan: split panes change without events
-            val decision = coordinator.tick()
-            applyDecision(decision)
-            if (decision.target != null) {
-                handler.postDelayed(this, TICK_MS)
-            } else {
-                stopTicking()
-            }
+            pump()                       // re-scan: split panes / in-app surface changes fire no event
+            if (ticking) handler.postDelayed(this, TICK_MS)
         }
     }
 
@@ -96,11 +95,32 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             type == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         if (!windowEvent && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
         if (selfDefense(event)) return
-        if (!windowEvent) return  // content-changed events feed only the settings-watch
-        refreshForeground(event.packageName?.toString())
+        if (windowEvent) {
+            pump()
+            return
+        }
+        // Content-changed: only Instagram needs these — its reel↔feed surface flips fire no window
+        // event, so poll (throttled) while Instagram is on screen to catch a reel opening promptly.
+        if (event.packageName?.toString() == InstagramSurface.PACKAGE) {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastIgContentPumpElapsedMs >= IG_CONTENT_THROTTLE_MS) {
+                lastIgContentPumpElapsedMs = now
+                pump()
+            }
+        }
+    }
+
+    /**
+     * One decision cycle: resolve what's foreground (surface-aware for Instagram), tick the engine,
+     * apply the overlay, and keep ticking while anything budget-relevant — a live target OR a visible
+     * Instagram window — is on screen. Shared by window events, the heartbeat, and the throttled
+     * Instagram content poll.
+     */
+    private fun pump() {
+        refreshForeground()
         val decision = coordinator.tick()
         applyDecision(decision)
-        if (decision.target != null) startTicking() else stopTicking()
+        if (decision.target != null || surfaceAppVisible) startTicking() else stopTicking()
     }
 
     /**
@@ -163,29 +183,64 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Resolve what's effectively foreground and inform the coordinator if it changed. The window scan
-     * wins (it sees budgeted apps in any visible pane, and it keeps the blocked target current while
-     * our own overlay is the top window); the event's package is the fallback when no budgeted window
-     * is visible. An event from our own package while the overlay is up is the overlay itself — never
-     * treat that as "the user left the app".
+     * Resolve what's effectively foreground (surface-aware for Instagram) and inform the coordinator if
+     * the *target* changed. The window scan sees budgeted apps in any visible pane and keeps the blocked
+     * target current while our own overlay is the top window. Tracking by target — not package — is what
+     * lets Instagram flip between budgeted (reel player) and free (feed/DMs) within the one package.
      */
-    private fun refreshForeground(eventPackage: String?) {
-        val resolved = visibleTargetPackage()
-            ?: eventPackage?.takeIf { it != packageName || overlayView == null }
-            ?: return
-        if (resolved == lastForegroundPackage) return
-        lastForegroundPackage = resolved
-        coordinator.onForeground(resolved)
+    private fun refreshForeground() {
+        val fg = resolveForeground()
+        surfaceAppVisible = fg.instagramVisible
+        if (fg.target == lastForegroundTarget) return
+        lastForegroundTarget = fg.target
+        coordinator.onForegroundTarget(fg.target)
     }
 
-    /** A package of any currently-visible window that maps to a budgeted target, else null. */
-    private fun visibleTargetPackage(): String? =
-        runCatching {
-            windows.firstNotNullOfOrNull { window ->
-                window.root?.packageName?.toString()
-                    ?.takeIf { AppTargets.targetFor(it) != null }
+    private data class Foreground(val target: Target?, val instagramVisible: Boolean)
+
+    /**
+     * Scan the visible windows once. A whole-app target (TikTok / X) in any pane wins outright. Failing
+     * that, if an Instagram window is up, its on-screen resource-ids decide whether the current surface
+     * is the budgeted reel player ([InstagramSurface]); every other Instagram surface resolves to null
+     * (free). Also reports whether Instagram is visible at all, so the tick keeps polling for a reel
+     * open while the user sits on a free Instagram surface.
+     */
+    private fun resolveForeground(): Foreground = runCatching {
+        var packageTarget: Target? = null
+        var instagramRoot: AccessibilityNodeInfo? = null
+        for (window in windows) {
+            val root = window.root ?: continue
+            val pkg = root.packageName?.toString() ?: continue
+            if (packageTarget == null) AppTargets.targetFor(pkg)?.let { packageTarget = it }
+            if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
+        }
+        val target = packageTarget
+            ?: instagramRoot?.let { InstagramSurface.targetFor(collectInstagramSignals(it)) }
+        Foreground(target, instagramVisible = instagramRoot != null)
+    }.getOrDefault(Foreground(null, instagramVisible = false))
+
+    /**
+     * Depth-first collect only the Instagram resource-ids the surface rule cares about
+     * ([InstagramSurface.SIGNAL_IDS]), capped at [IG_NODE_BUDGET] nodes and short-circuiting once every
+     * signal is seen — so a large Instagram tree can't stall the service.
+     */
+    private fun collectInstagramSignals(root: AccessibilityNodeInfo): Set<String> {
+        val found = HashSet<String>(SIGNAL_COUNT)
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        var budget = IG_NODE_BUDGET
+        while (stack.isNotEmpty() && budget-- > 0) {
+            val node = stack.removeLast()
+            node.viewIdResourceName?.let { id ->
+                if (id in InstagramSurface.SIGNAL_IDS) found.add(id)
             }
-        }.getOrNull()
+            if (found.size == SIGNAL_COUNT) break   // seen everything the rule needs
+            for (i in 0 until node.childCount) {
+                stack.addLast(node.getChild(i) ?: continue)
+            }
+        }
+        return found
+    }
 
     private fun applyDecision(decision: Decision) {
         if (decision.access == Access.BLOCK && decision.target != null) {
@@ -282,6 +337,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     companion object {
         private const val TICK_MS = 5_000L
         private const val NODE_BUDGET = 400
+        /** Instagram trees are large; cap the reel-signal walk and stop early once signals are found. */
+        private const val IG_NODE_BUDGET = 1_200
+        private val SIGNAL_COUNT = InstagramSurface.SIGNAL_IDS.size
+        /** Min gap between Instagram content-change polls, so per-frame scroll events don't thrash. */
+        private const val IG_CONTENT_THROTTLE_MS = 700L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
 
         /** Liveness flag for the watchdog: true only while the system has this service running. */

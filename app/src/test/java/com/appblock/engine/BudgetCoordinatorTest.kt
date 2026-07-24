@@ -96,13 +96,45 @@ class BudgetCoordinatorTest {
         assertEquals(20, s.effectiveCapMinutes) // 15 weekday, 20 weekend
     }
 
-    @Test fun `instagram target is reported but not enforced yet`() {
+    @Test fun `instagram package alone is free - only the surface target is budgeted`() {
         val clock = FakeClock()
         val c = coordinator(clock)
-        // Opening the real Instagram package is a no-op: it isn't mapped, so it counts as untargeted.
+        // Being in the Instagram package (feed / DMs / stories) is a no-op: it isn't package-mapped, so
+        // it counts as untargeted and free. Only the surface-resolved reel target is enforced.
         c.onForeground("com.instagram.android")
         assertNull(c.tick().target)
-        // But it still appears in the status list so the UI can show it as "not enforced yet".
         assertTrue(c.snapshot().any { it.target == Target.INSTAGRAM_REELS_EXPLORE })
+    }
+
+    @Test fun `instagram reels surface accrues and blocks at its cap`() {
+        val clock = FakeClock()
+        val c = coordinator(clock)
+        // The accessibility layer resolves the reel player to the target and drives it directly.
+        c.onForegroundTarget(Target.INSTAGRAM_REELS_EXPLORE)
+
+        clock.advance(9 * minute)
+        assertEquals(Access.ALLOW, c.tick().access)      // under the 10-min Reels+Explore pool
+
+        clock.advance(2 * minute)                        // 11 min total > 10 min cap
+        val d = c.tick()
+        assertEquals(Target.INSTAGRAM_REELS_EXPLORE, d.target)
+        assertEquals(Access.BLOCK, d.access)
+        assertEquals(BlockReason.BUDGET, d.reason)
+    }
+
+    @Test fun `leaving the reel surface for a free instagram surface stops accrual`() {
+        val clock = FakeClock()
+        val store = InMemoryEngineStore()
+        val c = coordinator(clock, store)
+        c.onForegroundTarget(Target.INSTAGRAM_REELS_EXPLORE)
+        clock.advance(3 * minute)
+        c.tick()
+        val used = store.loadUsage(Target.INSTAGRAM_REELS_EXPLORE)!!.secondsUsed
+
+        // Swipe back to the feed / a DM-shared single reel: surface resolves to null → time stops.
+        c.onForegroundTarget(null)
+        clock.advance(5 * minute)
+        assertNull(c.tick().target)
+        assertEquals(used, store.loadUsage(Target.INSTAGRAM_REELS_EXPLORE)!!.secondsUsed)
     }
 }

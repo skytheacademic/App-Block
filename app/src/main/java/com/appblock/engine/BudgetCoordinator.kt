@@ -70,16 +70,28 @@ class BudgetCoordinator(
     /** Non-null while the tamper latch is set (the human-readable reason). */
     fun tamperReason(): String? = store.loadTamper()
 
-    /** Call when the foreground package changes. Flushes the outgoing target's time, then switches. */
+    /**
+     * Call when the foreground package changes. Flushes the outgoing target's time, then switches.
+     * A convenience over [onForegroundTarget] for whole-package targets (TikTok / X); Instagram is
+     * surface-detected, so the service resolves its target itself and calls [onForegroundTarget].
+     */
     @Synchronized
-    fun onForeground(packageName: String?) {
-        val newTarget = packageName?.let { AppTargets.targetFor(it) }
+    fun onForeground(packageName: String?) =
+        onForegroundTarget(packageName?.let { AppTargets.targetFor(it) })
+
+    /**
+     * Switch to an already-resolved foreground [target] (null = nothing budgeted on screen). Lets the
+     * accessibility layer drive the target directly — needed for Instagram, where the *same* package is
+     * budgeted or free depending on the on-screen surface ([InstagramSurface]).
+     */
+    @Synchronized
+    fun onForegroundTarget(target: Target?) {
         if (store.loadTamper() != null) {
             lastAccrualElapsedMs = clock.elapsedRealtimeMs()  // latched: consume the gap, count nothing
         } else {
             bankTime()                  // bank the app we're leaving
         }
-        currentTarget = newTarget
+        currentTarget = target
         blockedTarget = null            // a fresh foreground isn't blocked until the next decision
         lastAccrualElapsedMs = clock.elapsedRealtimeMs()
     }
