@@ -4,11 +4,31 @@
      focused window. typeWindowsChanged fires when panes appear/disappear without a focus change.
      typeWindowContentChanged exists ONLY for the settings-watch: navigation inside the Settings app
      doesn't reliably fire a window-state change, so content changes are scanned too - the handler
-     drops them immediately for every non-Settings package. -->
+     drops them immediately for every non-Settings package.
+
+     flagIncludeNotImportantViews is what makes the Instagram surface rule work at all (Gate B
+     2026-07-23). Without it the framework hands us only views that are "important for accessibility"
+     - clickable / focusable / labelled - and silently promotes the children of everything else. But
+     the reel signal we key on, clips_viewer_view_pager, is a bare ViewPager: text="", content-desc="",
+     clickable=false, focusable=false (only scrollable=true, which does NOT count). So it was never in
+     our tree, targetFor() always saw a free surface, and reels never blocked.
+     The whole ig-dumps/MAPPING.md rule was derived from `uiautomator dump`, and uiautomator's own
+     UiAutomation sets this flag - so without it here, dumps and the live service see different trees
+     and every id-based mapping is unsound. Keep the two in sync. Cost is small: the full reel tree is
+     ~120 nodes (see ig_reel_v439_gateB-dump.xml), well inside the walk budgets.
+
+     flagReportViewIds is the other half of the same Gate-B bug, and on its own is fatal:
+     AccessibilityNodeInfo.getViewIdResourceName() returns NULL unless the service declares it. Every
+     resource-id this app keys on - the Instagram reel signals AND the Chrome/Brave url_bar - would
+     read as null, i.e. "no reel, no URL", blocking nothing. Note which features were verified on
+     hardware before this: settings-watch (matches on *text*) and TikTok/X (match on *package*).
+     Nothing that ever worked on-device depended on a resource id; everything that did was broken.
+     Confirmed on the S25: `dumpsys accessibility` showed fetchFlags=128 - the include-not-important
+     bit alone, with no report-view-ids bit beside it. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
     android:canRetrieveWindowContent="true"
     android:notificationTimeout="100"
     android:description="@string/accessibility_description" />
