@@ -6,8 +6,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -37,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.appblock.engine.ChangeDirection
 import com.appblock.engine.ChangeResult
@@ -119,134 +123,154 @@ fun SettingsScreen(
         draft = draft.copy(targets = draft.targets + (target to block(ts)))
     }
 
-    LazyColumn(
+    // Column + weighted LazyColumn so Save/Revert can sit in a pinned bottom bar. They used to be the
+    // last item of the scroll: you edit a cap at the top, then scroll past every card to commit it —
+    // easy to walk away with the rules you *think* you set still sitting unsaved in the draft.
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .safeDrawingPadding()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .safeDrawingPadding(),
     ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Settings", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
-                TextButton(onClick = onBack) { Text("Done") }
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Settings", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Medium)
+                    TextButton(onClick = onBack) { Text("Done") }
+                }
             }
-        }
 
-        item {
-            LockStatusCard(
-                configured = configured,
-                state = unlockState,
-                remainingMs = remainingMs,
-                onCreateKey = { showSetup = true },
-                onStart = { startCategory = UnlockCategory.APPS },
-                onCancel = { unlockController.cancel(); message = "Change window cancelled." },
-            )
-        }
-
-        message?.let { item { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) } }
-
-        for (target in Target.entries) {
-            val ts = draft.targets[target] ?: continue
-            item(key = "target_${target.key}") {
-                TargetEditor(
-                    label = labelForSettings(target),
-                    settings = ts,
-                    onEnabledChange = { on -> updateTarget(target) { it.copy(enabled = on) } },
-                    onWeekday = { v -> updateTarget(target) { it.copy(weekdayMinutes = v) } },
-                    onWeekend = { v -> updateTarget(target) { it.copy(weekendMinutes = v) } },
-                    onMax = { v -> updateTarget(target) { it.copy(exceptionMaxMinutes = v) } },
-                    onScheduleChange = { sched -> updateTarget(target) { it.copy(schedule = sched) } },
+            item {
+                LockStatusCard(
+                    configured = configured,
+                    state = unlockState,
+                    remainingMs = remainingMs,
+                    onCreateKey = { showSetup = true },
+                    onStart = { startCategory = UnlockCategory.APPS },
+                    onCancel = { unlockController.cancel(); message = "Change window cancelled." },
                 )
             }
-        }
 
-        item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Temporary exception", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
-                    Text(
-                        "How long a granted exception's raised cap lasts. A durable pre-set — you still pick +minutes in the moment.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                    )
-                    IntStepper(
-                        label = "Window",
-                        value = draft.exceptionWindowMinutes,
-                        display = formatWindow(draft.exceptionWindowMinutes),
-                        step = 30,
-                        min = 30,
-                        max = 24 * 60,
-                        onChange = { draft = draft.copy(exceptionWindowMinutes = it) },
+            message?.let { item { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) } }
+
+            for (target in Target.entries) {
+                val ts = draft.targets[target] ?: continue
+                item(key = "target_${target.key}") {
+                    TargetEditor(
+                        label = labelForSettings(target),
+                        settings = ts,
+                        onEnabledChange = { on -> updateTarget(target) { it.copy(enabled = on) } },
+                        onWeekday = { v -> updateTarget(target) { it.copy(weekdayMinutes = v) } },
+                        onWeekend = { v -> updateTarget(target) { it.copy(weekendMinutes = v) } },
+                        onMax = { v -> updateTarget(target) { it.copy(exceptionMaxMinutes = v) } },
+                        onScheduleChange = { sched -> updateTarget(target) { it.copy(schedule = sched) } },
                     )
                 }
             }
-        }
 
-        item {
-            BlocklistSection(
-                domains = blocklist,
-                webOpen = webOpen,
-                newDomain = newDomain,
-                onNewDomainChange = { newDomain = it; message = null },
-                onAdd = {
-                    val added = blocklistStore.add(newDomain)
-                    if (added != null) {
-                        newDomain = ""
-                        refresh++
-                        message = "Blocked $added."
-                    } else {
-                        message = "That doesn't look like a website address."
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Temporary exception", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                        Text(
+                            "How long a granted exception's raised cap lasts. A durable pre-set — you still pick +minutes in the moment.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        IntStepper(
+                            label = "Window",
+                            value = draft.exceptionWindowMinutes,
+                            display = formatWindow(draft.exceptionWindowMinutes),
+                            step = 30,
+                            min = 30,
+                            max = 24 * 60,
+                            onChange = { draft = draft.copy(exceptionWindowMinutes = it) },
+                        )
                     }
-                },
-                onRemove = { domain ->
-                    if (blocklistStore.removeIfAuthorized(domain, webOpen)) {
-                        unlockController.consume()   // single-use: one site per website window
-                        refresh++
-                        message = "Removed $domain — that was your one change, locked again."
-                    } else {
-                        message = "Removing a site needs the 72-hour website window."
-                    }
-                },
-                onStartWebsiteWindow = { startCategory = UnlockCategory.WEBSITES },
-            )
-        }
-
-        item {
-            if (dirty && loosening && !open) {
-                val hint = when (unlockState) {
-                    is DurableUnlockState.Pending ->
-                        "This loosens your limits — it'll save once your window opens (in ${formatHms(remainingMs)})."
-                    else ->
-                        "This loosens your limits — start the change window above (2-hour wait) to save it."
                 }
-                Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Button(
-                    enabled = canSave,
-                    onClick = {
-                        when (val result = DurableChangeGate.applyChange(current, draft, open)) {
-                            is ChangeResult.Applied -> {
-                                ruleStore.save(result.settings)
-                                if (loosening) {
-                                    unlockController.consume()   // single-use: this was your one change
-                                    message = "Saved. That was your one change — it's locked again."
-                                } else {
-                                    message = "Saved."
-                                }
-                                refresh++
-                            }
-                            is ChangeResult.Blocked -> message = "That loosens your limits — start the change window first."
+
+            item {
+                BlocklistSection(
+                    domains = blocklist,
+                    webOpen = webOpen,
+                    newDomain = newDomain,
+                    onNewDomainChange = { newDomain = it; message = null },
+                    onAdd = {
+                        val added = blocklistStore.add(newDomain)
+                        if (added != null) {
+                            newDomain = ""
+                            refresh++
+                            message = "Blocked $added."
+                        } else {
+                            message = "That doesn't look like a website address."
                         }
                     },
-                ) { Text(if (loosening) "Accept one change" else "Save") }
-                OutlinedButton(enabled = dirty, onClick = { draft = current; message = null }) { Text("Revert") }
+                    onRemove = { domain ->
+                        if (blocklistStore.removeIfAuthorized(domain, webOpen)) {
+                            unlockController.consume()   // single-use: one site per website window
+                            refresh++
+                            message = "Removed $domain — that was your one change, locked again."
+                        } else {
+                            message = "Removing a site needs the 72-hour website window."
+                        }
+                    },
+                    onStartWebsiteWindow = { startCategory = UnlockCategory.WEBSITES },
+                )
+            }
+
+        }
+
+        Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                if (dirty && loosening && !open) {
+                    val hint = when (unlockState) {
+                        is DurableUnlockState.Pending ->
+                            "This loosens your limits — it'll save once your window opens (in ${formatHms(remainingMs)})."
+                        else ->
+                            "This loosens your limits — start the change window above (2-hour wait) to save it."
+                    }
+                    Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
+                } else if (!dirty) {
+                    // Save/Revert are disabled with nothing pending; say so rather than leaving two
+                    // greyed buttons with no stated reason.
+                    Text(
+                        "No unsaved changes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(
+                        enabled = canSave,
+                        onClick = {
+                            when (val result = DurableChangeGate.applyChange(current, draft, open)) {
+                                is ChangeResult.Applied -> {
+                                    ruleStore.save(result.settings)
+                                    if (loosening) {
+                                        unlockController.consume()   // single-use: this was your one change
+                                        message = "Saved. That was your one change — it's locked again."
+                                    } else {
+                                        message = "Saved."
+                                    }
+                                    refresh++
+                                }
+                                is ChangeResult.Blocked -> message = "That loosens your limits — start the change window first."
+                            }
+                        },
+                    ) { Text(if (loosening) "Accept one change" else "Save") }
+                    OutlinedButton(enabled = dirty, onClick = { draft = current; message = null }) { Text("Revert") }
+                }
             }
         }
     }
@@ -352,12 +376,21 @@ private fun TargetEditor(
                 Switch(checked = settings.enabled, onCheckedChange = onEnabledChange)
             }
             if (settings.enabled) {
+                // The OFF branch says what off means; without this the ON switch carries no words at
+                // all, and "is this app enforced or exempt?" is the one misread that costs enforcement.
+                Text(
+                    "On — blocked past ${formatWindow(settings.weekdayMinutes)} on weekdays, " +
+                        "${formatWindow(settings.weekendMinutes)} on weekends.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
                 Spacer(Modifier.height(8.dp))
-                IntStepper("Weekday cap", settings.weekdayMinutes, "${settings.weekdayMinutes} min", 5, 0, 24 * 60, onWeekday)
+                IntStepper("Weekday cap", settings.weekdayMinutes, formatWindow(settings.weekdayMinutes), 5, 0, 24 * 60, onWeekday)
                 Spacer(Modifier.height(6.dp))
-                IntStepper("Weekend cap", settings.weekendMinutes, "${settings.weekendMinutes} min", 5, 0, 24 * 60, onWeekend)
+                IntStepper("Weekend cap", settings.weekendMinutes, formatWindow(settings.weekendMinutes), 5, 0, 24 * 60, onWeekend)
                 Spacer(Modifier.height(6.dp))
-                IntStepper("Exception ceiling", settings.exceptionMaxMinutes, "${settings.exceptionMaxMinutes} min", 5, 0, 24 * 60, onMax)
+                IntStepper("Exception ceiling", settings.exceptionMaxMinutes, formatWindow(settings.exceptionMaxMinutes), 5, 0, 24 * 60, onMax)
                 Spacer(Modifier.height(10.dp))
                 ScheduleEditor(schedule = settings.schedule, onScheduleChange = onScheduleChange)
             } else {
@@ -449,6 +482,7 @@ private fun WindowRuleEditor(
                     val days = if (day in rule.days) rule.days - day else rule.days + day
                     onChange(rule.copy(days = days))
                 },
+                modifier = Modifier.weight(1f),
             )
         }
     }
@@ -487,29 +521,30 @@ private fun WindowRuleEditor(
 private fun ClockStepper(label: String, value: Int, skip: Int, onChange: (Int) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f).padding(end = 12.dp),
+        )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = { onChange(ScheduleEditorModel.stepClock(value, -30, skip)) }) { Text("−") }
-            Text(
-                formatHm(value),
-                modifier = Modifier.width(84.dp).padding(horizontal = 8.dp),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            OutlinedButton(onClick = { onChange(ScheduleEditorModel.stepClock(value, +30, skip)) }) { Text("+") }
+            StepperButton("−") { onChange(ScheduleEditorModel.stepClock(value, -30, skip)) }
+            StepperValue(formatHm(value))
+            StepperButton("+") { onChange(ScheduleEditorModel.stepClock(value, +30, skip)) }
         }
     }
 }
 
 @Composable
-private fun DayChip(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun DayChip(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         onClick = onClick,
         shape = MaterialTheme.shapes.small,
         color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.size(38.dp),
+        // Height only — width comes from the caller's weight(1f), so seven chips always divide the
+        // row exactly instead of overflowing once the labels went from one letter to two.
+        modifier = modifier.height(44.dp),
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
             Text(
@@ -519,6 +554,34 @@ private fun DayChip(label: String, selected: Boolean, onClick: () -> Unit) {
             )
         }
     }
+}
+
+/**
+ * The +/− control shared by both steppers. Sized explicitly rather than by [OutlinedButton]'s
+ * defaults so the tap area clears the 48dp minimum — these get tapped repeatedly (0 → 30 min is six
+ * taps), so a short target is felt, not just measured.
+ */
+@Composable
+private fun StepperButton(symbol: String, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier.defaultMinSize(minWidth = 56.dp, minHeight = 48.dp),
+        contentPadding = PaddingValues(0.dp),
+    ) { Text(symbol, style = MaterialTheme.typography.bodyLarge) }
+}
+
+/**
+ * The value slot between the two buttons. Fixed width so the buttons never shift under a thumb as
+ * the number grows, and wide enough for the longest value the caps can reach ("24 h").
+ */
+@Composable
+private fun StepperValue(display: String) {
+    Text(
+        display,
+        modifier = Modifier.width(96.dp),
+        textAlign = TextAlign.Center,
+        style = MaterialTheme.typography.bodyLarge,
+    )
 }
 
 @Composable
@@ -533,14 +596,20 @@ private fun IntStepper(
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyLarge)
+        // weight(1f) absorbs the slack so the stepper group is pinned right on *every* row — with
+        // SpaceBetween and an intrinsic-width label, the longest label ("Exception ceiling") ran
+        // into the − button and shoved its whole group out of line with the rows above.
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f).padding(end = 12.dp),
+        )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = { onChange((value - step).coerceAtLeast(min)) }) { Text("−") }
-            Text(display, modifier = Modifier.width(84.dp).padding(horizontal = 8.dp), style = MaterialTheme.typography.bodyLarge)
-            OutlinedButton(onClick = { onChange((value + step).coerceAtMost(max)) }) { Text("+") }
+            StepperButton("−") { onChange((value - step).coerceAtLeast(min)) }
+            StepperValue(display)
+            StepperButton("+") { onChange((value + step).coerceAtMost(max)) }
         }
     }
 }
@@ -669,7 +738,10 @@ private fun BlocklistSection(
                 OutlinedTextField(
                     value = newDomain,
                     onValueChange = onNewDomainChange,
-                    label = { Text("Add a domain (e.g. reddit.com)") },
+                    // Short label + placeholder: the old one-string label wrapped to two lines inside
+                    // a weight(1f) field, doubling its height and stranding the Add button.
+                    label = { Text("Domain") },
+                    placeholder = { Text("reddit.com") },
                     singleLine = true,
                     modifier = Modifier.weight(1f),
                 )
@@ -706,7 +778,7 @@ private fun BlocklistSection(
 private fun labelForSettings(target: Target): String = when (target) {
     Target.TIKTOK -> "TikTok"
     Target.INSTAGRAM_REELS_EXPLORE -> "Instagram Reels & Explore"
-    Target.X -> "X"
+    Target.X -> "X (Twitter)"
 }
 
 private fun formatWindow(minutes: Int): String {
@@ -715,7 +787,7 @@ private fun formatWindow(minutes: Int): String {
     return when {
         h == 0 -> "$m min"
         m == 0 -> "$h h"
-        else -> "$h h $m m"
+        else -> "$h h $m min"
     }
 }
 
@@ -733,14 +805,15 @@ private fun formatHms(ms: Long): String {
 /** The starter rule when a schedule is first toggled on: every day, 18:00–20:00. */
 private val DEFAULT_WINDOW_RULE = WindowRule(DayOfWeek.entries.toSet(), 18 * 60, 20 * 60)
 
+/** Two letters where one is ambiguous — "T" alone can't distinguish Tuesday from Thursday. */
 private fun dayLabel(day: DayOfWeek): String = when (day) {
     DayOfWeek.MONDAY -> "M"
-    DayOfWeek.TUESDAY -> "T"
+    DayOfWeek.TUESDAY -> "Tu"
     DayOfWeek.WEDNESDAY -> "W"
-    DayOfWeek.THURSDAY -> "T"
+    DayOfWeek.THURSDAY -> "Th"
     DayOfWeek.FRIDAY -> "F"
-    DayOfWeek.SATURDAY -> "S"
-    DayOfWeek.SUNDAY -> "S"
+    DayOfWeek.SATURDAY -> "Sa"
+    DayOfWeek.SUNDAY -> "Su"
 }
 
 private fun formatHm(minutes: Int): String = "%02d:%02d".format(minutes / 60, minutes % 60)

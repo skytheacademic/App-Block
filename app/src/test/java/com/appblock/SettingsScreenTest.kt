@@ -55,6 +55,11 @@ class SettingsScreenTest {
         }
     }
 
+    /**
+     * Scroll the settings list to a node. Only for content *inside* the LazyColumn — Save/Revert now
+     * live in a pinned bottom bar outside the scrollable container, so they need no scrolling (and
+     * `performScrollToNode` can't find them).
+     */
     private fun scrollTo(text: String) {
         compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasText(text))
     }
@@ -64,7 +69,6 @@ class SettingsScreenTest {
         show()
         scrollTo("TikTok")
         compose.onAllNodesWithText("−")[0].performClick()   // TikTok weekday cap 30 → 25: stricter
-        scrollTo("Save")
         compose.onNodeWithText("Save").assertIsEnabled().performClick()
         assertEquals(25, ruleStore.load().targets[Target.TIKTOK]!!.weekdayMinutes)
         compose.onNodeWithText("Saved.").assertExists()
@@ -75,7 +79,6 @@ class SettingsScreenTest {
         show()
         scrollTo("TikTok")
         compose.onAllNodesWithText("+")[0].performClick()   // TikTok weekday cap 30 → 35: looser
-        scrollTo("Accept one change")
         compose.onNodeWithText("Accept one change").assertIsNotEnabled()
         compose.onNodeWithText("start the change window", substring = true).assertExists()
         assertEquals(30, ruleStore.load().targets[Target.TIKTOK]!!.weekdayMinutes)
@@ -92,7 +95,6 @@ class SettingsScreenTest {
         show()
         scrollTo("TikTok")
         compose.onAllNodesWithText("+")[0].performClick()
-        scrollTo("Accept one change")
         compose.onNodeWithText("Accept one change").assertIsEnabled().performClick()
         assertEquals(35, ruleStore.load().targets[Target.TIKTOK]!!.weekdayMinutes)
         compose.onNodeWithText("Saved. That was your one change — it's locked again.").assertExists()
@@ -106,7 +108,6 @@ class SettingsScreenTest {
         scrollTo("From")
         compose.onNodeWithText("From").assertExists()
         compose.onNodeWithText("18:00").assertExists()
-        scrollTo("Save")
         compose.onNodeWithText("Save").assertIsEnabled()
     }
 
