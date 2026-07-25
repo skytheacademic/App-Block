@@ -24,11 +24,26 @@
      hardware before this: settings-watch (matches on *text*) and TikTok/X (match on *package*).
      Nothing that ever worked on-device depended on a resource id; everything that did was broken.
      Confirmed on the S25: `dumpsys accessibility` showed fetchFlags=128 - the include-not-important
-     bit alone, with no report-view-ids bit beside it. -->
+     bit alone, with no report-view-ids bit beside it.
+
+     isAccessibilityTool is the third member of that family - declared config whose absence fails
+     silently, and the newest. Android 17's Advanced Protection Mode revokes the accessibility
+     permission from every service NOT declaring it, and blocks re-granting while the mode is on;
+     the exempted set is "accessibility tools", and Google names automation / launcher / customization
+     apps as the ones it intends to cut off. Without this line, one toggle (Settings > Google >
+     Advanced Protection) switches the blocker off for good - a bypass that needs no key, no computer
+     and no waiting, and that the settings-watch cannot see because that page belongs to Google Play
+     services, not to App-Block. Declared true because this IS the app's function: it reads window
+     content and acts on it as the user's own agent. Attribute added in API 31, so it is inert on
+     older devices and costs nothing there.
+     One UI 9 / Android 17 reached stable 2026-07-22 and the S25 FE is in beta, so this is live.
+     NOT independently verified: whether the manifest flag alone satisfies AAPM, or Google also
+     consults a server-side list. Every published source names only the attribute. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
     android:canRetrieveWindowContent="true"
+    android:isAccessibilityTool="true"
     android:notificationTimeout="100"
     android:description="@string/accessibility_description" />

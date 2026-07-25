@@ -74,6 +74,10 @@ class PrefsEngineStore(
             wallMs = prefs.getLong(KEY_ANCHOR_WALL, 0L),
             elapsedMs = prefs.getLong(KEY_ANCHOR_ELAPSED, 0L),
             bootCount = prefs.getInt(KEY_ANCHOR_BOOT, 0),
+            // Absent on anchors written before the timezone guard shipped. Read as null, never 0 —
+            // a fabricated 0 would look like a whole-offset jump and latch the tamper flag on the
+            // first pass after the update for anyone not on UTC.
+            zoneOffsetSeconds = if (prefs.contains(KEY_ANCHOR_ZONE)) prefs.getInt(KEY_ANCHOR_ZONE, 0) else null,
         )
     }
 
@@ -82,6 +86,10 @@ class PrefsEngineStore(
             .putLong(KEY_ANCHOR_WALL, anchor.wallMs)
             .putLong(KEY_ANCHOR_ELAPSED, anchor.elapsedMs)
             .putInt(KEY_ANCHOR_BOOT, anchor.bootCount)
+            .apply {
+                val zone = anchor.zoneOffsetSeconds
+                if (zone == null) remove(KEY_ANCHOR_ZONE) else putInt(KEY_ANCHOR_ZONE, zone)
+            }
             .apply()
     }
 
@@ -110,6 +118,7 @@ class PrefsEngineStore(
         private const val KEY_ANCHOR_WALL = "anchor_wall"
         private const val KEY_ANCHOR_ELAPSED = "anchor_elapsed"
         private const val KEY_ANCHOR_BOOT = "anchor_boot"
+        private const val KEY_ANCHOR_ZONE = "anchor_zone_offset"
         private const val KEY_TAMPER = "tamper_reason"
     }
 }

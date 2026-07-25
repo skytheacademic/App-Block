@@ -197,24 +197,27 @@ class BudgetCoordinator(
     /**
      * The tamper guard. Runs before every decision/snapshot:
      *  1. Reboot (boot count changed): monotonic anchors from the old boot are meaningless → drop all
-     *     in-flight exceptions (stricter cap). Rebooting with automatic time OFF also latches — a
+     *     in-flight exceptions (stricter cap). Rebooting with the clock untrusted also latches — a
      *     reboot is how you'd launder a manual date change past the drift check below.
-     *  2. Drift (same boot, automatic time off): between passes the wall clock must advance by about
+     *  2. Drift (same boot, clock untrusted): between passes the wall clock must advance by about
      *     the same amount as monotonic uptime; divergence beyond [DRIFT_TOLERANCE_MS] in either
      *     direction means the date/time was changed by hand → latch.
-     *  3. Automatic time ON: the OS owns the wall clock → trusted → the latch clears.
-     *  4. Corrupt stored usage: burn that target's day (usage := its exception ceiling) — a decode
+     *  3. Zone shift (same boot, clock untrusted): the UTC offset moved. This is the case the drift
+     *     check structurally cannot see — see [trustedClock].
+     *  4. Clock trusted again: the OS owns both date and zone → the latch clears.
+     *  5. Corrupt stored usage: burn that target's day (usage := its exception ceiling) — a decode
      *     failure must never become a fresh budget.
-     *  5. Day regression (stored dayKey ahead of today): the wall date was rolled back. Re-key the
+     *  6. Day regression (stored dayKey ahead of today): the wall date was rolled back. Re-key the
      *     stored count onto today so the earlier "future day" usage still counts, and latch if the
-     *     clock is manual.
+     *     clock is untrusted.
      * The anchor is persisted so none of this goes blind across process restarts.
      */
     private fun guardClocks(rules: List<Rule>) {
         val nowWall = clock.wallClockMs()
         val nowElapsed = clock.elapsedRealtimeMs()
+        val nowZone = clock.zoneOffsetSeconds()
         val boot = integrity.bootCount()
-        val auto = integrity.autoTimeEnabled()
+        val auto = trustedClock()
         val anchor = store.loadClockAnchor()
 
         if (anchor != null && anchor.bootCount != boot) {
@@ -222,7 +225,10 @@ class BudgetCoordinator(
             if (!auto) store.saveTamper("Rebooted with automatic date & time off")
         } else if (anchor != null && !auto) {
             val drift = (nowWall - anchor.wallMs) - (nowElapsed - anchor.elapsedMs)
-            if (abs(drift) > DRIFT_TOLERANCE_MS) {
+            // Order matters for the message only — either signal alone is enough to latch.
+            if (anchor.zoneOffsetSeconds != null && anchor.zoneOffsetSeconds != nowZone) {
+                store.saveTamper("Time zone changed while automatic date & time is off")
+            } else if (abs(drift) > DRIFT_TOLERANCE_MS) {
                 store.saveTamper("Clock changed while automatic date & time is off")
             }
         }
@@ -245,8 +251,26 @@ class BudgetCoordinator(
             }
         }
 
-        store.saveClockAnchor(ClockAnchor(nowWall, nowElapsed, boot))
+        store.saveClockAnchor(ClockAnchor(nowWall, nowElapsed, boot, nowZone))
     }
+
+    /**
+     * Whether the wall clock counts as OS-owned. Local time has **two** independent inputs on One UI
+     * — the date and the zone — behind two separate Settings toggles, and the clock is only trusted
+     * while the OS owns both.
+     *
+     * Watching only AUTO_TIME was the audit's top finding, and the reason it hid is worth keeping:
+     * the drift check compares [EngineClock.wallClockMs] (UTC epoch) against monotonic uptime, and a
+     * timezone change moves the UTC epoch by *exactly zero*. So the guard computed a drift of 0 and
+     * reported everything normal, while [EngineClock.nowLocal] jumped the full offset, rolled the
+     * logical day, and handed every target a fresh budget at once. The guard was watching the one
+     * input that happened to prompt it, not every input that moves the quantity it protects.
+     *
+     * Recovery is unchanged and needs no key: turn both toggles back on and the latch clears on the
+     * next tick.
+     */
+    private fun trustedClock(): Boolean =
+        integrity.autoTimeEnabled() && integrity.autoTimeZoneEnabled()
 
     /**
      * Bank time, but freeze accrual while the current target is the one we're actively blocking — the

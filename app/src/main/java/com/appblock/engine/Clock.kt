@@ -11,6 +11,17 @@ interface EngineClock {
     fun elapsedRealtimeMs(): Long
     fun nowLocal(): LocalDateTime
     fun wallClockMs(): Long
+
+    /**
+     * The current UTC offset in seconds — the missing third clock signal.
+     *
+     * [wallClockMs] is UTC epoch millis, so it does **not** move when the timezone changes, while
+     * [nowLocal] moves by the full offset. That split is the whole timezone bypass: the drift check
+     * compares wall against monotonic and sees a difference of zero, while the day boundary reads
+     * local time, rolls to a new logical day, and hands every target a fresh budget. Exposing the
+     * offset lets the guard watch the signal that actually moved.
+     */
+    fun zoneOffsetSeconds(): Int
 }
 
 /**
@@ -22,6 +33,16 @@ interface EngineClock {
 interface ClockIntegrity {
     /** True when the OS syncs date & time automatically (Settings.Global.AUTO_TIME == 1). */
     fun autoTimeEnabled(): Boolean
+
+    /**
+     * True when the OS picks the timezone automatically (Settings.Global.AUTO_TIME_ZONE == 1).
+     *
+     * One UI splits "Set time automatically" and "Set time zone automatically" into two independent
+     * toggles, and the guard originally knew only the first. Leaving the second unwatched meant the
+     * whole of local time could be moved ~20 hours with the tamper guard still reporting a trusted
+     * clock. Both must be on for the wall clock to count as OS-owned.
+     */
+    fun autoTimeZoneEnabled(): Boolean
 
     /** Boots since factory reset (Settings.Global.BOOT_COUNT) — strictly increases on every reboot. */
     fun bootCount(): Int

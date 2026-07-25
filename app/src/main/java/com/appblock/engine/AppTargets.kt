@@ -12,15 +12,36 @@ package com.appblock.engine
  */
 object AppTargets {
 
-    /** package name → target. Multiple packages can map to one target (regional/renamed builds). */
+    /**
+     * package name → target. Multiple packages can map to one target (regional/renamed builds).
+     *
+     * The Lite/alternate clients are listed for a reason the audit made concrete: a blocked service
+     * ships more than one app, and installing the other one was a ~40-second, permanent escape. They
+     * cannot be covered from the phone either — the in-app picker only lists apps that are already
+     * installed, so an app you have not installed yet can only be pre-blocked from here.
+     */
     val packages: Map<String, Target> = mapOf(
-        // TikTok — global + the older/regional "trill" package.
+        // TikTok — global, the older/regional "trill" package, and the Lite client.
         "com.zhiliaoapp.musically" to Target.TIKTOK,
         "com.ss.android.ugc.trill" to Target.TIKTOK,
-        // X / Twitter — legacy package still ships on most devices; keep the new one too.
+        "com.zhiliaoapp.musically.go" to Target.TIKTOK,
+        // X / Twitter — legacy package still ships on most devices; keep the new one and Lite too.
         "com.twitter.android" to Target.X,
         "com.x.android" to Target.X,
-        // Instagram (com.instagram.android): NOT mapped — enforced by surface detection, see below.
+        "com.twitter.android.lite" to Target.X,
+        // Instagram proper (com.instagram.android) is NOT mapped — it's enforced by surface
+        // detection, because being in the package says nothing (feed / DMs / stories are free per
+        // CONSTRAINTS §1).
+        //
+        // Instagram *Lite* is mapped, and deliberately as a whole-app target: InstagramSurface keys
+        // on com.instagram.android and on resource ids read from that app's tree, so Lite gets no
+        // surface detection at all and would otherwise be an unlimited free reel firehose. Being in
+        // `packages` means the entire Lite app counts against the Reels/Explore budget — stricter
+        // than Instagram proper, and an accepted asymmetry (user's call 2026-07-25): Lite is
+        // essentially a feed/reels client, it isn't installed, and any cap on an app you don't use
+        // is a tightening that costs nothing. If it ever becomes a real DM client, it needs its own
+        // surface rule rather than this line.
+        "com.instagram.lite" to Target.INSTAGRAM_REELS_EXPLORE,
     )
 
     /** Targets enforced by in-app surface detection rather than a whole-package match. */

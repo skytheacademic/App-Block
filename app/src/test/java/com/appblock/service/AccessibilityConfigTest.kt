@@ -74,6 +74,23 @@ class AccessibilityConfigTest {
         )
     }
 
+    /**
+     * Third member of the "silently fatal declaration" family, and the only one whose failure is
+     * triggered by someone else: Android 17's Advanced Protection Mode revokes accessibility from
+     * every service not declaring itself a tool. Losing this line doesn't break a build or a test
+     * run — it just means the next person to enable Advanced Protection turns the blocker off
+     * permanently, with no key and no wait.
+     */
+    @Test
+    fun declaresItselfAnAccessibilityTool() {
+        val parser = configAttrs()
+        assertTrue(
+            "isAccessibilityTool missing: Android 17 Advanced Protection revokes the accessibility " +
+                "permission from services that don't declare it, which is a one-toggle bypass",
+            parser.getAttributeBooleanValue(ANDROID_NS, "isAccessibilityTool", false),
+        )
+    }
+
     private companion object {
         const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
     }

@@ -82,4 +82,28 @@ class UserTargetGateTest {
         assertTrue(!Target.isEncodableKey("a|b"))
         assertTrue(!Target.isEncodableKey(""))
     }
+
+    /**
+     * Audit finding B-5: a blocked service ships more than one app, and installing the other client
+     * was a ~40-second permanent escape. These can only be pre-blocked here — the picker lists
+     * installed apps, so an app you haven't installed yet is unreachable from the phone.
+     */
+    @Test fun `lite clients count against the same target as the full app`() {
+        val active = emptySet<Target>()   // built-in mappings must not depend on the user's rule list
+        assertEquals(Target.TIKTOK, AppTargets.targetFor("com.zhiliaoapp.musically.go", active))
+        assertEquals(Target.X, AppTargets.targetFor("com.twitter.android.lite", active))
+    }
+
+    /**
+     * Instagram Lite is whole-app on purpose: InstagramSurface keys on com.instagram.android and on
+     * ids read from that app's tree, so Lite has no surface detection and would otherwise be a free
+     * reel firehose. Instagram proper must stay unmapped, or feed/DMs/stories stop being free.
+     */
+    @Test fun `instagram lite is capped wholesale while instagram proper stays surface-enforced`() {
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            AppTargets.targetFor("com.instagram.lite", emptySet()),
+        )
+        assertNull(AppTargets.targetFor(InstagramSurface.PACKAGE, emptySet()))
+    }
 }
