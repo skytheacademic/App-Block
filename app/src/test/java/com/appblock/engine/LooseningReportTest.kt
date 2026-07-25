@@ -60,13 +60,13 @@ class LooseningReportTest {
 
     @Test fun `turning a target off reports as turned off`() {
         val draft = saved.copy(targets = saved.targets + (Target.TIKTOK to TargetSettings(false, 30, 30, 60)))
-        assertEquals(listOf(Loosening(Target.TIKTOK, "turned off")), DurableChangeGate.looseningReasons(saved, draft))
+        assertEquals(listOf(Loosening(Target.TIKTOK, "turned off", ChangeDirection.LOOSEN)), DurableChangeGate.looseningReasons(saved, draft))
     }
 
     @Test fun `dropping a target entirely reports as removed`() {
         val draft = saved.copy(targets = saved.targets - Target.TIKTOK)
         assertEquals(
-            listOf(Loosening(Target.TIKTOK, "removed from the blocked list")),
+            listOf(Loosening(Target.TIKTOK, "removed from the blocked list", ChangeDirection.LOOSEN)),
             DurableChangeGate.looseningReasons(saved, draft),
         )
     }
@@ -74,7 +74,7 @@ class LooseningReportTest {
     @Test fun `a raised exception ceiling reports itself`() {
         val draft = saved.copy(targets = saved.targets + (Target.TIKTOK to TargetSettings(true, 30, 30, 90)))
         assertEquals(
-            listOf(Loosening(Target.TIKTOK, "exception ceiling 60 → 90 min")),
+            listOf(Loosening(Target.TIKTOK, "exception ceiling 60 → 90 min", ChangeDirection.LOOSEN)),
             DurableChangeGate.looseningReasons(saved, draft),
         )
     }
@@ -84,12 +84,12 @@ class LooseningReportTest {
         val wide = ScheduleEditorModel.toSchedule(listOf(WindowRule(setOf(java.time.DayOfWeek.MONDAY), 600, 900)))
         val from = saved.copy(targets = saved.targets + (Target.TIKTOK to TargetSettings(true, 30, 30, 60, narrow)))
         val to = from.copy(targets = from.targets + (Target.TIKTOK to TargetSettings(true, 30, 30, 60, wide)))
-        assertEquals(listOf(Loosening(Target.TIKTOK, "allowed hours widened")), DurableChangeGate.looseningReasons(from, to))
+        assertEquals(listOf(Loosening(Target.TIKTOK, "allowed hours widened", ChangeDirection.LOOSEN)), DurableChangeGate.looseningReasons(from, to))
     }
 
     @Test fun `a lengthened exception window reports with no target`() {
         val draft = saved.copy(exceptionWindowMinutes = 90)
-        assertEquals(listOf(Loosening(null, "exception window 60 → 90 min")), DurableChangeGate.looseningReasons(saved, draft))
+        assertEquals(listOf(Loosening(null, "exception window 60 → 90 min", ChangeDirection.LOOSEN)), DurableChangeGate.looseningReasons(saved, draft))
     }
 
     @Test fun `several loosenings are all reported`() {
@@ -109,3 +109,4 @@ class LooseningReportTest {
         assertTrue(DurableChangeGate.looseningReasons(saved, tighter).isEmpty())
     }
 }
+

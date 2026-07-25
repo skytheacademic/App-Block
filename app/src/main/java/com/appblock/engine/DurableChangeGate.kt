@@ -11,10 +11,14 @@ package com.appblock.engine
 enum class ChangeDirection { NEUTRAL, TIGHTEN, LOOSEN }
 
 /**
- * One specific thing that loosens, so the UI can say *what* is gating a save.
+ * One field-level difference between two settings, and which way it moves enforcement.
+ *
  * [target] is null for the settings-wide exception window; [detail] is user-facing.
  */
-data class Loosening(val target: Target?, val detail: String)
+data class FieldChange(val target: Target?, val detail: String, val direction: ChangeDirection)
+
+/** A [FieldChange] that loosens — what gates a save. */
+typealias Loosening = FieldChange
 
 /** Outcome of running an edit through [DurableChangeGate]. */
 sealed interface ChangeResult {
@@ -42,54 +46,59 @@ object DurableChangeGate {
         }
     }
 
-    /** Overall direction: any single field that loosens makes the whole edit LOOSEN (and thus gated). */
-    fun classify(old: DurableSettings, new: DurableSettings): ChangeDirection {
-        val directions = buildList {
-            add(numeric(old.exceptionWindowMinutes, new.exceptionWindowMinutes))
-            for (target in old.targets.keys + new.targets.keys) {
-                add(targetDirection(old.targets[target], new.targets[target]))
+    /**
+     * Every field-level difference between [old] and [new] — the single source of truth this file
+     * works from.
+     *
+     * [classify] and [looseningReasons] both derive from this rather than each walking the settings
+     * themselves. They used to be the same case analysis written twice, and the phone reported the
+     * failure mode that allows (2026-07-25): the screen said the edit loosened limits and then listed
+     * nothing, because the two walks disagreed. Deriving both makes "gated but nothing to show"
+     * unrepresentable — the warning fires precisely when this list has a LOOSEN entry in it.
+     *
+     * Enabled transitions dominate the caps deliberately, matching the original semantics: a target
+     * that is off before and after contributes nothing whatever its numbers say (it is unenforced
+     * either way), off → on is a tightening whatever the caps, and on → off is a loosening.
+     */
+    fun changes(old: DurableSettings, new: DurableSettings): List<FieldChange> {
+        val out = mutableListOf<FieldChange>()
+
+        numeric(old.exceptionWindowMinutes, new.exceptionWindowMinutes).let { d ->
+            if (d != ChangeDirection.NEUTRAL) {
+                out += FieldChange(
+                    null,
+                    "exception window ${old.exceptionWindowMinutes} → ${new.exceptionWindowMinutes} min",
+                    d,
+                )
             }
         }
-        return reduce(directions)
-    }
 
-    /**
-     * Every individual loosening in this edit, so a blocked save can explain itself.
-     *
-     * [classify] deliberately collapses the whole [DurableSettings] into one direction, so *any*
-     * single loosening gates the entire edit. Correct for enforcement, useless to the user: they
-     * tighten one cap, are told the edit loosens their limits, and have no way to find the field that
-     * actually did it. Reported from the phone 2026-07-25 — a newly added app being tightened to 0
-     * while an unrelated loosening sat in the same unsaved draft.
-     *
-     * Mirrors [targetDirection]'s cases; if that gains a rule, this must gain a message.
-     */
-    fun looseningReasons(old: DurableSettings, new: DurableSettings): List<Loosening> {
-        val out = mutableListOf<Loosening>()
-        if (new.exceptionWindowMinutes > old.exceptionWindowMinutes) {
-            out += Loosening(null, "exception window ${old.exceptionWindowMinutes} → ${new.exceptionWindowMinutes} min")
-        }
         for (target in old.targets.keys + new.targets.keys) {
             val o = old.targets[target] ?: DISABLED
             val n = new.targets[target] ?: DISABLED
             when {
-                !o.enabled -> Unit                     // off → off, or off → on (a tightening)
-                !n.enabled -> out += Loosening(
+                !o.enabled && !n.enabled -> Unit
+                !o.enabled && n.enabled -> out += FieldChange(
+                    target,
+                    if (target in old.targets) "turned on" else "added to the blocked list",
+                    ChangeDirection.TIGHTEN,
+                )
+                !n.enabled -> out += FieldChange(
                     target,
                     if (target in new.targets) "turned off" else "removed from the blocked list",
+                    ChangeDirection.LOOSEN,
                 )
                 else -> {
-                    if (n.weekdayMinutes > o.weekdayMinutes) {
-                        out += Loosening(target, "weekday cap ${o.weekdayMinutes} → ${n.weekdayMinutes} min")
-                    }
-                    if (n.weekendMinutes > o.weekendMinutes) {
-                        out += Loosening(target, "weekend cap ${o.weekendMinutes} → ${n.weekendMinutes} min")
-                    }
-                    if (n.exceptionMaxMinutes > o.exceptionMaxMinutes) {
-                        out += Loosening(target, "exception ceiling ${o.exceptionMaxMinutes} → ${n.exceptionMaxMinutes} min")
-                    }
-                    if (scheduleDirection(o.schedule, n.schedule) == ChangeDirection.LOOSEN) {
-                        out += Loosening(target, "allowed hours widened")
+                    cap(out, target, "weekday cap", o.weekdayMinutes, n.weekdayMinutes)
+                    cap(out, target, "weekend cap", o.weekendMinutes, n.weekendMinutes)
+                    cap(out, target, "exception ceiling", o.exceptionMaxMinutes, n.exceptionMaxMinutes)
+                    val sd = scheduleDirection(o.schedule, n.schedule)
+                    if (sd != ChangeDirection.NEUTRAL) {
+                        out += FieldChange(
+                            target,
+                            if (sd == ChangeDirection.LOOSEN) "allowed hours widened" else "allowed hours narrowed",
+                            sd,
+                        )
                     }
                 }
             }
@@ -97,28 +106,23 @@ object DurableChangeGate {
         return out
     }
 
-    /** Direction for one target. Absent = disabled = fully open. */
-    private fun targetDirection(old: TargetSettings?, new: TargetSettings?): ChangeDirection {
-        val o = old ?: DISABLED
-        val n = new ?: DISABLED
-        return when {
-            // Both off: the app is fully open before and after — caps have no enforcement effect.
-            !o.enabled && !n.enabled -> ChangeDirection.NEUTRAL
-            // Off → on: went from no limit to some limit, whatever the caps → stricter.
-            !o.enabled && n.enabled -> ChangeDirection.TIGHTEN
-            // On → off: removed the limit entirely → looser.
-            o.enabled && !n.enabled -> ChangeDirection.LOOSEN
-            // Both on: combine the per-cap directions (higher cap = looser) with the schedule direction.
-            else -> reduce(
-                listOf(
-                    numeric(o.weekdayMinutes, n.weekdayMinutes),
-                    numeric(o.weekendMinutes, n.weekendMinutes),
-                    numeric(o.exceptionMaxMinutes, n.exceptionMaxMinutes),
-                    scheduleDirection(o.schedule, n.schedule),
-                ),
-            )
-        }
+    private fun cap(out: MutableList<FieldChange>, target: Target, name: String, from: Int, to: Int) {
+        val d = numeric(from, to)
+        if (d != ChangeDirection.NEUTRAL) out += FieldChange(target, "$name $from → $to min", d)
     }
+
+    /** Overall direction: any single field that loosens makes the whole edit LOOSEN (and thus gated). */
+    fun classify(old: DurableSettings, new: DurableSettings): ChangeDirection =
+        reduce(changes(old, new).map { it.direction })
+
+    /** The loosening subset of [changes] — exactly what gates a save, and what to show when it does. */
+    fun looseningReasons(old: DurableSettings, new: DurableSettings): List<Loosening> =
+        changes(old, new).filter { it.direction == ChangeDirection.LOOSEN }
+
+    // targetDirection() lived here and duplicated the per-target case analysis that `changes()` now
+    // owns. Keeping both is what let the gate and its explanation disagree, so it is deliberately
+    // gone rather than left as a second opinion. The rules it encoded are preserved verbatim in
+    // `changes()`: both-off is neutral, off→on tightens whatever the caps say, on→off loosens.
 
     /**
      * Direction for a schedule change, by allowed time-of-day: any newly-allowed minute is looser

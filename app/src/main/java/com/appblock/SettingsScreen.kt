@@ -291,27 +291,51 @@ fun SettingsScreen(
 
         Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                if (dirty && loosening && !open) {
-                    val hint = when (unlockState) {
-                        is DurableUnlockState.Pending ->
-                            "This loosens your limits — it'll save once your window opens (in ${formatHms(remainingMs)})."
-                        else ->
-                            "This loosens your limits — start the change window above (2-hour wait) to save it."
+                if (dirty) {
+                    if (loosening && !open) {
+                        val hint = when (unlockState) {
+                            is DurableUnlockState.Pending ->
+                                "This loosens your limits — it'll save once your window opens (in ${formatHms(remainingMs)})."
+                            else ->
+                                "This loosens your limits — start the change window above (2-hour wait) to save it."
+                        }
+                        Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
                     }
-                    Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
-                    // Name the culprits. The gate judges the whole settings object at once, so one
-                    // loosening anywhere gates everything — without this you can tighten a cap, be
-                    // told you're loosening, and have nowhere to look.
-                    for (reason in DurableChangeGate.looseningReasons(current, draft)) {
-                        val who = reason.target?.let { "${labelForSettings(it)}: " } ?: ""
+                    // Every pending change, not only the loosening ones. The gate judges the whole
+                    // settings object at once, so one loosening anywhere gates everything — and a
+                    // warning with nothing listed under it (reported 2026-07-25) leaves you with a
+                    // blocked Save and nowhere to look. Showing the full diff means the culprit is
+                    // always on screen, and the tightenings give it context.
+                    val pending = DurableChangeGate.changes(current, draft)
+                    for (change in pending.take(MAX_LISTED_CHANGES)) {
+                        val who = change.target?.let { "${labelForSettings(it)}: " } ?: ""
+                        val looser = change.direction == ChangeDirection.LOOSEN
                         Text(
-                            "• $who${reason.detail}",
+                            "• $who${change.detail}${if (looser) "  (loosens)" else ""}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (looser) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
+                    if (pending.size > MAX_LISTED_CHANGES) {
+                        Text(
+                            "• …and ${pending.size - MAX_LISTED_CHANGES} more",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
+                    if (pending.isEmpty()) {
+                        // Structurally shouldn't happen: `dirty` means draft != current. If it ever
+                        // shows, the difference is in a field `changes()` doesn't inspect.
+                        Text(
+                            "Unsaved changes that this screen can't describe — tap Revert and redo them.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.padding(bottom = 2.dp),
                         )
                     }
-                } else if (!dirty) {
+                } else {
                     // Save/Revert are disabled with nothing pending; say so rather than leaving two
                     // greyed buttons with no stated reason.
                     Text(
@@ -1116,6 +1140,9 @@ private fun formatHms(ms: Long): String {
  * tightening (the app had no limit at all a moment ago), and the user can drop it to 0 for free —
  * whereas a default of 0 that felt too harsh would cost a 2-hour window to relax.
  */
+/** Cap on the pending-changes list so the bottom bar can't grow without bound. */
+private const val MAX_LISTED_CHANGES = 6
+
 private val NEW_APP_DEFAULTS = TargetSettings(
     enabled = true,
     weekdayMinutes = 30,
