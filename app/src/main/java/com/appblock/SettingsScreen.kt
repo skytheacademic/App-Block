@@ -3,6 +3,7 @@ package com.appblock
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -46,7 +48,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.appblock.data.InstalledApp
+import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
+import com.appblock.engine.AppTargets
 import com.appblock.engine.Availability
 import com.appblock.engine.ChangeDirection
 import com.appblock.engine.ChangeResult
@@ -55,6 +60,7 @@ import com.appblock.engine.DayLabels
 import com.appblock.engine.DurableChangeGate
 import com.appblock.engine.DurableUnlockManager
 import com.appblock.engine.DurableUnlockState
+import com.appblock.engine.InstagramSurface
 import com.appblock.engine.RuleStore
 import com.appblock.engine.Schedule
 import com.appblock.engine.ScheduleEditorModel
@@ -114,6 +120,9 @@ fun SettingsScreen(
 
     /** Which target's edit sheet is open, if any. */
     var editing by remember { mutableStateOf<Target?>(null) }
+
+    /** True while the add-an-app picker is open (Batch 4). */
+    var picking by remember { mutableStateOf(false) }
 
     // Advance + persist the unlock state each second; keep the live countdown fresh.
     LaunchedEffect(Unit) {
@@ -181,7 +190,9 @@ fun SettingsScreen(
 
             message?.let { item { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) } }
 
-            for (target in Target.entries) {
+            // The target set is open now (Batch 4), so iterate what the draft actually holds rather
+            // than a fixed enum: built-ins first as seeded, then apps added on-device.
+            for (target in draft.targets.keys.toList()) {
                 val ts = draft.targets[target] ?: continue
                 item(key = "target_${target.key}") {
                     TargetCard(
@@ -195,7 +206,32 @@ fun SettingsScreen(
                         },
                         onEnabledChange = { on -> updateTarget(target) { it.copy(enabled = on) } },
                         onEdit = { editing = target },
+                        // Built-ins can only be switched off (itself a gated loosening); an app you
+                        // added can be dropped entirely. Removal just edits the draft — the gate
+                        // classifies a vanished target as LOOSEN on its own, so it costs the 2-hour
+                        // window exactly like turning one off does.
+                        onRemove = if (target.userPackage != null) {
+                            { draft = draft.copy(targets = draft.targets - target) }
+                        } else {
+                            null
+                        },
                     )
+                }
+            }
+
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Block another app", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                        Text(
+                            "Adding an app is instant. Removing one later needs the 2-hour change window, " +
+                                "same as raising a limit.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 6.dp),
+                        )
+                        Button(onClick = { picking = true }) { Text("Choose an app") }
+                    }
                 }
             }
 
@@ -296,6 +332,23 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    if (picking) {
+        AppPickerDialog(
+            // Hide anything already covered: the curated packages and every app already added.
+            // Offering TikTok here would create a second, weaker whole-app target beside the real one.
+            excludedPackages = AppTargets.packages.keys +
+                draft.targets.keys.mapNotNull { it.userPackage } +
+                InstagramSurface.PACKAGE,
+            onPick = { app ->
+                val target = Target.forPackage(app.packageName)
+                draft = draft.copy(targets = draft.targets + (target to NEW_APP_DEFAULTS))
+                picking = false
+                message = "Added ${app.label}. Set its limits below, then Save."
+            },
+            onDismiss = { picking = false },
+        )
     }
 
     editing?.let { target ->
@@ -406,6 +459,7 @@ private fun TargetCard(
     usage: TodayUsage?,
     onEnabledChange: (Boolean) -> Unit,
     onEdit: () -> Unit,
+    onRemove: (() -> Unit)? = null,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -478,11 +532,78 @@ private fun TargetCard(
                 }
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    if (onRemove != null) TextButton(onClick = onRemove) { Text("Remove app") }
                     TextButton(onClick = onEdit) { Text("Edit limits") }
                 }
             }
         }
     }
+}
+
+/**
+ * Pick an installed app to block (Batch 4). Lists launchable apps only — the ~88 things you can
+ * actually open, not the ~567 packages on the phone.
+ *
+ * Picking only edits the draft. Adding a target the settings didn't have is a *tightening*
+ * ([DurableChangeGate] reads an absent target as fully open), so it saves freely; that asymmetry is
+ * what lets this exist without becoming a bypass.
+ */
+@Composable
+private fun AppPickerDialog(
+    excludedPackages: Set<String>,
+    onPick: (InstalledApp) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val apps = remember { InstalledApps.launchable(context).filter { it.packageName !in excludedPackages } }
+    var query by remember { mutableStateOf("") }
+    val shown = remember(query, apps) {
+        if (query.isBlank()) apps else apps.filter { it.label.contains(query, ignoreCase = true) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Block an app") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    label = { Text("Search") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                if (shown.isEmpty()) {
+                    Text(
+                        if (apps.isEmpty()) "Every app you can open is already blocked." else "No app matches that.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LazyColumn(modifier = Modifier.height(320.dp)) {
+                        items(shown, key = { it.packageName }) { app ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onPick(app) }
+                                    .padding(vertical = 10.dp),
+                            ) {
+                                Text(app.label, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    app.packageName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** One "label — value — days" line of the summary. Blank [label] continues the row above. */
@@ -936,10 +1057,16 @@ private fun BlocklistSection(
     }
 }
 
+/** Built-ins are curated; a user-added app (Batch 4) shows the launcher label for its package. */
+@Composable
 private fun labelForSettings(target: Target): String = when (target) {
     Target.TIKTOK -> "TikTok"
     Target.INSTAGRAM_REELS_EXPLORE -> "Instagram Reels & Explore"
     Target.X -> "X (Twitter)"
+    else -> {
+        val context = LocalContext.current
+        remember(target) { target.userPackage?.let { InstalledApps.labelFor(context, it) } ?: target.key }
+    }
 }
 
 /**
@@ -971,6 +1098,18 @@ private fun formatHms(ms: Long): String {
 }
 
 // ---- schedule editor helpers ----
+
+/**
+ * Limits a newly added app starts with. Deliberately a real cap rather than 0: adding at any cap is a
+ * tightening (the app had no limit at all a moment ago), and the user can drop it to 0 for free —
+ * whereas a default of 0 that felt too harsh would cost a 2-hour window to relax.
+ */
+private val NEW_APP_DEFAULTS = TargetSettings(
+    enabled = true,
+    weekdayMinutes = 30,
+    weekendMinutes = 30,
+    exceptionMaxMinutes = 60,
+)
 
 /** The starter rule when a schedule is first toggled on: every day, 18:00–20:00. */
 private val DEFAULT_WINDOW_RULE = WindowRule(DayOfWeek.entries.toSet(), 18 * 60, 20 * 60)

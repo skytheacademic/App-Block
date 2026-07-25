@@ -12,6 +12,8 @@
         android:required="false" />
 
     <queries>
+        <!-- Launchable apps: the add-an-app picker lists these (Batch 4). Targeted declaration on
+             purpose — QUERY_ALL_PACKAGES is a sensitive permission and nothing here needs it. -->
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />

@@ -29,9 +29,26 @@ class DurableCodecTest {
         assertNull(EngineCodec.decodeDurable("wrongtag|1|60"))
     }
 
-    @Test fun `unknown target keys are skipped, not fatal`() {
+    @Test fun `any non-blank key names a target now the set is open`() {
+        // Was "unknown keys are skipped" while Target was a closed enum. Since Batch 4 an unrecognised
+        // key IS a real target — that is exactly how a user-added app survives a restart.
         val decoded = EngineCodec.decodeDurable("durable1|1|60|tiktok,1,30,30,60,|ghost,1,5,5,5,")
-        assertEquals(setOf(Target.TIKTOK), decoded!!.targets.keys)
+        assertEquals(setOf(Target.TIKTOK, Target("ghost")), decoded!!.targets.keys)
+    }
+
+    @Test fun `a user-added app round-trips through encode and decode`() {
+        val reddit = Target.forPackage("com.reddit.frontpage")
+        val settings = sample.copy(targets = sample.targets + (reddit to TargetSettings(true, 20, 25, 45)))
+        val decoded = EngineCodec.decodeDurable(EngineCodec.encodeDurable(settings))!!
+        assertEquals(settings.targets[reddit], decoded.targets[reddit])
+        assertEquals("com.reddit.frontpage", decoded.targets.keys.first { it.userPackage != null }.userPackage)
+    }
+
+    @Test fun `a key that would break the delimiters is dropped without corrupting the record`() {
+        val bad = Target("a,b")
+        val settings = sample.copy(targets = sample.targets + (bad to TargetSettings(true, 5, 5, 5)))
+        val decoded = EngineCodec.decodeDurable(EngineCodec.encodeDurable(settings))!!
+        assertEquals(sample.targets.keys, decoded.targets.keys)   // every good entry survived intact
     }
 
     @Test fun `a legacy 5-field entry decodes with no schedule`() {

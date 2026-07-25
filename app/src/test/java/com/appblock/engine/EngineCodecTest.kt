@@ -34,8 +34,26 @@ class EngineCodecTest {
         assertEquals(ExceptionState.None, EngineCodec.decodeException(null))
         assertEquals(ExceptionState.None, EngineCodec.decodeException(""))
         assertEquals(ExceptionState.None, EngineCodec.decodeException("pending|tiktok|30")) // too few fields
-        assertEquals(ExceptionState.None, EngineCodec.decodeException("active|nosuchtarget|1|2|2026-07-24"))
         assertEquals(ExceptionState.None, EngineCodec.decodeException("garbage"))
+    }
+
+    @Test fun `an exception naming a different target than it was stored under fails closed`() {
+        // The key space is open since Batch 4, so a foreign key no longer fails to resolve by accident.
+        // An exception is the one stored value that grants MORE access, so the mismatch has to be
+        // caught explicitly — otherwise a corrupt blob hands out extra minutes.
+        assertEquals(
+            ExceptionState.None,
+            EngineCodec.decodeException("active|nosuchtarget|10|5000|2026-07-24", expected = Target.TIKTOK),
+        )
+        assertEquals(
+            ExceptionState.None,
+            EngineCodec.decodeException("active|x|10|5000|2026-07-24", expected = Target.TIKTOK),
+        )
+    }
+
+    @Test fun `an exception stored under its own target still decodes`() {
+        val state = EngineCodec.decodeException("active|tiktok|10|5000|2026-07-24", expected = Target.TIKTOK)
+        assertEquals(Target.TIKTOK, (state as ExceptionState.Active).target)
     }
 
     @Test fun `legacy day-less exception formats decode to None (stricter), not garbage`() {

@@ -20,6 +20,7 @@ import android.widget.Toast
 import com.appblock.ActiveRules
 import com.appblock.BuildConfig
 import com.appblock.R
+import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
 import com.appblock.engine.AppTargets
@@ -30,6 +31,7 @@ import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
 import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
+import com.appblock.engine.RuleSource
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.Target
 import com.appblock.security.BlocklistStore
@@ -69,8 +71,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      */
     private var overlayExitBrowserPkg: String? = null
     private lateinit var coordinator: BudgetCoordinator
+    private lateinit var ruleSource: RuleSource
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
+
+    /** Briefly-cached set of targets with a live rule — see [activeTargets]. */
+    private var activeTargetsCache: Set<Target>? = null
+    private var activeTargetsAtMs = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
@@ -105,15 +112,35 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         isRunning = true
         val clock = AndroidEngineClock()
+        ruleSource = ActiveRules.ruleSource(this)
         coordinator = BudgetCoordinator(
             clock,
             PrefsEngineStore(this, clock),
             AndroidClockIntegrity(this),
-            ActiveRules.ruleSource(this),
+            ruleSource,
             exceptionWaitMs = ActiveRules.exceptionWaitMs,
         )
         unlockController = DurableUnlockController(this)
         blocklistStore = BlocklistStore(this)
+    }
+
+    /**
+     * Targets with a live rule — which is what makes a user-added app (Batch 4) enforced, since the
+     * rule list *is* the registry.
+     *
+     * Cached briefly because this runs inside the per-window resolve (~700ms while Instagram is up)
+     * and would otherwise re-read and re-decode prefs every pass. The staleness can only delay a
+     * *newly added* block by a couple of seconds, immediately after the user deliberately added it;
+     * a removal has already cost a 2-hour wait by the time it lands, so a moment of extra strictness
+     * there is the safe direction.
+     */
+    private fun activeTargets(): Set<Target> {
+        val now = SystemClock.elapsedRealtime()
+        activeTargetsCache?.let { if (now - activeTargetsAtMs < ACTIVE_TARGETS_TTL_MS) return it }
+        val fresh = ruleSource.rules().mapTo(mutableSetOf()) { it.target }
+        activeTargetsCache = fresh
+        activeTargetsAtMs = now
+        return fresh
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -270,7 +297,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             runCatching {
                 val root = window.root ?: return@runCatching
                 val pkg = root.packageName?.toString() ?: return@runCatching
-                if (packageTarget == null) AppTargets.targetFor(pkg)?.let { packageTarget = it }
+                if (packageTarget == null) AppTargets.targetFor(pkg, activeTargets())?.let { packageTarget = it }
                 if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
                 if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
                     browserVisible = true
@@ -611,10 +638,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** Built-in names are curated; a user-added app borrows its own launcher label. */
     private fun labelFor(target: Target): String = when (target) {
         Target.TIKTOK -> "TikTok"
         Target.INSTAGRAM_REELS_EXPLORE -> "Instagram Reels & Explore"
         Target.X -> "X"
+        else -> target.userPackage?.let { InstalledApps.labelFor(this, it) } ?: target.key
     }
 
     override fun onInterrupt() {
@@ -643,6 +672,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val CONTENT_THROTTLE_MS = 700L
         /** How long the installed-browser set is cached before re-query (catches a new browser install). */
         private const val BROWSER_CACHE_TTL_MS = 60_000L
+
+        /** How long the active-target set is reused before re-reading the rules — see [activeTargets]. */
+        private const val ACTIVE_TARGETS_TTL_MS = 3_000L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"

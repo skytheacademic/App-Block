@@ -45,7 +45,29 @@ object EngineCodec {
                 "active|${state.target.key}|${state.extraMinutes}|${state.windowEndElapsedMs}|${state.dayKey}"
         }
 
-    fun decodeException(raw: String?): ExceptionState {
+    /**
+     * [expected] is the target this blob was stored under; a decoded state naming any other target is
+     * discarded as None.
+     *
+     * That check used to be implicit: the target key space was closed, so a corrupt or foreign key
+     * simply failed to resolve. Opening the key space (Batch 4) removed that accident — every string
+     * now names *some* target — and an exception is the one piece of stored state that grants **more**
+     * access, so silently trusting a mismatched key would fail open. The store's contract is the
+     * opposite: untrustworthy state must resolve toward more blocking. Hence the explicit check.
+     *
+     * Pass null only where no particular target is expected (round-trip tests).
+     */
+    fun decodeException(raw: String?, expected: Target? = null): ExceptionState {
+        val state = decodeExceptionUnchecked(raw)
+        val target = when (state) {
+            is ExceptionState.None -> return ExceptionState.None
+            is ExceptionState.Pending -> state.target
+            is ExceptionState.Active -> state.target
+        }
+        return if (expected == null || target == expected) state else ExceptionState.None
+    }
+
+    private fun decodeExceptionUnchecked(raw: String?): ExceptionState {
         if (raw.isNullOrBlank()) return ExceptionState.None
         val parts = raw.split('|')
         return when (parts[0]) {
@@ -78,15 +100,17 @@ object EngineCodec {
     // `<dow(1..7)>:<win>/<win>` and each win `<startMin>-<endMin>` — no commas/pipes, so it rides
     // safely inside the comma/pipe delimiters. A 5-field entry (no schedule column) is still accepted.
     // Any malformed value decodes to null so the store re-seeds from source (strict — a lost config
-    // falls back to defaults, not to "no rules"). Unknown target keys are skipped.
+    // falls back to defaults, not to "no rules"). Since Batch 4 the target set is open, so any
+    // non-blank key names a real target — a stored `pkg:` entry is a user-added app, not an unknown.
 
     fun encodeDurable(settings: DurableSettings): String {
         val head = "durable1|${settings.version}|${settings.exceptionWindowMinutes}"
-        val targets = Target.entries.mapNotNull { target ->
-            settings.targets[target]?.let { s ->
-                "${target.key},${if (s.enabled) 1 else 0},${s.weekdayMinutes},${s.weekendMinutes}," +
-                    "${s.exceptionMaxMinutes},${encodeSchedule(s.schedule)}"
-            }
+        // Map order, not a fixed enum order. A key that couldn't survive the delimiters is dropped
+        // rather than corrupting the record around it.
+        val targets = settings.targets.entries.mapNotNull { (target, s) ->
+            if (!Target.isEncodableKey(target.key)) return@mapNotNull null
+            "${target.key},${if (s.enabled) 1 else 0},${s.weekdayMinutes},${s.weekendMinutes}," +
+                "${s.exceptionMaxMinutes},${encodeSchedule(s.schedule)}"
         }
         return (listOf(head) + targets).joinToString("|")
     }
@@ -203,5 +227,6 @@ object EngineCodec {
         return KeyHash(parts[0], parts[1])
     }
 
-    private fun targetForKey(key: String): Target? = Target.entries.firstOrNull { it.key == key }
+    /** Any non-blank key names a target now the set is open; blank keys are malformed and drop out. */
+    private fun targetForKey(key: String): Target? = if (key.isBlank()) null else Target(key)
 }

@@ -4,11 +4,38 @@ package com.appblock.engine
  * A blockable target — a whole app or a specific in-app surface. [key] is a stable id the engine and
  * storage use; the mapping to a real package / on-screen detection signal lives in the Android layer
  * (Phase 2b). See CONSTRAINTS.md §1.
+ *
+ * **Open, not an enum** (Batch 4): it was closed while the blocked set was fixed in source, but apps
+ * are now addable on-device. The curated built-ins survive as companion constants, so `Target.TIKTOK`
+ * still reads the same; user-added apps are keyed on their package via [forPackage].
+ *
+ * [key] must contain no `,` or `|` — those delimit the encoded settings string
+ * ([EngineCodec.encodeDurable]). Android package names can contain neither, so package keys are safe;
+ * anything building a Target from another source must preserve that invariant ([isEncodableKey]).
  */
-enum class Target(val key: String) {
-    TIKTOK("tiktok"),
-    INSTAGRAM_REELS_EXPLORE("ig_reels_explore"),
-    X("x"),
+data class Target(val key: String) {
+
+    /** The package this target enforces, for user-added apps; null for the curated built-ins. */
+    val userPackage: String?
+        get() = if (key.startsWith(USER_PREFIX)) key.removePrefix(USER_PREFIX) else null
+
+    companion object {
+        private const val USER_PREFIX = "pkg:"
+
+        val TIKTOK = Target("tiktok")
+        val INSTAGRAM_REELS_EXPLORE = Target("ig_reels_explore")
+        val X = Target("x")
+
+        /** The curated targets, in the order the UI lists them. */
+        val BUILT_INS: List<Target> = listOf(TIKTOK, INSTAGRAM_REELS_EXPLORE, X)
+
+        /** A whole-app target for a user-picked package. */
+        fun forPackage(packageName: String): Target = Target(USER_PREFIX + packageName)
+
+        /** True if [key] can round-trip through the encoded settings string. */
+        fun isEncodableKey(key: String): Boolean =
+            key.isNotBlank() && !key.contains(',') && !key.contains('|')
+    }
 }
 
 /** Which kind of day a logical day is — X's cap differs on weekends. */

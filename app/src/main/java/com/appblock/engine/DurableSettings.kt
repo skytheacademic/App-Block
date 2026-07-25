@@ -35,11 +35,13 @@ data class DurableSettings(
 ) {
     /**
      * The engine rule list. Disabled targets are omitted → the coordinator treats them as untargeted
-     * (always allowed). Order follows [Target.entries] so the UI is stable.
+     * (always allowed). Order follows the map's own insertion order — built-ins first as seeded by
+     * [DefaultRules], then user-added apps in the order they were added. The target set is open now,
+     * so there is no enum order left to follow.
      */
     fun toRules(): List<Rule> =
-        Target.entries.mapNotNull { target ->
-            targets[target]?.takeIf { it.enabled }?.let { s ->
+        targets.entries.mapNotNull { (target, entry) ->
+            entry.takeIf { it.enabled }?.let { s ->
                 Rule(
                     target,
                     RuleMode.DailyBudget(

@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
 import com.appblock.engine.AppTargets
@@ -486,10 +487,19 @@ private fun PermissionRow(
     }
 }
 
+/**
+ * Built-in names are curated; a user-added app (Batch 4) borrows its own launcher label, falling back
+ * to the raw key if the package has since been uninstalled.
+ */
+@Composable
 private fun labelFor(target: Target): String = when (target) {
     Target.TIKTOK -> "TikTok"
     Target.INSTAGRAM_REELS_EXPLORE -> "Instagram Reels & Explore"
     Target.X -> "X"
+    else -> {
+        val context = LocalContext.current
+        remember(target) { target.userPackage?.let { InstalledApps.labelFor(context, it) } ?: target.key }
+    }
 }
 
 /** mm:ss for anything under an hour, else h:mm:ss. */

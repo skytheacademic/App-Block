@@ -28,7 +28,20 @@ object AppTargets {
 
     fun targetFor(packageName: String): Target? = packages[packageName]
 
-    /** True when [target] is actually being enforced today — by package match or surface detection. */
+    /**
+     * Package → target, including apps the user added on-device (Batch 4).
+     *
+     * A user-added app is enforced purely by having an active rule: the rule list *is* the registry,
+     * so there is no second list to keep in sync — and dropping that rule is exactly what
+     * [DurableChangeGate] already classifies as a loosening, which is what makes removal gated.
+     *
+     * Built-ins win the lookup: a curated package (TikTok's two names, X's two) keeps its curated
+     * target and its special handling rather than degrading to a plain whole-app block.
+     */
+    fun targetFor(packageName: String, activeTargets: Set<Target>): Target? =
+        packages[packageName] ?: Target.forPackage(packageName).takeIf { it in activeTargets }
+
+    /** True when [target] is actually being enforced today — package match, surface, or user-added. */
     fun isEnforced(target: Target): Boolean =
-        packages.containsValue(target) || target in surfaceEnforced
+        packages.containsValue(target) || target in surfaceEnforced || target.userPackage != null
 }

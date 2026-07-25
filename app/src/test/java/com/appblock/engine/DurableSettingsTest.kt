@@ -26,16 +26,19 @@ class DurableSettingsTest {
         assertFalse(Target.X in targets)
     }
 
-    @Test fun `toRules follows Target order regardless of map order`() {
+    @Test fun `toRules follows the map's insertion order`() {
+        val reddit = Target.forPackage("com.reddit.frontpage")
         val settings = DurableSettings(
             version = 1,
             targets = linkedMapOf(
                 Target.X to TargetSettings(true, 15, 20, 40),
                 Target.TIKTOK to TargetSettings(true, 30, 30, 60),
+                reddit to TargetSettings(true, 20, 20, 40),
             ),
             exceptionWindowMinutes = 60,
         )
-        // Target.entries order is TIKTOK, INSTAGRAM_REELS_EXPLORE, X → TikTok comes first.
-        assertEquals(listOf(Target.TIKTOK, Target.X), settings.toRules().map { it.target })
+        // The target set is open since Batch 4, so there is no enum order left to normalise to —
+        // insertion order is the stable order, and user-added apps land after the seeded built-ins.
+        assertEquals(listOf(Target.X, Target.TIKTOK, reddit), settings.toRules().map { it.target })
     }
 }

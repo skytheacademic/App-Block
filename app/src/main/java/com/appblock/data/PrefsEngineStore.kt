@@ -52,7 +52,9 @@ class PrefsEngineStore(
             clearException(target)
             return ExceptionState.None
         }
-        return EngineCodec.decodeException(raw)
+        // Pass the target we asked for: a blob naming a different one is not this target's exception,
+        // and an exception only ever grants extra minutes, so a mismatch must fail closed.
+        return EngineCodec.decodeException(raw, expected = target)
     }
 
     override fun saveException(target: Target, state: ExceptionState) {
