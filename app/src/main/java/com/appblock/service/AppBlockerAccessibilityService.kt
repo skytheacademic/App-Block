@@ -63,6 +63,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     private var overlayView: View? = null
     private var overlayKey: String? = null
+    /**
+     * The browser to steer away from a blocked page when the user taps the overlay's exit, or null
+     * when what's blocked is an app (→ Home instead). See [exitOverlay].
+     */
+    private var overlayExitBrowserPkg: String? = null
     private lateinit var coordinator: BudgetCoordinator
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
@@ -142,7 +147,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun pump() {
         val fg = refreshForeground()
         val decision = coordinator.tick()
-        applyDecision(decision, fg.webBlock, fg.webHost)
+        applyDecision(decision, fg.webBlock, fg.webHost, fg.webPkg)
         // Seed the occlusion hold with the read that *caused* this overlay. Without it there is a
         // one-scan gap: the overlay goes up, the next scan already comes back pruned, and nothing has
         // been held yet - so the block drops for ~200ms and hands back a free frame of the reel.
@@ -238,6 +243,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val browserVisible: Boolean = false,
         val webBlock: BrowserPolicy.WebBlock? = null,
         val webHost: String? = null,
+        /** Which browser produced [webBlock] — the overlay's exit needs to steer that same browser. */
+        val webPkg: String? = null,
     )
 
     /**
@@ -251,6 +258,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         var browserVisible = false
         var webBlock: BrowserPolicy.WebBlock? = null
         var webHost: String? = null
+        var browserPkg: String? = null      // whose omnibox we read — also the overlay's exit target
+        var rawUrl: String? = null          // diagnostics only — what the omnibox actually read
         val browsers = browserPackages()
         val windowList = visibleWindows()
         for (window in windowList) {
@@ -266,6 +275,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
                     browserVisible = true
                     val url = if (BrowserTargets.isAllowlisted(pkg)) urlInBrowser(root, pkg) else null
+                    browserPkg = pkg
+                    rawUrl = url
                     webBlock = BrowserPolicy.decide(pkg, isBrowser = pkg in browsers, url = url, blocklist = blocklistStore.domains().toSet())
                     if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && url != null) webHost = DomainMatcher.host(url)
                 }
@@ -273,9 +284,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         }
         val signals = instagramRoot?.let { collectInstagramSignals(it) }
         val target = packageTarget ?: signals?.let { InstagramSurface.targetFor(it) }
-        val read = Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost)
+        val read = Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost, browserPkg)
         val effective = holdThroughOcclusion(read)
-        diagnose(windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target)
+        diagnose(
+            windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target,
+            browserPkg, rawUrl, webBlock, effective.webBlock,
+        )
         return effective
     }
 
@@ -334,12 +348,27 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         signals: Set<String>?,
         target: Target?,
         effectiveTarget: Target?,
+        browserPkg: String?,
+        rawUrl: String?,
+        webBlock: BrowserPolicy.WebBlock?,
+        effectiveWeb: BrowserPolicy.WebBlock?,
     ) {
         if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
-        val held = if (effectiveTarget != target) " HELD=$effectiveTarget" else ""
+        // Report the hold for *either* kind of block. Comparing only targets hid it entirely for
+        // websites (both sides are null there), so Gate D's log showed HELD zero times while the hold
+        // was in fact doing its job — an instrument that lies about the thing it exists to measure.
+        val held = when {
+            effectiveTarget != target -> " HELD=$effectiveTarget"
+            effectiveWeb != webBlock -> " HELD=$effectiveWeb"
+            else -> ""
+        }
+        // Browser half, for Gate D. urlRead distinguishes the three ways website blocking can fail:
+        // browser not recognised at all, url_bar unreadable (null), or read fine but not matched.
+        val web = if (browserPkg == null) "" else
+            " browser=${browserPkg.substringAfterLast('.')} urlRead=${rawUrl ?: "NULL"} web=$webBlock"
         val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
             "igNodes=$lastIgNodeCount igSignals=${signals?.map { it.substringAfterLast('/') }} " +
-            "target=$target overlay=${overlayView != null}$held"
+            "target=$target overlay=${overlayView != null}$held$web"
         if (line == lastDiagLine) return
         lastDiagLine = line
         android.util.Log.d(DIAG_TAG, line)
@@ -397,7 +426,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         while (stack.isNotEmpty() && budget-- > 0) {
             val node = stack.removeLast()
             if (idOf(node) == id) {
-                return runCatching { node.text?.toString()?.trim() }.getOrNull()?.takeIf { it.isNotEmpty() }
+                // Only a committed URL counts - not mid-typing autocomplete, not the empty-field hint.
+                // See BrowserTargets.committedUrl; both failures were seen live at Gate D.
+                return runCatching {
+                    BrowserTargets.committedUrl(
+                        text = node.text?.toString(),
+                        focused = node.isFocused,
+                        showingHintText = node.isShowingHintText,
+                    )
+                }.getOrNull()
             }
             stack.addAll(childrenOf(node))
         }
@@ -429,17 +466,26 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * Apply the combined decision. A website/browser block ([webBlock]) takes precedence — a browser is
      * never itself a budgeted target, so the two don't really collide, but web-first is the clear rule.
      */
-    private fun applyDecision(decision: Decision, webBlock: BrowserPolicy.WebBlock?, webHost: String?) {
+    private fun applyDecision(
+        decision: Decision,
+        webBlock: BrowserPolicy.WebBlock?,
+        webHost: String?,
+        webPkg: String?,
+    ) {
         val message: CharSequence?
         val key: String?
         when {
             webBlock != null -> {
                 message = webMessage(webBlock, webHost)
                 key = "w:$webBlock:${webHost ?: ""}"
+                // Only a blocked *site* steers the browser; a non-allowlisted browser is an app block.
+                overlayExitBrowserPkg =
+                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE) webPkg else null
             }
             decision.access == Access.BLOCK && decision.target != null -> {
                 message = blockMessage(decision.target, decision.reason)
                 key = "t:${decision.target}:${decision.reason}"
+                overlayExitBrowserPkg = null
             }
             else -> {
                 message = null
@@ -449,12 +495,48 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         if (message != null && key != null) {
             if (!showOverlay(message, key)) {
                 // Overlay permission revoked or addView failed: blocking must not silently vanish.
+                // Home, not the browser-steering exit - this fires every tick, and re-issuing a
+                // navigation intent at 5s intervals would be its own kind of loop.
                 performGlobalAction(GLOBAL_ACTION_HOME)
             }
         } else {
             hideOverlay()
         }
     }
+
+    /**
+     * Leave whatever was blocked, when the user taps the overlay's exit.
+     *
+     * An app block means "leave this app" → Home. A blocked *site* means "leave this page", and getting
+     * that right took two attempts on hardware (Gate D, 2026-07-24):
+     *  - **Home is wrong.** It leaves the blocked page loaded in the tab, so the next Chrome launch
+     *    restores it and blocks instantly. With the overlay taking every touch, the user can't navigate
+     *    off it either — a lock-out loop, not a block. On a daily driver behind the 72-h removal gate,
+     *    that's the browser bricked for three days.
+     *  - **Back is also wrong**, and fails *worse*, because redirects live in the history. Measured:
+     *    `old.reddit.com/r/all` → server redirects to `/r/all/`. Back returns to `/r/all`, which
+     *    immediately bounces forward to `/r/all/` — blocked again, ~700ms per cycle, indefinitely. Any
+     *    `http→https` or bare→`www` redirect reproduces this, so it would have been constant.
+     *
+     * So steer the browser to [NEUTRAL_URL] instead. It's a destination no redirect can bounce off,
+     * it needs no network and no third-party page, and it leaves the tab in a state that won't
+     * re-block on the next launch. Falls back to Home if the browser refuses the intent.
+     */
+    private fun exitOverlay() {
+        val pkg = overlayExitBrowserPkg
+        if (pkg != null && navigateToNeutral(pkg)) return
+        performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    /** Point [pkg] at [NEUTRAL_URL]; false if it wouldn't take the intent (caller falls back to Home). */
+    private fun navigateToNeutral(pkg: String): Boolean = runCatching {
+        startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(NEUTRAL_URL))
+                .setPackage(pkg)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        true
+    }.getOrDefault(false)
 
     private fun startTicking() {
         if (ticking) return
@@ -486,7 +568,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         view.findViewById<TextView>(R.id.block_message).text = message
         view.findViewById<Button>(R.id.block_close).setOnClickListener {
             hideOverlay()
-            performGlobalAction(GLOBAL_ACTION_HOME)
+            exitOverlay()
         }
 
         val params = WindowManager.LayoutParams(
@@ -564,6 +646,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"
+        /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
+         *  as a VIEW intent and lands on a blank page. No network, no third-party site, and nothing a
+         *  redirect can bounce off. See [exitOverlay]. */
+        private const val NEUTRAL_URL = "about:blank"
 
         /** Liveness flag for the watchdog: true only while the system has this service running. */
         @Volatile
