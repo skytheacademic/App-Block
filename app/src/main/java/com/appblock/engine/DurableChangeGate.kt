@@ -10,6 +10,12 @@ package com.appblock.engine
  */
 enum class ChangeDirection { NEUTRAL, TIGHTEN, LOOSEN }
 
+/**
+ * One specific thing that loosens, so the UI can say *what* is gating a save.
+ * [target] is null for the settings-wide exception window; [detail] is user-facing.
+ */
+data class Loosening(val target: Target?, val detail: String)
+
 /** Outcome of running an edit through [DurableChangeGate]. */
 sealed interface ChangeResult {
     /** The edit was tightening/neutral, or an unlock was present — [settings] is what to persist. */
@@ -45,6 +51,50 @@ object DurableChangeGate {
             }
         }
         return reduce(directions)
+    }
+
+    /**
+     * Every individual loosening in this edit, so a blocked save can explain itself.
+     *
+     * [classify] deliberately collapses the whole [DurableSettings] into one direction, so *any*
+     * single loosening gates the entire edit. Correct for enforcement, useless to the user: they
+     * tighten one cap, are told the edit loosens their limits, and have no way to find the field that
+     * actually did it. Reported from the phone 2026-07-25 — a newly added app being tightened to 0
+     * while an unrelated loosening sat in the same unsaved draft.
+     *
+     * Mirrors [targetDirection]'s cases; if that gains a rule, this must gain a message.
+     */
+    fun looseningReasons(old: DurableSettings, new: DurableSettings): List<Loosening> {
+        val out = mutableListOf<Loosening>()
+        if (new.exceptionWindowMinutes > old.exceptionWindowMinutes) {
+            out += Loosening(null, "exception window ${old.exceptionWindowMinutes} → ${new.exceptionWindowMinutes} min")
+        }
+        for (target in old.targets.keys + new.targets.keys) {
+            val o = old.targets[target] ?: DISABLED
+            val n = new.targets[target] ?: DISABLED
+            when {
+                !o.enabled -> Unit                     // off → off, or off → on (a tightening)
+                !n.enabled -> out += Loosening(
+                    target,
+                    if (target in new.targets) "turned off" else "removed from the blocked list",
+                )
+                else -> {
+                    if (n.weekdayMinutes > o.weekdayMinutes) {
+                        out += Loosening(target, "weekday cap ${o.weekdayMinutes} → ${n.weekdayMinutes} min")
+                    }
+                    if (n.weekendMinutes > o.weekendMinutes) {
+                        out += Loosening(target, "weekend cap ${o.weekendMinutes} → ${n.weekendMinutes} min")
+                    }
+                    if (n.exceptionMaxMinutes > o.exceptionMaxMinutes) {
+                        out += Loosening(target, "exception ceiling ${o.exceptionMaxMinutes} → ${n.exceptionMaxMinutes} min")
+                    }
+                    if (scheduleDirection(o.schedule, n.schedule) == ChangeDirection.LOOSEN) {
+                        out += Loosening(target, "allowed hours widened")
+                    }
+                }
+            }
+        }
+        return out
     }
 
     /** Direction for one target. Absent = disabled = fully open. */

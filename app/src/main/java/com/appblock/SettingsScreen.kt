@@ -299,6 +299,18 @@ fun SettingsScreen(
                             "This loosens your limits — start the change window above (2-hour wait) to save it."
                     }
                     Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
+                    // Name the culprits. The gate judges the whole settings object at once, so one
+                    // loosening anywhere gates everything — without this you can tighten a cap, be
+                    // told you're loosening, and have nowhere to look.
+                    for (reason in DurableChangeGate.looseningReasons(current, draft)) {
+                        val who = reason.target?.let { "${labelForSettings(it)}: " } ?: ""
+                        Text(
+                            "• $who${reason.detail}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 2.dp),
+                        )
+                    }
                 } else if (!dirty) {
                     // Save/Revert are disabled with nothing pending; say so rather than leaving two
                     // greyed buttons with no stated reason.
