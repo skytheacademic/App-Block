@@ -18,6 +18,7 @@ import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import com.appblock.ActiveRules
+import com.appblock.BuildConfig
 import com.appblock.R
 import com.appblock.data.PrefsEngineStore
 import com.appblock.engine.Access
@@ -79,6 +80,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var lastContentPumpElapsedMs = 0L
     private var browserCache: Set<String> = emptySet()
     private var browserCacheAtMs = 0L
+    /** Last line emitted by [diagnose], so debug logging only fires when the resolved state changes. */
+    private var lastDiagLine: String? = null
+    /** Nodes walked by the last Instagram signal scan — diagnostic only (tells a pruned tree apart
+     *  from a tree that simply doesn't have the reel pager in it). */
+    private var lastIgNodeCount = 0
+    /** The last real read taken before our overlay started occluding it — see [holdThroughOcclusion]. */
+    private var heldForeground: Foreground? = null
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -135,6 +143,14 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val fg = refreshForeground()
         val decision = coordinator.tick()
         applyDecision(decision, fg.webBlock, fg.webHost)
+        // Seed the occlusion hold with the read that *caused* this overlay. Without it there is a
+        // one-scan gap: the overlay goes up, the next scan already comes back pruned, and nothing has
+        // been held yet - so the block drops for ~200ms and hands back a free frame of the reel.
+        if (overlayView != null && heldForeground == null &&
+            (fg.target != null || fg.webBlock != null)
+        ) {
+            heldForeground = fg
+        }
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
 
@@ -173,14 +189,14 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** All visible text (text + contentDescription) of windows owned by watched settings packages. */
     private fun visibleWatchedTexts(): List<CharSequence> {
         val texts = ArrayList<CharSequence>(64)
-        runCatching {
-            var budget = NODE_BUDGET
-            for (window in windows) {
-                val root = window.root ?: continue
-                if (!SettingsWatch.isWatched(root.packageName?.toString())) continue
+        var budget = NODE_BUDGET
+        for (window in visibleWindows()) {
+            runCatching {
+                val root = window.root ?: return@runCatching
+                if (!SettingsWatch.isWatched(root.packageName?.toString())) return@runCatching
                 budget = collectTexts(root, texts, budget)
-                if (budget <= 0) break
             }
+            if (budget <= 0) break
         }
         return texts
     }
@@ -189,11 +205,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun collectTexts(node: AccessibilityNodeInfo, out: MutableList<CharSequence>, budget: Int): Int {
         if (budget <= 0) return 0
         var remaining = budget - 1
-        node.text?.let { out.add(it) }
-        node.contentDescription?.let { out.add(it) }
-        for (i in 0 until node.childCount) {
+        runCatching {
+            node.text?.let { out.add(it) }
+            node.contentDescription?.let { out.add(it) }
+        }
+        for (child in childrenOf(node)) {
             if (remaining <= 0) break
-            val child = node.getChild(i) ?: continue
             remaining = collectTexts(child, out, remaining)
         }
         return remaining
@@ -228,29 +245,105 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * in any pane wins, else Instagram's reel surface), whether Instagram is visible, and the website
      * decision (an allowlisted browser on a blocked URL, or any non-allowlisted browser at all).
      */
-    private fun resolveForeground(): Foreground = runCatching {
+    private fun resolveForeground(): Foreground {
         var packageTarget: Target? = null
         var instagramRoot: AccessibilityNodeInfo? = null
         var browserVisible = false
         var webBlock: BrowserPolicy.WebBlock? = null
         var webHost: String? = null
         val browsers = browserPackages()
-        for (window in windows) {
-            val root = window.root ?: continue
-            val pkg = root.packageName?.toString() ?: continue
-            if (packageTarget == null) AppTargets.targetFor(pkg)?.let { packageTarget = it }
-            if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
-            if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
-                browserVisible = true
-                val url = if (BrowserTargets.isAllowlisted(pkg)) urlInBrowser(root, pkg) else null
-                webBlock = BrowserPolicy.decide(pkg, isBrowser = pkg in browsers, url = url, blocklist = blocklistStore.domains().toSet())
-                if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && url != null) webHost = DomainMatcher.host(url)
+        val windowList = visibleWindows()
+        for (window in windowList) {
+            // Isolate each window. A live tree churns under the walk (a playing reel especially), so
+            // reading it can throw on a recycled / not-sealed node. One bad window must never collapse
+            // the whole resolution to "nothing foreground" - silently doing that stops accrual AND the
+            // 5s tick, which is exactly how a blocker fails open.
+            runCatching {
+                val root = window.root ?: return@runCatching
+                val pkg = root.packageName?.toString() ?: return@runCatching
+                if (packageTarget == null) AppTargets.targetFor(pkg)?.let { packageTarget = it }
+                if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
+                if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
+                    browserVisible = true
+                    val url = if (BrowserTargets.isAllowlisted(pkg)) urlInBrowser(root, pkg) else null
+                    webBlock = BrowserPolicy.decide(pkg, isBrowser = pkg in browsers, url = url, blocklist = blocklistStore.domains().toSet())
+                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && url != null) webHost = DomainMatcher.host(url)
+                }
             }
         }
-        val target = packageTarget
-            ?: instagramRoot?.let { InstagramSurface.targetFor(collectInstagramSignals(it)) }
-        Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost)
-    }.getOrDefault(Foreground(null, instagramVisible = false))
+        val signals = instagramRoot?.let { collectInstagramSignals(it) }
+        val target = packageTarget ?: signals?.let { InstagramSurface.targetFor(it) }
+        val read = Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost)
+        val effective = holdThroughOcclusion(read)
+        diagnose(windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target)
+        return effective
+    }
+
+    /**
+     * Keep blocking while our own overlay is what's hiding the evidence.
+     *
+     * Measured on the S25 (Gate B, 2026-07-23): the instant the block overlay goes up, the framework
+     * prunes the occluded app's accessibility tree to its bare root — Instagram drops from 692 nodes to
+     * 1–2. The reel signal vanishes, the target resolves to null, the overlay comes down, the tree comes
+     * back, and the whole thing oscillates about once a second. A browser's `url_bar` reads empty the
+     * same way, so website blocking (Batch 3) would flicker identically. Package-matched targets
+     * (TikTok, X) are immune — `root.packageName` survives the pruning, which is why this never showed
+     * up before Instagram.
+     *
+     * How far the pruning goes depends on how opaque the overlay is: at 95% alpha Instagram stayed
+     * enumerated with its tree cut to 1–2 nodes; fully opaque, it is dropped from `getWindows()`
+     * altogether (`windows=1` — only our own overlay left). So "is the blocked app still on screen?"
+     * is not a usable release condition; we blinded ourselves by blocking.
+     *
+     * So the hold is unconditional while the overlay is displayed, which costs nothing: behind a
+     * full-screen overlay the user cannot navigate at all. The two real exits are untouched — the
+     * overlay's own Close button ([hideOverlay] + Home), and the engine deciding ALLOW (a granted
+     * exception, the 4am reset), since the hold only freezes *foreground resolution*, never the
+     * allow/block decision. And the failure direction is the right one: a blocker must never talk
+     * itself out of blocking.
+     */
+    private fun holdThroughOcclusion(read: Foreground): Foreground {
+        if (overlayView == null) {
+            heldForeground = null
+            return read
+        }
+        if (read.target != null || read.webBlock != null) {   // a real read got through; refresh the hold
+            heldForeground = read
+            return read
+        }
+        return heldForeground ?: read
+    }
+
+    /** The visible windows, or an empty list if the system refuses them (never throw out of a scan). */
+    private fun visibleWindows(): List<android.view.accessibility.AccessibilityWindowInfo> =
+        runCatching { windows }.getOrNull().orEmpty()
+
+    /**
+     * Why a decision came out the way it did, on QA builds only, logged once per distinct state so
+     * logcat stays readable. This is the instrument Gate B needed: `adb logcat -s AppBlockFg` answers
+     * "was Instagram enumerated / did the reel signal appear / what target resolved" in one line.
+     *
+     * Gated on FAST_CAPS as well as DEBUG on purpose: `debugFast` is built non-debuggable (so `run-as`
+     * can't reach its prefs), which makes BuildConfig.DEBUG false — and debugFast is precisely the
+     * build the phone gates are run on. The signed release logs nothing.
+     */
+    private fun diagnose(
+        windowCount: Int,
+        packageTarget: Target?,
+        instagramVisible: Boolean,
+        signals: Set<String>?,
+        target: Target?,
+        effectiveTarget: Target?,
+    ) {
+        if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        val held = if (effectiveTarget != target) " HELD=$effectiveTarget" else ""
+        val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
+            "igNodes=$lastIgNodeCount igSignals=${signals?.map { it.substringAfterLast('/') }} " +
+            "target=$target overlay=${overlayView != null}$held"
+        if (line == lastDiagLine) return
+        lastDiagLine = line
+        android.util.Log.d(DIAG_TAG, line)
+    }
 
     /**
      * Depth-first collect only the Instagram resource-ids the surface rule cares about
@@ -262,17 +355,36 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         stack.addLast(root)
         var budget = IG_NODE_BUDGET
+        var walked = 0
         while (stack.isNotEmpty() && budget-- > 0) {
             val node = stack.removeLast()
-            node.viewIdResourceName?.let { id ->
+            walked++
+            idOf(node)?.let { id ->
                 if (id in InstagramSurface.SIGNAL_IDS) found.add(id)
             }
             if (found.size == SIGNAL_COUNT) break   // seen everything the rule needs
-            for (i in 0 until node.childCount) {
-                stack.addLast(node.getChild(i) ?: continue)
-            }
+            stack.addAll(childrenOf(node))
         }
+        lastIgNodeCount = walked
         return found
+    }
+
+    /** [node]'s resource-id, or null if the node died under us mid-walk. */
+    private fun idOf(node: AccessibilityNodeInfo): String? =
+        runCatching { node.viewIdResourceName }.getOrNull()
+
+    /**
+     * [node]'s children, tolerating a tree that changes during the walk: a recycled node throws from
+     * `childCount`/`getChild`, and losing one subtree is far better than losing the whole scan.
+     */
+    private fun childrenOf(node: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val count = runCatching { node.childCount }.getOrDefault(0)
+        if (count <= 0) return emptyList()
+        val children = ArrayList<AccessibilityNodeInfo>(count)
+        for (i in 0 until count) {
+            runCatching { node.getChild(i) }.getOrNull()?.let { children.add(it) }
+        }
+        return children
     }
 
     /** The URL shown in an allowlisted browser's omnibox ([BrowserTargets.urlBarId]), or null if
@@ -284,12 +396,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         var budget = URL_NODE_BUDGET
         while (stack.isNotEmpty() && budget-- > 0) {
             val node = stack.removeLast()
-            if (node.viewIdResourceName == id) {
-                return node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            if (idOf(node) == id) {
+                return runCatching { node.text?.toString()?.trim() }.getOrNull()?.takeIf { it.isNotEmpty() }
             }
-            for (i in 0 until node.childCount) {
-                stack.addLast(node.getChild(i) ?: continue)
-            }
+            stack.addAll(childrenOf(node))
         }
         return null
     }
@@ -438,7 +548,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TICK_MS = 5_000L
-        private const val NODE_BUDGET = 400
+        /** Settings-watch text walk. Raised with flagIncludeNotImportantViews (more nodes per screen)
+         *  so a deep Settings page can't exhaust the budget before the App-Block text is reached -
+         *  running out early would make the self-defense fail open. */
+        private const val NODE_BUDGET = 800
         /** Instagram trees are large; cap the reel-signal walk and stop early once signals are found. */
         private const val IG_NODE_BUDGET = 1_200
         private val SIGNAL_COUNT = InstagramSurface.SIGNAL_IDS.size
@@ -449,6 +562,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** How long the installed-browser set is cached before re-query (catches a new browser install). */
         private const val BROWSER_CACHE_TTL_MS = 60_000L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
+        /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
+        private const val DIAG_TAG = "AppBlockFg"
 
         /** Liveness flag for the watchdog: true only while the system has this service running. */
         @Volatile
