@@ -22,7 +22,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -39,11 +42,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.appblock.data.PrefsEngineStore
+import com.appblock.engine.Availability
 import com.appblock.engine.ChangeDirection
 import com.appblock.engine.ChangeResult
+import com.appblock.engine.DayBoundary
+import com.appblock.engine.DayLabels
 import com.appblock.engine.DurableChangeGate
 import com.appblock.engine.DurableUnlockManager
 import com.appblock.engine.DurableUnlockState
@@ -52,6 +60,8 @@ import com.appblock.engine.Schedule
 import com.appblock.engine.ScheduleEditorModel
 import com.appblock.engine.Target
 import com.appblock.engine.TargetSettings
+import com.appblock.engine.TargetSummaries
+import com.appblock.engine.TodayUsage
 import com.appblock.engine.UnlockCategory
 import com.appblock.engine.WindowRule
 import java.time.DayOfWeek
@@ -61,6 +71,7 @@ import com.appblock.security.GeneratedKey
 import com.appblock.security.LockKeys
 import com.appblock.security.LockStore
 import com.appblock.security.qrBitmap
+import com.appblock.service.AndroidEngineClock
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.delay
@@ -94,6 +105,15 @@ fun SettingsScreen(
     val blocklistStore = remember { BlocklistStore(context) }
     val blocklist by remember(refresh) { mutableStateOf(blocklistStore.domains()) }
     var newDomain by remember { mutableStateOf("") }
+
+    // Live usage for the "used today" bars. The service (writer) and this screen (reader) share a
+    // process, so the same SharedPreferences-backed store is the live value, not a stale copy.
+    val engineClock = remember { AndroidEngineClock() }
+    val engineStore = remember { PrefsEngineStore(context, engineClock) }
+    val today = remember(refresh) { DayBoundary.logicalDay(engineClock.nowLocal()) }
+
+    /** Which target's edit sheet is open, if any. */
+    var editing by remember { mutableStateOf<Target?>(null) }
 
     // Advance + persist the unlock state each second; keep the live countdown fresh.
     LaunchedEffect(Unit) {
@@ -164,14 +184,17 @@ fun SettingsScreen(
             for (target in Target.entries) {
                 val ts = draft.targets[target] ?: continue
                 item(key = "target_${target.key}") {
-                    TargetEditor(
+                    TargetCard(
                         label = labelForSettings(target),
+                        scopeNote = scopeNote(target),
                         settings = ts,
+                        // Usage reads the *saved* rules, not the draft: it answers "how am I doing
+                        // against the cap in force today", which an unsaved edit hasn't changed.
+                        usage = current.targets[target]?.let {
+                            TargetSummaries.todayUsage(it, engineStore.loadUsage(target), today)
+                        },
                         onEnabledChange = { on -> updateTarget(target) { it.copy(enabled = on) } },
-                        onWeekday = { v -> updateTarget(target) { it.copy(weekdayMinutes = v) } },
-                        onWeekend = { v -> updateTarget(target) { it.copy(weekendMinutes = v) } },
-                        onMax = { v -> updateTarget(target) { it.copy(exceptionMaxMinutes = v) } },
-                        onScheduleChange = { sched -> updateTarget(target) { it.copy(schedule = sched) } },
+                        onEdit = { editing = target },
                     )
                 }
             }
@@ -275,6 +298,21 @@ fun SettingsScreen(
         }
     }
 
+    editing?.let { target ->
+        draft.targets[target]?.let { ts ->
+            TargetEditSheet(
+                label = labelForSettings(target),
+                settings = ts,
+                dirty = dirty,
+                onWeekday = { v -> updateTarget(target) { it.copy(weekdayMinutes = v) } },
+                onWeekend = { v -> updateTarget(target) { it.copy(weekendMinutes = v) } },
+                onMax = { v -> updateTarget(target) { it.copy(exceptionMaxMinutes = v) } },
+                onScheduleChange = { sched -> updateTarget(target) { it.copy(schedule = sched) } },
+                onDismiss = { editing = null },
+            )
+        }
+    }
+
     if (showSetup) {
         KeySetupDialog(
             onConfirm = { generated ->
@@ -355,15 +393,19 @@ private fun LockStatusCard(
     }
 }
 
+/**
+ * The at-a-glance card: what this app's limits actually are, plus today's progress against them.
+ * Editing happens in [TargetEditSheet] — the steppers used to sit inline, which meant the numbers
+ * you wanted to *read* were buried in the controls you rarely *touch*.
+ */
 @Composable
-private fun TargetEditor(
+private fun TargetCard(
     label: String,
+    scopeNote: String?,
     settings: TargetSettings,
+    usage: TodayUsage?,
     onEnabledChange: (Boolean) -> Unit,
-    onWeekday: (Int) -> Unit,
-    onWeekend: (Int) -> Unit,
-    onMax: (Int) -> Unit,
-    onScheduleChange: (Schedule?) -> Unit,
+    onEdit: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -375,31 +417,143 @@ private fun TargetEditor(
                 Text(label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                 Switch(checked = settings.enabled, onCheckedChange = onEnabledChange)
             }
+
+            Text(
+                if (settings.enabled) "Status: on" else "Status: off — this app isn't limited.",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (settings.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+
+            if (scopeNote != null) {
+                Text(
+                    scopeNote,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+
             if (settings.enabled) {
-                // The OFF branch says what off means; without this the ON switch carries no words at
-                // all, and "is this app enforced or exempt?" is the one misread that costs enforcement.
-                Text(
-                    "On — blocked past ${formatWindow(settings.weekdayMinutes)} on weekdays, " +
-                        "${formatWindow(settings.weekendMinutes)} on weekends.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-                Spacer(Modifier.height(8.dp))
-                IntStepper("Weekday cap", settings.weekdayMinutes, formatWindow(settings.weekdayMinutes), 5, 0, 24 * 60, onWeekday)
-                Spacer(Modifier.height(6.dp))
-                IntStepper("Weekend cap", settings.weekendMinutes, formatWindow(settings.weekendMinutes), 5, 0, 24 * 60, onWeekend)
-                Spacer(Modifier.height(6.dp))
-                IntStepper("Exception ceiling", settings.exceptionMaxMinutes, formatWindow(settings.exceptionMaxMinutes), 5, 0, 24 * 60, onMax)
+                val summary = TargetSummaries.of(settings)
                 Spacer(Modifier.height(10.dp))
-                ScheduleEditor(schedule = settings.schedule, onScheduleChange = onScheduleChange)
-            } else {
-                Text(
-                    "Off — this app isn't limited.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
+
+                for ((i, line) in summary.limits.withIndex()) {
+                    SummaryRow(
+                        label = if (i == 0) "Time limit" else "",
+                        value = formatWindow(line.minutes),
+                        days = DayLabels.of(line.days),
+                    )
+                }
+                for ((i, slot) in summary.availability.withIndex()) {
+                    SummaryRow(
+                        label = if (i == 0) "Available" else "",
+                        value = when (slot) {
+                            is Availability.AnyTime -> "any time"
+                            is Availability.Window -> "${formatHm(slot.startMin)} – ${formatHm(slot.endMin)}"
+                            is Availability.BlockedAllDay -> "blocked all day"
+                        },
+                        days = DayLabels.of(slot.days),
+                        alert = slot is Availability.BlockedAllDay,
+                    )
+                }
+                SummaryRow(
+                    label = "Can raise to",
+                    value = formatWindow(summary.exceptionCeilingMinutes),
+                    days = "with an exception",
                 )
+
+                if (usage != null) {
+                    Spacer(Modifier.height(12.dp))
+                    LinearProgressIndicator(
+                        progress = { usage.fraction },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                    )
+                    Text(
+                        "${usage.minutesUsed} of ${formatWindow(usage.capMinutes)} used today",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onEdit) { Text("Edit limits") }
+                }
+            }
+        }
+    }
+}
+
+/** One "label — value — days" line of the summary. Blank [label] continues the row above. */
+@Composable
+private fun SummaryRow(label: String, value: String, days: String, alert: Boolean = false) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(96.dp),
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (alert) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            days,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * The editing surface, as a bottom sheet rather than an AlertDialog: the schedule editor's seven day
+ * chips alone need ~290dp, and a dialog's insets leave under 280dp on this phone.
+ *
+ * It deliberately has **no Save of its own**. [DurableChangeGate] classifies the whole
+ * [com.appblock.engine.DurableSettings] at once and a loosening consumes the single-use window, so a
+ * second commit point would mean either a second gate implementation or a window consumed twice.
+ * The sheet edits the shared draft; the pinned bottom bar stays the only place a change lands.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TargetEditSheet(
+    label: String,
+    settings: TargetSettings,
+    dirty: Boolean,
+    onWeekday: (Int) -> Unit,
+    onWeekend: (Int) -> Unit,
+    onMax: (Int) -> Unit,
+    onScheduleChange: (Schedule?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 24.dp)) {
+            Text("$label limits", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(12.dp))
+            IntStepper("Weekday cap", settings.weekdayMinutes, formatWindow(settings.weekdayMinutes), 5, 0, 24 * 60, onWeekday)
+            Spacer(Modifier.height(6.dp))
+            IntStepper("Weekend cap", settings.weekendMinutes, formatWindow(settings.weekendMinutes), 5, 0, 24 * 60, onWeekend)
+            Spacer(Modifier.height(6.dp))
+            IntStepper("Exception ceiling", settings.exceptionMaxMinutes, formatWindow(settings.exceptionMaxMinutes), 5, 0, 24 * 60, onMax)
+            Spacer(Modifier.height(10.dp))
+            ScheduleEditor(schedule = settings.schedule, onScheduleChange = onScheduleChange)
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (dirty) "Not saved yet — save on the main screen." else "No unsaved changes.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (dirty) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Button(onClick = onDismiss) { Text("Done") }
             }
         }
     }
@@ -529,9 +683,9 @@ private fun ClockStepper(label: String, value: Int, skip: Int, onChange: (Int) -
             modifier = Modifier.weight(1f).padding(end = 12.dp),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StepperButton("−") { onChange(ScheduleEditorModel.stepClock(value, -30, skip)) }
+            StepperButton("−", stepperTag("minus", label)) { onChange(ScheduleEditorModel.stepClock(value, -30, skip)) }
             StepperValue(formatHm(value))
-            StepperButton("+") { onChange(ScheduleEditorModel.stepClock(value, +30, skip)) }
+            StepperButton("+", stepperTag("plus", label)) { onChange(ScheduleEditorModel.stepClock(value, +30, skip)) }
         }
     }
 }
@@ -557,15 +711,22 @@ private fun DayChip(label: String, selected: Boolean, onClick: () -> Unit, modif
 }
 
 /**
+ * Test handle for one stepper button. Tests used to reach these by global index, which broke twice as
+ * the layout moved (Save leaving the scroll container, then the steppers moving into a sheet). A tag
+ * keyed on the row's own label survives any rearrangement.
+ */
+internal fun stepperTag(side: String, label: String): String = "stepper:$side:$label"
+
+/**
  * The +/− control shared by both steppers. Sized explicitly rather than by [OutlinedButton]'s
  * defaults so the tap area clears the 48dp minimum — these get tapped repeatedly (0 → 30 min is six
  * taps), so a short target is felt, not just measured.
  */
 @Composable
-private fun StepperButton(symbol: String, onClick: () -> Unit) {
+private fun StepperButton(symbol: String, tag: String, onClick: () -> Unit) {
     OutlinedButton(
         onClick = onClick,
-        modifier = Modifier.defaultMinSize(minWidth = 56.dp, minHeight = 48.dp),
+        modifier = Modifier.defaultMinSize(minWidth = 56.dp, minHeight = 48.dp).testTag(tag),
         contentPadding = PaddingValues(0.dp),
     ) { Text(symbol, style = MaterialTheme.typography.bodyLarge) }
 }
@@ -607,9 +768,9 @@ private fun IntStepper(
             modifier = Modifier.weight(1f).padding(end = 12.dp),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StepperButton("−") { onChange((value - step).coerceAtLeast(min)) }
+            StepperButton("−", stepperTag("minus", label)) { onChange((value - step).coerceAtLeast(min)) }
             StepperValue(display)
-            StepperButton("+") { onChange((value + step).coerceAtMost(max)) }
+            StepperButton("+", stepperTag("plus", label)) { onChange((value + step).coerceAtMost(max)) }
         }
     }
 }
@@ -781,6 +942,15 @@ private fun labelForSettings(target: Target): String = when (target) {
     Target.X -> "X (Twitter)"
 }
 
+/**
+ * What the card would otherwise imply wrongly. Instagram is enforced by *surface*, not by package —
+ * without this the card reads as though the whole app is capped (CONSTRAINTS.md §1).
+ */
+private fun scopeNote(target: Target): String? = when (target) {
+    Target.INSTAGRAM_REELS_EXPLORE -> "Counts Reels and Explore only. Feed, Stories and DMs stay free."
+    else -> null
+}
+
 private fun formatWindow(minutes: Int): String {
     val h = minutes / 60
     val m = minutes % 60
@@ -805,15 +975,7 @@ private fun formatHms(ms: Long): String {
 /** The starter rule when a schedule is first toggled on: every day, 18:00–20:00. */
 private val DEFAULT_WINDOW_RULE = WindowRule(DayOfWeek.entries.toSet(), 18 * 60, 20 * 60)
 
-/** Two letters where one is ambiguous — "T" alone can't distinguish Tuesday from Thursday. */
-private fun dayLabel(day: DayOfWeek): String = when (day) {
-    DayOfWeek.MONDAY -> "M"
-    DayOfWeek.TUESDAY -> "Tu"
-    DayOfWeek.WEDNESDAY -> "W"
-    DayOfWeek.THURSDAY -> "Th"
-    DayOfWeek.FRIDAY -> "F"
-    DayOfWeek.SATURDAY -> "Sa"
-    DayOfWeek.SUNDAY -> "Su"
-}
+/** Chips and summary rows must never disagree about a day's name, so both read [DayLabels]. */
+private fun dayLabel(day: DayOfWeek): String = DayLabels.short(day)
 
 private fun formatHm(minutes: Int): String = "%02d:%02d".format(minutes / 60, minutes % 60)
