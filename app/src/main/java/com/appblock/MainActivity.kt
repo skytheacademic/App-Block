@@ -188,7 +188,17 @@ private fun HomeScreen(
         }
 
         tamperReason?.let { reason ->
-            item { WarningCard(title = "Clock tampering detected", body = "$reason. All targets stay blocked until automatic date & time is turned back on in Settings.") }
+            // Recovery needs BOTH One UI toggles — date & time *and* time zone (see
+            // BudgetCoordinator.trustedClock). Naming only the first would send you to Settings to do
+            // something that doesn't clear the latch, which is the worst possible instruction while
+            // everything is blocked. Kept in step with R.string.block_message_tamper on the overlay.
+            item {
+                WarningCard(
+                    title = "Clock tampering detected",
+                    body = "$reason. All targets stay blocked until BOTH \"Set time automatically\" AND " +
+                        "\"Set time zone automatically\" are turned back on in Settings.",
+                )
+            }
         }
 
         if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {

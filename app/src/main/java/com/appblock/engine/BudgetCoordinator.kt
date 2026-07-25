@@ -220,16 +220,20 @@ class BudgetCoordinator(
         val auto = trustedClock()
         val anchor = store.loadClockAnchor()
 
+        // These reasons are shown to the user verbatim, so none of them names a single toggle: the
+        // latch now depends on both, and "turn automatic date & time back on" would send someone to
+        // Settings to perform a fix that doesn't clear it. The reason says what happened; the overlay
+        // and the warning card name both toggles to turn on.
         if (anchor != null && anchor.bootCount != boot) {
             rules.forEach { store.saveException(it.target, ExceptionState.None) }
-            if (!auto) store.saveTamper("Rebooted with automatic date & time off")
+            if (!auto) store.saveTamper("Rebooted while the clock was not fully automatic")
         } else if (anchor != null && !auto) {
             val drift = (nowWall - anchor.wallMs) - (nowElapsed - anchor.elapsedMs)
             // Order matters for the message only — either signal alone is enough to latch.
             if (anchor.zoneOffsetSeconds != null && anchor.zoneOffsetSeconds != nowZone) {
-                store.saveTamper("Time zone changed while automatic date & time is off")
+                store.saveTamper("Time zone changed while the clock was not fully automatic")
             } else if (abs(drift) > DRIFT_TOLERANCE_MS) {
-                store.saveTamper("Clock changed while automatic date & time is off")
+                store.saveTamper("Date or time changed while the clock was not fully automatic")
             }
         }
         if (auto && store.loadTamper() != null) store.saveTamper(null)
@@ -246,7 +250,7 @@ class BudgetCoordinator(
             }
             val usage = store.loadUsage(rule.target) ?: continue
             if (usage.dayKey > today) {
-                if (!auto) store.saveTamper("Stored usage is dated ahead of today")
+                if (!auto) store.saveTamper("Stored usage is dated ahead of today's date")
                 store.saveUsage(rule.target, BudgetUsage(usage.secondsUsed, today))
             }
         }
