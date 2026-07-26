@@ -145,7 +145,11 @@ fun SettingsScreen(
     val direction = DurableChangeGate.classify(current, draft)
     val dirty = draft != current
     val loosening = direction == ChangeDirection.LOOSEN
-    val canSave = dirty && (!loosening || open)
+    // One window buys one change (CONSTRAINTS §6). Counted here as well as in the gate so the rule is
+    // visible *before* Save rather than only as a rejection — a greyed button with its reason on
+    // screen beats one that looks live and then refuses.
+    val looseningCount = DurableChangeGate.looseningReasons(current, draft).size
+    val canSave = dirty && (!loosening || (open && looseningCount == 1))
 
     fun updateTarget(target: Target, block: (TargetSettings) -> TargetSettings) {
         val ts = draft.targets[target] ?: return
@@ -301,6 +305,18 @@ fun SettingsScreen(
                         }
                         Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 4.dp))
                     }
+                    if (loosening && open && looseningCount > 1) {
+                        // The window is open and still can't take this edit, which is the confusing
+                        // case — so name the count and say what to do about it, rather than leaving a
+                        // greyed Save under an open window.
+                        Text(
+                            "Your window covers one change, and this edit loosens $looseningCount. " +
+                                "Undo all but the one you want — the others each need their own window.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                        )
+                    }
                     // Every pending change, not only the loosening ones. The gate judges the whole
                     // settings object at once, so one loosening anywhere gates everything — and a
                     // warning with nothing listed under it (reported 2026-07-25) leaves you with a
@@ -360,7 +376,14 @@ fun SettingsScreen(
                                     }
                                     refresh++
                                 }
-                                is ChangeResult.Blocked -> message = "That loosens your limits — start the change window first."
+                                is ChangeResult.Blocked ->
+                                    message = "That loosens your limits — start the change window first."
+                                // Reachable only if the draft changed between the canSave check and
+                                // the tap. The window is deliberately NOT consumed — a refused save
+                                // must never cost the cycle.
+                                is ChangeResult.TooManyLoosenings ->
+                                    message = "A window covers one change; this edit loosens " +
+                                        "${result.loosenings.size}. Undo all but one."
                             }
                         },
                     ) { Text(if (loosening) "Accept one change" else "Save") }
