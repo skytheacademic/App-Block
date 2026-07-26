@@ -17,6 +17,9 @@
     <string name="watchdog_text_dead">The blocking service died (battery optimization or a crash). Open App-Block to bring it back.</string>
     <string name="watchdog_text_disabled">The Accessibility service is switched off, so nothing is blocked. Re-enable it in Settings.</string>
     <string name="watchdog_text_no_overlay">\"Appear on top\" is switched off, so the block screen can\'t be drawn. Blocked apps and sites now just throw you to the home screen with no explanation. Open App-Block to turn it back on.</string>
+    <string name="signal_channel_name">Detection drift</string>
+    <string name="signal_title">Reels blocking needs a re-check</string>
+    <string name="signal_text">Instagram has updated since App-Block last recognised the Reels player, so reels may not be getting blocked any more. Open Reels once — if the block screen appears, everything is fine and this will go away.</string>
     <string name="self_defense_bounce">App-Block is locked. Changing its system access needs the stashed key and the change window.</string>
     <string name="unlock_channel_name">Change window</string>
     <string name="unlock_title">Your settings window is open</string>

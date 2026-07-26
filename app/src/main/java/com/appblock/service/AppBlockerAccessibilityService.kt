@@ -23,6 +23,7 @@ import com.appblock.MainActivity
 import com.appblock.R
 import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
+import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
 import com.appblock.engine.AppTargets
 import com.appblock.engine.BlockReason
@@ -35,6 +36,7 @@ import com.appblock.engine.InstagramSurface
 import com.appblock.engine.OcclusionHold
 import com.appblock.engine.RuleSource
 import com.appblock.engine.SettingsWatch
+import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
@@ -72,10 +74,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * when what's blocked is an app (→ Home instead). See [exitOverlay].
      */
     private var overlayExitBrowserPkg: String? = null
+    private lateinit var clock: AndroidEngineClock
     private lateinit var coordinator: BudgetCoordinator
     private lateinit var ruleSource: RuleSource
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
+    private lateinit var witnessStore: SignalWitnessStore
 
     /** Briefly-cached set of targets with a live rule — see [activeTargets]. */
     private var activeTargetsCache: Set<Target>? = null
@@ -110,6 +114,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** Cached `canDrawOverlays` — see [canDrawOverlay]. */
     private var overlayGranted = true
     private var overlayGrantedAtMs = 0L
+    /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
+     *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
+    private var lastSignalConfirmElapsedMs: Long? = null
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -122,7 +129,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         isRunning = true
-        val clock = AndroidEngineClock()
+        clock = AndroidEngineClock()
         ruleSource = ActiveRules.ruleSource(this)
         coordinator = BudgetCoordinator(
             clock,
@@ -133,6 +140,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         )
         unlockController = DurableUnlockController(this)
         blocklistStore = BlocklistStore(this)
+        witnessStore = SignalWitnessStore(this)
     }
 
     /**
@@ -353,6 +361,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             }
         }
         val signals = instagramRoot?.let { collectInstagramSignals(it) }
+        if (signals != null && InstagramSurface.REEL_PAGER in signals) noteReelSignal()
         val target = packageTarget ?: signals?.let { InstagramSurface.targetFor(it) }
         val read = Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost, browserPkg)
         val effective = holdThroughOcclusion(read)
@@ -472,6 +481,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         }
         lastIgNodeCount = walked
         return found
+    }
+
+    /**
+     * Record that the reel pager was really seen, which is what re-confirms [SignalCanary] against the
+     * installed Instagram version. Throttled hard: the scan runs a couple of times a second while
+     * Instagram is open, and each confirmation is a PackageManager lookup plus a prefs write, whereas
+     * one sighting an hour carries exactly the same information.
+     */
+    private fun noteReelSignal() {
+        val now = SystemClock.elapsedRealtime()
+        val last = lastSignalConfirmElapsedMs
+        if (last != null && now - last < SIGNAL_CONFIRM_THROTTLE_MS) return
+        lastSignalConfirmElapsedMs = now
+        runCatching { witnessStore.confirm(clock.wallClockMs()) }
     }
 
     /** [node]'s resource-id, or null if the node died under us mid-walk. */
@@ -728,6 +751,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** How long `canDrawOverlays` is cached before re-checking — see [canDrawOverlay]. Short,
          *  because it decides when the self-defense stands down to let the user re-grant it. */
         private const val OVERLAY_CHECK_TTL_MS = 5_000L
+        /** Min gap between reel-pager confirmations — see [noteReelSignal]. */
+        private const val SIGNAL_CONFIRM_THROTTLE_MS = 60L * 60 * 1_000
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it

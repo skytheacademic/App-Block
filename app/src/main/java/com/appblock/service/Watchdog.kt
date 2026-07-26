@@ -18,6 +18,8 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import com.appblock.MainActivity
 import com.appblock.R
+import com.appblock.data.SignalWitnessStore
+import com.appblock.engine.SignalCanary
 import com.appblock.util.isAccessibilityServiceEnabled
 import java.util.concurrent.TimeUnit
 
@@ -38,6 +40,7 @@ class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(contex
         val ctx = applicationContext
         if (!Watchdog.setupCompleted(ctx)) return Result.success()  // don't nag before first setup
         Watchdog.report(ctx, Watchdog.currentHealth(ctx))
+        Watchdog.reportSignalDrift(ctx, SignalWitnessStore(ctx).refresh(System.currentTimeMillis()))
         return Result.success()
     }
 }
@@ -47,6 +50,8 @@ object Watchdog {
     private const val WORK_NAME = "appblock_watchdog"
     private const val CHANNEL_ID = "appblock_watchdog"
     private const val NOTIFICATION_ID = 1
+    private const val SIGNAL_CHANNEL_ID = "appblock_signal"
+    private const val SIGNAL_NOTIFICATION_ID = 2
     private const val RUNTIME_PREFS = "appblock_runtime"
     private const val KEY_SETUP_DONE = "setup_done"
 
@@ -142,6 +147,44 @@ object Watchdog {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * The reel-detection drift prompt ([SignalCanary]). Deliberately unlike the health nag above: its
+     * own channel at default importance, and dismissable. This one can be a false positive — Instagram
+     * updates and the user simply hasn't opened Reels since — so it must cost a swipe, not a
+     * permanent banner. It cannot use `setOngoing` for the same reason.
+     */
+    fun reportSignalDrift(context: Context, health: SignalCanary.Health) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (health != SignalCanary.Health.STALE) {
+            manager.cancel(SIGNAL_NOTIFICATION_ID)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        manager.createNotificationChannel(
+            NotificationChannel(
+                SIGNAL_CHANNEL_ID,
+                context.getString(R.string.signal_channel_name),
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ),
+        )
+        val text = context.getString(R.string.signal_text)
+        manager.notify(
+            SIGNAL_NOTIFICATION_ID,
+            NotificationCompat.Builder(context, SIGNAL_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(context.getString(R.string.signal_title))
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .build(),
+        )
     }
 
     private fun runtimePrefs(context: Context) =
