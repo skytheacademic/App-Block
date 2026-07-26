@@ -52,7 +52,14 @@ class DurableUnlockController(private val context: Context) {
     fun state(): DurableUnlockState {
         val current = store.load()
         val next = DurableUnlockManager.tick(current, SystemClock.elapsedRealtime(), integrity.bootCount())
-        if (next != current) store.save(next)
+        if (next == current) return next
+        store.save(next)
+        // A wait that ended without being used — a reboot cancelled it, or the window ran out — leaves
+        // its notification job still booked for the original time. It fires, ticks, finds Locked and
+        // does nothing, so this was only ever litter; but it is litter that outlives the state it was
+        // scheduled for, and a stale job is what made `dumpsys jobscheduler` misreport a cancelled
+        // wait as a resumed one on 2026-07-25. Withdraw it with the state it belonged to.
+        if (next is DurableUnlockState.Locked) UnlockWindowWorker.cancel(context)
         return next
     }
 

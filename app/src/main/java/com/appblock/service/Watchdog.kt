@@ -49,9 +49,9 @@ object Watchdog {
 
     private const val WORK_NAME = "appblock_watchdog"
     private const val CHANNEL_ID = "appblock_watchdog"
-    private const val NOTIFICATION_ID = 1
+    private const val NOTIFICATION_ID = Notifications.HEALTH
     private const val SIGNAL_CHANNEL_ID = "appblock_signal"
-    private const val SIGNAL_NOTIFICATION_ID = 2
+    private const val SIGNAL_NOTIFICATION_ID = Notifications.SIGNAL_DRIFT
     private const val RUNTIME_PREFS = "appblock_runtime"
     private const val KEY_SETUP_DONE = "setup_done"
 

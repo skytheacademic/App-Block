@@ -162,7 +162,21 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return fresh
     }
 
+    /**
+     * Every event goes through here, so nothing thrown inside may escape: an uncaught exception on
+     * this callback kills the service, and a dead service blocks nothing until the watchdog notices up
+     * to 15 minutes later. The `lateinit` fields are the concrete risk — events can arrive before
+     * [onServiceConnected] has finished wiring them, and that throws
+     * `UninitializedPropertyAccessException` rather than anything the inner guards catch.
+     *
+     * Swallowing is the right call here specifically because the loop is self-healing: the next event
+     * or the 5-second tick re-runs the whole decision from scratch, so one lost pass costs nothing.
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        runCatching { handleEvent(event) }
+    }
+
+    private fun handleEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val type = event.eventType
         val windowEvent = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
@@ -447,10 +461,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             effectiveWeb != webBlock -> " HELD=$effectiveWeb"
             else -> ""
         }
-        // Browser half, for Gate D. urlRead distinguishes the three ways website blocking can fail:
-        // browser not recognised at all, url_bar unreadable (null), or read fine but not matched.
+        // Browser half, for Gate D. hostRead distinguishes the three ways website blocking can fail:
+        // browser not recognised at all, url_bar unreadable (NULL), or read fine but not matched.
+        //
+        // Host only, never the full URL. The whole point of the omnibox read is that it sees every
+        // page you visit, and debugFast is the build that runs on the real phone during real browsing
+        // — so logging paths and query strings would put your actual browsing history in logcat, where
+        // any app holding READ_LOGS could take it. The host is the only part the matcher uses anyway,
+        // so nothing diagnostic is lost.
+        val hostRead = when {
+            rawUrl == null -> "NULL"
+            else -> DomainMatcher.host(rawUrl) ?: "UNPARSED"
+        }
         val web = if (browserPkg == null) "" else
-            " browser=${browserPkg.substringAfterLast('.')} urlRead=${rawUrl ?: "NULL"} web=$webBlock"
+            " browser=${browserPkg.substringAfterLast('.')} hostRead=$hostRead web=$webBlock"
         val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
             "igNodes=$lastIgNodeCount igSignals=${signals?.map { it.substringAfterLast('/') }} " +
             "target=$target overlay=${overlayView != null}$held$web"

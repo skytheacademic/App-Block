@@ -53,7 +53,7 @@ class UnlockWindowWorker(context: Context, params: WorkerParameters) : Worker(co
     companion object {
         private const val WORK_NAME = "appblock_unlock_window"
         private const val CHANNEL_ID = "appblock_unlock"
-        private const val NOTIFICATION_ID = 2
+        private const val NOTIFICATION_ID = Notifications.UNLOCK_WINDOW
 
         /** Schedule the notification for [waitMs] from now, replacing any prior pending request. */
         fun schedule(context: Context, waitMs: Long) {
