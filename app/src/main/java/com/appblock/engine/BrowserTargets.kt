@@ -21,6 +21,21 @@ object BrowserTargets {
 
     fun isAllowlisted(pkg: String): Boolean = pkg in allowlist
 
+    /**
+     * Chrome mints an installed PWA ("Add to Home screen") as its own package, `org.chromium.webapk.`
+     * plus a hash. It renders the site full-screen with **no address bar at all**, and it doesn't
+     * answer a wildcard http VIEW intent — only its own host — so the installed-browser probe that
+     * catches Firefox and Samsung Internet steps right past it.
+     *
+     * The result before this: instagram.com on the blocklist, blocked in Chrome, and one "Add to Home
+     * screen" away from being an unblocked icon on the home screen that looks and behaves like the app.
+     * Nothing about it is inspectable, so it can't be enforced — it's blocked outright, the same
+     * reasoning as a non-allowlisted browser.
+     */
+    const val WEBAPK_PREFIX = "org.chromium.webapk."
+
+    fun isWebApp(pkg: String): Boolean = pkg.startsWith(WEBAPK_PREFIX)
+
     /** The omnibox EditText resource-id whose text is the current URL, for an allowlisted browser. */
     fun urlBarId(pkg: String): String = "$pkg:id/url_bar"
 
@@ -50,5 +65,39 @@ object BrowserTargets {
         val trimmed = text?.trim().orEmpty()
         if (trimmed.isEmpty() || trimmed.any { it.isWhitespace() }) return null
         return trimmed
+    }
+
+    /**
+     * What the address bar is telling us right now. Four states rather than a nullable string, because
+     * "no URL" used to conflate cases that need opposite handling — and treating them alike is what
+     * made an unreadable browser fail *open*.
+     *
+     * The split that matters is [Editing] versus [Unreadable]: both produce no address, but the first
+     * is the user typing (block there and the browser fights you on every keystroke) and the second is
+     * the enforcement being blind (allow there and the blocklist is one broken resource-id away from
+     * doing nothing at all).
+     */
+    sealed interface Omnibox {
+
+        /** The address bar was found and holds a committed URL — the only judgeable state. */
+        data class Url(val value: String) : Omnibox
+
+        /** Found, but showing no committed address: mid-typing, or a blank new tab. Never blocked. */
+        data object Editing : Omnibox
+
+        /**
+         * Not found yet, and not for long enough to mean anything. A freshly-foregrounded browser has
+         * no tree for a moment, and Chrome's toolbar slides away as you scroll — blocking on either
+         * would be a false positive on ordinary use, so this reads as allowed.
+         */
+        data object Unknown : Omnibox
+
+        /**
+         * Not found, and it has stayed that way past the settle grace *without the address bar ever
+         * having been readable* since this browser came to the foreground. That's the signature of the
+         * resource-id having moved, or of something wearing an allowlisted browser's package without
+         * its UI — the cases where continuing to allow means enforcing nothing.
+         */
+        data object Unreadable : Omnibox
     }
 }

@@ -10,6 +10,8 @@
     <string name="block_message_site">This site is on your blocklist. Removing it takes the 72-hour change window.</string>
     <string name="block_message_site_named">%1$s is on your blocklist. Removing it takes the 72-hour change window.</string>
     <string name="block_message_browser">This browser isn\'t on your allowed list. Use Chrome or Brave.</string>
+    <string name="block_message_web_app">This is a website installed as an app, so it has no address bar to check against your blocklist. Open the site in Chrome instead.</string>
+    <string name="block_message_unreadable">App-Block can\'t read this browser\'s address bar, so it can\'t tell which site you\'re on. Blocked until it can — if this keeps happening, the browser has probably updated.</string>
     <string name="block_go_back">Go back</string>
     <string name="watchdog_channel_name">Blocking health</string>
     <string name="watchdog_title">App-Block is not protecting you</string>

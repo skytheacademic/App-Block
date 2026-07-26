@@ -117,6 +117,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
      *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
     private var lastSignalConfirmElapsedMs: Long? = null
+    /** Address-bar tracking for [omniboxFor] — which browser, whether its omnibox has ever been read
+     *  since it took the foreground, and when we started watching it. */
+    private var addressBrowserPkg: String? = null
+    private var addressSeenForPkg = false
+    private var addressWatchedSinceMs = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -351,7 +356,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         var webBlock: BrowserPolicy.WebBlock? = null
         var webHost: String? = null
         var browserPkg: String? = null      // whose omnibox we read — also the overlay's exit target
-        var rawUrl: String? = null          // diagnostics only — what the omnibox actually read
+        var omnibox: BrowserTargets.Omnibox? = null   // diagnostics only — what the address bar said
         val browsers = browserPackages()
         val windowList = visibleWindows()
         for (window in windowList) {
@@ -364,13 +369,24 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val pkg = root.packageName?.toString() ?: return@runCatching
                 if (packageTarget == null) AppTargets.targetFor(pkg, activeTargets())?.let { packageTarget = it }
                 if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
-                if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
+                if (webBlock == null &&
+                    (BrowserTargets.isAllowlisted(pkg) || BrowserTargets.isWebApp(pkg) || pkg in browsers)
+                ) {
                     browserVisible = true
-                    val url = if (BrowserTargets.isAllowlisted(pkg)) urlInBrowser(root, pkg) else null
+                    val read =
+                        if (BrowserTargets.isAllowlisted(pkg)) omniboxFor(root, pkg)
+                        else BrowserTargets.Omnibox.Unknown
                     browserPkg = pkg
-                    rawUrl = url
-                    webBlock = BrowserPolicy.decide(pkg, isBrowser = pkg in browsers, url = url, blocklist = blocklistStore.domains().toSet())
-                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && url != null) webHost = DomainMatcher.host(url)
+                    omnibox = read
+                    webBlock = BrowserPolicy.decide(
+                        pkg,
+                        isBrowser = pkg in browsers,
+                        omnibox = read,
+                        blocklist = blocklistStore.domains().toSet(),
+                    )
+                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && read is BrowserTargets.Omnibox.Url) {
+                        webHost = DomainMatcher.host(read.value)
+                    }
                 }
             }
         }
@@ -381,7 +397,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val effective = holdThroughOcclusion(read)
         diagnose(
             windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target,
-            browserPkg, rawUrl, webBlock, effective.webBlock,
+            browserPkg, omnibox, webBlock, effective.webBlock,
         )
         return effective
     }
@@ -448,7 +464,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         target: Target?,
         effectiveTarget: Target?,
         browserPkg: String?,
-        rawUrl: String?,
+        omnibox: BrowserTargets.Omnibox?,
         webBlock: BrowserPolicy.WebBlock?,
         effectiveWeb: BrowserPolicy.WebBlock?,
     ) {
@@ -461,20 +477,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             effectiveWeb != webBlock -> " HELD=$effectiveWeb"
             else -> ""
         }
-        // Browser half, for Gate D. hostRead distinguishes the three ways website blocking can fail:
-        // browser not recognised at all, url_bar unreadable (NULL), or read fine but not matched.
+        // Browser half, for Gate D. addr distinguishes every way website blocking can fail: browser
+        // not recognised at all, address bar being typed in, not found yet, proven unreadable, or read
+        // fine but not matched.
         //
         // Host only, never the full URL. The whole point of the omnibox read is that it sees every
         // page you visit, and debugFast is the build that runs on the real phone during real browsing
         // — so logging paths and query strings would put your actual browsing history in logcat, where
         // any app holding READ_LOGS could take it. The host is the only part the matcher uses anyway,
         // so nothing diagnostic is lost.
-        val hostRead = when {
-            rawUrl == null -> "NULL"
-            else -> DomainMatcher.host(rawUrl) ?: "UNPARSED"
+        val addr = when (omnibox) {
+            null -> "NONE"
+            is BrowserTargets.Omnibox.Url -> DomainMatcher.host(omnibox.value) ?: "UNPARSED"
+            else -> omnibox.toString().substringAfterLast('$')
         }
         val web = if (browserPkg == null) "" else
-            " browser=${browserPkg.substringAfterLast('.')} hostRead=$hostRead web=$webBlock"
+            " browser=${browserPkg.substringAfterLast('.')} addr=$addr web=$webBlock"
         val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
             "igNodes=$lastIgNodeCount igSignals=${signals?.map { it.substringAfterLast('/') }} " +
             "target=$target overlay=${overlayView != null}$held$web"
@@ -539,9 +557,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return children
     }
 
-    /** The URL shown in an allowlisted browser's omnibox ([BrowserTargets.urlBarId]), or null if
-     *  unreadable / a blank tab. Bounded DFS — the url_bar sits near the top of the tree. */
-    private fun urlInBrowser(root: AccessibilityNodeInfo, pkg: String): String? {
+    /**
+     * What an allowlisted browser's address bar ([BrowserTargets.urlBarId]) is showing, or null when
+     * the node isn't in the tree at all. Bounded DFS — the url_bar sits near the top of the tree.
+     *
+     * Null and [BrowserTargets.Omnibox.Editing] are deliberately different answers: "there is no
+     * address bar here" and "the address bar is showing nothing committed" look identical to the old
+     * nullable-String return, and only [omniboxFor] can tell them apart into allow and block.
+     */
+    private fun omniboxIn(root: AccessibilityNodeInfo, pkg: String): BrowserTargets.Omnibox? {
         val id = BrowserTargets.urlBarId(pkg)
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         stack.addLast(root)
@@ -551,17 +575,50 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             if (idOf(node) == id) {
                 // Only a committed URL counts - not mid-typing autocomplete, not the empty-field hint.
                 // See BrowserTargets.committedUrl; both failures were seen live at Gate D.
-                return runCatching {
+                val url = runCatching {
                     BrowserTargets.committedUrl(
                         text = node.text?.toString(),
                         focused = node.isFocused,
                         showingHintText = node.isShowingHintText,
                     )
                 }.getOrNull()
+                return if (url != null) BrowserTargets.Omnibox.Url(url) else BrowserTargets.Omnibox.Editing
             }
             stack.addAll(childrenOf(node))
         }
         return null
+    }
+
+    /**
+     * Resolve a missing address bar into "not yet" or "not ever" — the timing that lets website
+     * blocking fail closed without fighting ordinary browsing.
+     *
+     * Two independent reasons a missing url_bar is usually harmless: the browser has only just come
+     * foreground and its tree isn't built, or Chrome has scrolled its toolbar out of view. Both are
+     * covered here by requiring that the address bar has **never once** been readable since this
+     * browser took the foreground, *and* that [UNREADABLE_GRACE_MS] has passed. A page you scrolled
+     * down was necessarily loaded with the toolbar visible, so it can't reach that state; a renamed
+     * resource-id reaches it every time.
+     *
+     * ⚠️ The grace is a desk judgement — whether Chrome's scrolled-away toolbar actually leaves the
+     * accessibility tree is unverified on hardware. If it turns out it does *and* a fresh launch can
+     * restore a scrolled tab, this is where the false positive would come from.
+     */
+    private fun omniboxFor(root: AccessibilityNodeInfo, pkg: String): BrowserTargets.Omnibox {
+        val now = SystemClock.elapsedRealtime()
+        if (pkg != addressBrowserPkg) {
+            addressBrowserPkg = pkg
+            addressSeenForPkg = false
+            addressWatchedSinceMs = now
+        }
+        val read = omniboxIn(root, pkg)
+        if (read is BrowserTargets.Omnibox.Url) addressSeenForPkg = true
+        return when {
+            read != null -> read
+            addressSeenForPkg -> BrowserTargets.Omnibox.Unknown
+            now - addressWatchedSinceMs < UNREADABLE_GRACE_MS -> BrowserTargets.Omnibox.Unknown
+            else -> BrowserTargets.Omnibox.Unreadable
+        }
     }
 
     /**
@@ -724,6 +781,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             if (host != null) getString(R.string.block_message_site_named, host)
             else getString(R.string.block_message_site)
         BrowserPolicy.WebBlock.NON_ALLOWLISTED_BROWSER -> getString(R.string.block_message_browser)
+        BrowserPolicy.WebBlock.WEB_APP -> getString(R.string.block_message_web_app)
+        BrowserPolicy.WebBlock.UNREADABLE_ADDRESS -> getString(R.string.block_message_unreadable)
     }
 
     private fun hideOverlay() {
@@ -764,6 +823,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private val SIGNAL_COUNT = InstagramSurface.SIGNAL_IDS.size
         /** Cap the omnibox search; the url_bar sits near the top, so this is plenty. */
         private const val URL_NODE_BUDGET = 600
+        /** How long an allowlisted browser may show no address bar before that counts as unreadable
+         *  rather than as still settling — see [omniboxFor]. */
+        private const val UNREADABLE_GRACE_MS = 5_000L
         /** Min gap between content-change polls (Instagram + browsers), so per-frame events don't thrash. */
         private const val CONTENT_THROTTLE_MS = 700L
         /** How long the installed-browser set is cached before re-query (catches a new browser install). */
