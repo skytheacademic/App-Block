@@ -76,12 +76,24 @@ object SettingsWatch {
     /**
      * True when the screen described by ([packageName], [visibleTexts]) is about App-Block and the
      * watch is armed — i.e. the service should bounce Home right now.
+     *
+     * [repairMode] stands the Settings tier down (only) while the blocker is missing a permission it
+     * cannot grant itself. Without it the self-defense guards the app against its own repair: the
+     * "Appear on top" page names App-Block, so losing that permission means every attempt to restore
+     * it — including the one MainActivity's own button opens — gets bounced, and the blocker is stuck
+     * degraded until adb. The installer tier stays armed throughout, so uninstall is still guarded.
+     *
+     * The trade is real and deliberate: for as long as the permission is missing, turning the service
+     * off in Settings is unguarded too. It's the right side to fail on. That state is already a broken
+     * blocker, the watchdog is nagging about it the whole time, and the window closes the instant the
+     * permission is granted — whereas a blocker you can't repair is one that eventually gets deleted.
      */
     fun shouldBounce(
         packageName: String?,
         visibleTexts: Iterable<CharSequence?>,
         selfLabel: String,
         standDown: Boolean,
+        repairMode: Boolean = false,
     ): Boolean {
         if (standDown) return false
         if (selfLabel.isBlank()) return false
@@ -91,7 +103,7 @@ object SettingsWatch {
         val texts = visibleTexts.filterNotNull()
         val namesUs = texts.any { it.contains(selfLabel, ignoreCase = true) }
         if (!namesUs) return false
-        if (pkg in settingsPackages) return true
+        if (pkg in settingsPackages) return !repairMode
         return texts.any { text -> killControls.any { text.contains(it, ignoreCase = true) } }
     }
 }

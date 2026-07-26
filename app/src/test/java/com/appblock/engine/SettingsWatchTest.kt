@@ -18,7 +18,8 @@ class SettingsWatchTest {
         pkg: String? = "com.android.settings",
         texts: List<CharSequence?>,
         standDown: Boolean = false,
-    ) = SettingsWatch.shouldBounce(pkg, texts, label, standDown)
+        repairMode: Boolean = false,
+    ) = SettingsWatch.shouldBounce(pkg, texts, label, standDown, repairMode)
 
     @Test fun `bounces the accessibility toggle detail page`() {
         assertTrue(bounce(texts = accessibilityDetail))
@@ -121,5 +122,39 @@ class SettingsWatchTest {
                 texts = listOf("App-Block is not protecting you", "The Accessibility service is switched off"),
             ),
         )
+    }
+
+    // ---- repair mode: don't guard the app out of its own repair (audit finding C-2) ----
+
+    private val overlayPage =
+        listOf<CharSequence?>("Appear on top", "App-Block", "Allow permission")
+
+    /**
+     * The trap. Losing "Appear on top" leaves the block screen undrawable, and the page that restores
+     * it names App-Block — so the self-defense bounces every attempt to fix it, including the button
+     * inside App-Block that opens exactly that page. Without repair mode the only way back is adb.
+     */
+    @Test fun `lets the user reach the page that restores the overlay permission`() {
+        assertTrue(bounce(texts = overlayPage))
+        assertFalse(bounce(texts = overlayPage, repairMode = true))
+    }
+
+    @Test fun `repair mode stands the whole settings tier down`() {
+        assertFalse(bounce(texts = accessibilityDetail, repairMode = true))
+        assertFalse(bounce(texts = turnOffDialog, repairMode = true))
+        assertFalse(bounce(pkg = "com.samsung.accessibility", texts = turnOffDialog, repairMode = true))
+    }
+
+    /**
+     * ...but not the installer tier. Repair mode is entered whenever a permission is missing, which is
+     * a state the user can reach by accident; it must not turn into a free uninstall.
+     */
+    @Test fun `repair mode still guards uninstall`() {
+        assertTrue(bounce(pkg = installer, texts = uninstallDialog, repairMode = true))
+    }
+
+    @Test fun `repair mode does not resurrect the screens that were never watched`() {
+        assertFalse(bounce(texts = unrelatedScreen, repairMode = true))
+        assertFalse(bounce(pkg = installer, texts = installDialog, repairMode = true))
     }
 }

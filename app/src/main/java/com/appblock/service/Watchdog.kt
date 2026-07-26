@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -22,8 +23,10 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Detects the "blocking silently died" states and nags loudly. Every ~15 min (WorkManager minimum) it
- * checks that the accessibility service is (a) still enabled in Settings and (b) actually running,
- * and posts a high-priority notification if not. Catches Samsung's battery killer and crashes.
+ * checks the three things blocking actually depends on — the accessibility service being enabled in
+ * Settings, that service actually running, and the overlay permission still being granted — and posts
+ * a high-priority notification when any of them is missing. Catches Samsung's battery killer, crashes,
+ * and a revoked "Appear on top".
  *
  * Honest limit: a manual Force Stop puts the app in the stopped state, where JobScheduler won't run
  * this worker either — closing *that* hole needs the Device Owner tier. Periodic work does survive
@@ -34,11 +37,7 @@ class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(contex
     override fun doWork(): Result {
         val ctx = applicationContext
         if (!Watchdog.setupCompleted(ctx)) return Result.success()  // don't nag before first setup
-        val enabled = isAccessibilityServiceEnabled(ctx)
-        val alive = AppBlockerAccessibilityService.isRunning
-        if (!enabled || !alive) {
-            Watchdog.notifyDead(ctx, serviceEnabled = enabled)
-        }
+        Watchdog.report(ctx, Watchdog.currentHealth(ctx))
         return Result.success()
     }
 }
@@ -65,14 +64,48 @@ object Watchdog {
     fun setupCompleted(context: Context): Boolean =
         runtimePrefs(context).getBoolean(KEY_SETUP_DONE, false)
 
-    fun notifyDead(context: Context, serviceEnabled: Boolean) {
+    /**
+     * What state blocking is actually in. Ordered worst-first, because only one notification can be
+     * shown and the user should be told about the biggest hole: a service that is off or dead blocks
+     * nothing at all, whereas a missing overlay still stops the app — just crudely.
+     */
+    enum class Health { OK, SERVICE_DISABLED, SERVICE_DEAD, NO_OVERLAY }
+
+    /** Pure so the precedence above is testable without a device. */
+    fun health(serviceEnabled: Boolean, serviceRunning: Boolean, canDrawOverlays: Boolean): Health =
+        when {
+            !serviceEnabled -> Health.SERVICE_DISABLED
+            !serviceRunning -> Health.SERVICE_DEAD
+            !canDrawOverlays -> Health.NO_OVERLAY
+            else -> Health.OK
+        }
+
+    fun currentHealth(context: Context): Health = health(
+        serviceEnabled = isAccessibilityServiceEnabled(context),
+        serviceRunning = AppBlockerAccessibilityService.isRunning,
+        canDrawOverlays = Settings.canDrawOverlays(context),
+    )
+
+    /**
+     * Post — or clear — the health notification.
+     *
+     * Clearing matters as much as posting. The nag is `setOngoing`, so before this it could never go
+     * away once shown: the user would fix the problem and keep the "App-Block is not protecting you"
+     * banner forever, which teaches them to ignore the one notification whose whole job is to be
+     * believed.
+     */
+    fun report(context: Context, health: Health) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (health == Health.OK) {
+            manager.cancel(NOTIFICATION_ID)
+            return
+        }
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
             return  // can't post; MainActivity re-requests the permission on next open
         }
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
@@ -87,11 +120,21 @@ object Watchdog {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val text = context.getString(
-            if (serviceEnabled) R.string.watchdog_text_dead else R.string.watchdog_text_disabled,
+            when (health) {
+                Health.SERVICE_DISABLED -> R.string.watchdog_text_disabled
+                Health.SERVICE_DEAD -> R.string.watchdog_text_dead
+                else -> R.string.watchdog_text_no_overlay
+            },
+        )
+        // A missing overlay is a degraded blocker, not an absent one — saying "not protecting you"
+        // there would be the kind of overstatement that gets the whole notification distrusted.
+        val title = context.getString(
+            if (health == Health.NO_OVERLAY) R.string.watchdog_title_degraded
+            else R.string.watchdog_title,
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(context.getString(R.string.watchdog_title))
+            .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(openApp)

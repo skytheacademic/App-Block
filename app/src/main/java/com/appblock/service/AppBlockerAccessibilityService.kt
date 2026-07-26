@@ -107,6 +107,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * [noteForegroundPackage] for what deliberately doesn't count.
      */
     private var lastWindowPackage: String? = null
+    /** Cached `canDrawOverlays` — see [canDrawOverlay]. */
+    private var overlayGranted = true
+    private var overlayGrantedAtMs = 0L
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -215,7 +218,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a
      * zero-friction escape. Stands down while setup is still incomplete (first-time permission
      * granting must not be bounced) and while the durable-change window is open, which makes
-     * "switch the service off" a gated loosening like any other (CONSTRAINTS §6).
+     * "switch the service off" a gated loosening like any other (CONSTRAINTS §6). It also drops to
+     * [SettingsWatch]'s repair mode when the overlay permission is gone, so the blocker can't guard
+     * the app out of its own repair.
      * Returns true when it bounced (the event needs no further handling).
      */
     private fun selfDefense(event: AccessibilityEvent): Boolean {
@@ -230,6 +235,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             visibleTexts = visibleWatchedTexts(),
             selfLabel = getString(R.string.app_name),
             standDown = false,
+            repairMode = !canDrawOverlay(),
         )
         if (!bounce) return false
         performGlobalAction(GLOBAL_ACTION_HOME)
@@ -239,6 +245,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             Toast.makeText(this, getString(R.string.self_defense_bounce), Toast.LENGTH_SHORT).show()
         }
         return true
+    }
+
+    /**
+     * Whether the block overlay can still be drawn, cached for [OVERLAY_CHECK_TTL_MS] because this is
+     * consulted per Settings event and is a binder call. Defaults to granted so a check that hasn't
+     * happened yet leaves the self-defense armed rather than open.
+     */
+    private fun canDrawOverlay(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - overlayGrantedAtMs > OVERLAY_CHECK_TTL_MS) {
+            overlayGranted = Settings.canDrawOverlays(this)
+            overlayGrantedAtMs = now
+        }
+        return overlayGranted
     }
 
     /** All visible text (text + contentDescription) of windows owned by watched settings packages. */
@@ -705,6 +725,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** How long the active-target set is reused before re-reading the rules — see [activeTargets]. */
         private const val ACTIVE_TARGETS_TTL_MS = 3_000L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
+        /** How long `canDrawOverlays` is cached before re-checking — see [canDrawOverlay]. Short,
+         *  because it decides when the self-defense stands down to let the user re-grant it. */
+        private const val OVERLAY_CHECK_TTL_MS = 5_000L
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
