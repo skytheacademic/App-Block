@@ -19,6 +19,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.appblock.ActiveRules
 import com.appblock.BuildConfig
+import com.appblock.MainActivity
 import com.appblock.R
 import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
@@ -31,6 +32,7 @@ import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
 import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
+import com.appblock.engine.OcclusionHold
 import com.appblock.engine.RuleSource
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.Target
@@ -98,7 +100,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      *  from a tree that simply doesn't have the reel pager in it). */
     private var lastIgNodeCount = 0
     /** The last real read taken before our overlay started occluding it — see [holdThroughOcclusion]. */
-    private var heldForeground: Foreground? = null
+    private val occlusionHold = OcclusionHold<Foreground>()
+    /**
+     * The package of the last window-state change, which is how the hold learns the user has moved on:
+     * events keep arriving with a package name even while `getWindows()` is pruned to nothing. See
+     * [noteForegroundPackage] for what deliberately doesn't count.
+     */
+    private var lastWindowPackage: String? = null
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -149,6 +157,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val windowEvent = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             type == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         if (!windowEvent && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) noteForegroundPackage(event)
         if (selfDefense(event)) return
         if (windowEvent) {
             pump()
@@ -167,6 +176,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Record who owns the screen, for the occlusion hold's "the user moved on" test.
+     *
+     * Two kinds of event carry our own package and must NOT count as moving on:
+     *  - the block overlay itself being added or removed, and the self-defense Toast. Treating those as
+     *    a foreground change would release the hold every time the overlay appears, which is precisely
+     *    the once-a-second oscillation [holdThroughOcclusion] exists to stop.
+     *  - so only our real UI qualifies, identified by class: opening App-Block *is* leaving the blocked
+     *    app, and the block screen shouldn't sit on top of the app's own settings.
+     */
+    private fun noteForegroundPackage(event: AccessibilityEvent) {
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName && event.className?.toString() != MainActivity::class.java.name) return
+        lastWindowPackage = pkg
+    }
+
+    /**
      * One decision cycle: resolve what's foreground (surface-aware for Instagram, URL-aware for
      * browsers), tick the engine, apply the overlay, and keep ticking while anything blockable — a live
      * target, a visible Instagram window, or a visible browser — is on screen.
@@ -178,10 +203,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // Seed the occlusion hold with the read that *caused* this overlay. Without it there is a
         // one-scan gap: the overlay goes up, the next scan already comes back pruned, and nothing has
         // been held yet - so the block drops for ~200ms and hands back a free frame of the reel.
-        if (overlayView != null && heldForeground == null &&
-            (fg.target != null || fg.webBlock != null)
-        ) {
-            heldForeground = fg
+        if (overlayView != null && (fg.target != null || fg.webBlock != null)) {
+            occlusionHold.seed(fg, lastWindowPackage, SystemClock.elapsedRealtime())
         }
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
@@ -336,23 +359,29 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * altogether (`windows=1` — only our own overlay left). So "is the blocked app still on screen?"
      * is not a usable release condition; we blinded ourselves by blocking.
      *
-     * So the hold is unconditional while the overlay is displayed, which costs nothing: behind a
-     * full-screen overlay the user cannot navigate at all. The two real exits are untouched — the
-     * overlay's own Close button ([hideOverlay] + Home), and the engine deciding ALLOW (a granted
-     * exception, the 4am reset), since the hold only freezes *foreground resolution*, never the
-     * allow/block decision. And the failure direction is the right one: a blocker must never talk
-     * itself out of blocking.
+     * The hold used to be unconditional while the overlay was up, on the reasoning that behind a
+     * full-screen overlay the user can't navigate anyway. That reasoning was wrong: Home still works
+     * behind an overlay, so the block screen would follow the user to the launcher and stay there,
+     * leaving the overlay's own Close button as the only way out. [OcclusionHold] adds the two release
+     * conditions — the event stream reporting a different foreground package, and a one-minute backstop
+     * for when those events don't come — while keeping the failure direction right: a blocker must
+     * never talk itself out of blocking.
+     *
+     * The engine's other exits are untouched either way, since the hold freezes only *foreground
+     * resolution* and never the allow/block decision: Close ([hideOverlay] + [exitOverlay]), a granted
+     * exception, the 4am reset.
      */
     private fun holdThroughOcclusion(read: Foreground): Foreground {
         if (overlayView == null) {
-            heldForeground = null
+            occlusionHold.release()
             return read
         }
+        val now = SystemClock.elapsedRealtime()
         if (read.target != null || read.webBlock != null) {   // a real read got through; refresh the hold
-            heldForeground = read
+            occlusionHold.arm(read, lastWindowPackage, now)
             return read
         }
-        return heldForeground ?: read
+        return occlusionHold.sustain(lastWindowPackage, now) ?: read
     }
 
     /** The visible windows, or an empty list if the system refuses them (never throw out of a scan). */
