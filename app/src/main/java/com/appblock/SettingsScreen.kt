@@ -368,6 +368,9 @@ fun SettingsScreen(
                             when (val result = DurableChangeGate.applyChange(current, draft, open)) {
                                 is ChangeResult.Applied -> {
                                     ruleStore.save(result.settings)
+                                    // Whatever they just saved is now the config, so a quarantined
+                                    // unreadable one has served its purpose and the warning can go.
+                                    ruleStore.acknowledgeCorrupt()
                                     if (loosening) {
                                         unlockController.consume()   // single-use: this was your one change
                                         message = "Saved. That was your one change — it's locked again."

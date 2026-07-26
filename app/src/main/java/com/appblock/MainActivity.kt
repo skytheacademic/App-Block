@@ -142,12 +142,17 @@ private fun HomeScreen(
     var tamperReason by remember { mutableStateOf<String?>(null) }
     var dialogTarget by remember { mutableStateOf<TargetStatus?>(null) }
     var signalHealth by remember { mutableStateOf(SignalCanary.Health.NO_APP) }
+    var rulesWereCorrupt by remember { mutableStateOf(false) }
 
     // Once per open, not per tick: this reads Instagram's version out of PackageManager and can only
     // change when Instagram updates or the reel player is next seen — neither of which happens while
     // the user is looking at this screen.
     LaunchedEffect(Unit) {
         signalHealth = SignalWitnessStore(context).refresh(System.currentTimeMillis())
+        // load() is what detects and quarantines an unreadable config, so it has to run before the
+        // flag is read — asking first would always come back clean on a cold start.
+        ruleStore.load()
+        rulesWereCorrupt = ruleStore.corruptBlob() != null
     }
 
     // Poll once a second so time-left and exception countdowns tick live.
@@ -207,6 +212,20 @@ private fun HomeScreen(
                     title = "Clock tampering detected",
                     body = "$reason. All targets stay blocked until BOTH \"Set time automatically\" AND " +
                         "\"Set time zone automatically\" are turned back on in Settings.",
+                )
+            }
+        }
+
+        if (rulesWereCorrupt) {
+            // The rules on screen are build defaults, not what was configured — and every app added
+            // from the picker is gone. Said out loud because the old behaviour was to do this silently,
+            // which reads as "my settings mysteriously reset". See PrefsRuleStore.
+            item {
+                WarningCard(
+                    title = "Your saved rules couldn't be read",
+                    body = "App-Block fell back to its built-in defaults, so any app you added " +
+                        "yourself is no longer blocked. Check Settings and rebuild what's missing — " +
+                        "adding and tightening are always free. The unreadable copy has been kept.",
                 )
             }
         }
