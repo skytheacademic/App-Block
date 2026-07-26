@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 import org.xmlpull.v1.XmlPullParser
 
 /**
@@ -22,8 +23,14 @@ import org.xmlpull.v1.XmlPullParser
  * was never in our tree and reels never blocked, while `uiautomator dump` (whose UiAutomation sets
  * that flag) showed the id fine. Every id in ig-dumps/MAPPING.md was read from such a dump, so the
  * live service must scan with the same flag or the whole mapping is unsound.
+ *
+ * The SDK pin matters here even though this test asserts on XML attributes and nothing SDK-specific:
+ * with no `@Config`, Robolectric takes its SDK from `targetSdk`, so this was the one test in the suite
+ * that would start downloading (and failing on) a new android-all jar the moment the toolchain moved.
+ * Every other Robolectric test in the project already pins 34; this one was the exception.
  */
 @RunWith(AndroidJUnit4::class)
+@Config(sdk = [34])
 class AccessibilityConfigTest {
 
     private fun configAttrs(): XmlResourceParser {

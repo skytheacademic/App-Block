@@ -17,12 +17,21 @@ val keystoreProps = Properties().apply {
 
 android {
     namespace = "com.appblock"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.appblock"
         minSdk = 26
-        targetSdk = 35
+        // Bumped to 36 ahead of One UI 9 / Android 17 reaching the S25 FE (stable 2026-07-22, this
+        // phone in beta). The point isn't compatibility — targetSdk 35 runs fine on a newer OS — it's
+        // having a freshly verified build in hand *before* the update lands, rather than debugging a
+        // toolchain on a phone whose blocker has already stopped working.
+        //
+        // Every expensive Android 16 migration item was checked and none applies: edge-to-edge is
+        // already handled (safeDrawingPadding), there are no onBackPressed overrides so the
+        // predictive-back default costs nothing, no foreground services, and no runtime
+        // registerReceiver calls.
+        targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
 
@@ -87,12 +96,12 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
 
-    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    implementation(platform("androidx.compose:compose-bom:2025.04.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -117,7 +126,7 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
     testImplementation("androidx.test.ext:junit:1.2.1")
-    testImplementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    testImplementation(platform("androidx.compose:compose-bom:2025.04.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
-    testImplementation("androidx.work:work-testing:2.9.1")
+    testImplementation("androidx.work:work-testing:2.10.1")
 }
