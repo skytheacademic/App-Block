@@ -8,8 +8,11 @@ plugins {
 }
 
 // Release signing: keystore + credentials live OUTSIDE git (*.jks and keystore.properties are
-// gitignored; backup copy in the Dropbox planning folder, see keystore-backup/). On a machine
-// without the file — fresh clone — release still builds, just unsigned, so nothing else breaks.
+// gitignored). There is deliberately **no second copy** — a synced backup was the finding that
+// closed A-1, because the same signature installs as an *update* and inherits the accessibility
+// grant, which makes the key a bypass tool rather than just a build input.
+// On a machine without the file — fresh clone — release still builds, just unsigned, so nothing
+// else breaks. It simply can't update an installed App-Block in place.
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
     if (f.exists()) FileInputStream(f).use { load(it) }
