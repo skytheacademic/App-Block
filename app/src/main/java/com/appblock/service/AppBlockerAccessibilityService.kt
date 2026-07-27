@@ -25,6 +25,7 @@ import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
 import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
+import com.appblock.engine.AddressWatch
 import com.appblock.engine.AppTargets
 import com.appblock.engine.BlockReason
 import com.appblock.engine.BrowserPolicy
@@ -117,11 +118,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
      *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
     private var lastSignalConfirmElapsedMs: Long? = null
-    /** Address-bar tracking for [omniboxFor] — which browser, whether its omnibox has ever been read
-     *  since it took the foreground, and when we started watching it. */
-    private var addressBrowserPkg: String? = null
-    private var addressSeenForPkg = false
-    private var addressWatchedSinceMs = 0L
+    /** Per-browser address-bar watch: turns a missing url_bar into "not yet" or "not ever". See
+     *  [omniboxFor]. */
+    private val addressWatch = AddressWatch()
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -590,35 +589,14 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Resolve a missing address bar into "not yet" or "not ever" — the timing that lets website
-     * blocking fail closed without fighting ordinary browsing.
-     *
-     * Two independent reasons a missing url_bar is usually harmless: the browser has only just come
-     * foreground and its tree isn't built, or Chrome has scrolled its toolbar out of view. Both are
-     * covered here by requiring that the address bar has **never once** been readable since this
-     * browser took the foreground, *and* that [UNREADABLE_GRACE_MS] has passed. A page you scrolled
-     * down was necessarily loaded with the toolbar visible, so it can't reach that state; a renamed
-     * resource-id reaches it every time.
-     *
-     * ⚠️ The grace is a desk judgement — whether Chrome's scrolled-away toolbar actually leaves the
-     * accessibility tree is unverified on hardware. If it turns out it does *and* a fresh launch can
-     * restore a scrolled tab, this is where the false positive would come from.
+     * The raw read plus the timing that resolves a missing address bar into "not yet" or "not ever" —
+     * see [AddressWatch], which owns that judgement and the state behind it. All this side contributes
+     * is the tree read and the clock, neither of which can leave the service.
      */
     private fun omniboxFor(root: AccessibilityNodeInfo, pkg: String): BrowserTargets.Omnibox {
+        // Clock read before the walk, so the walk's own cost never counts against the grace.
         val now = SystemClock.elapsedRealtime()
-        if (pkg != addressBrowserPkg) {
-            addressBrowserPkg = pkg
-            addressSeenForPkg = false
-            addressWatchedSinceMs = now
-        }
-        val read = omniboxIn(root, pkg)
-        if (read is BrowserTargets.Omnibox.Url) addressSeenForPkg = true
-        return when {
-            read != null -> read
-            addressSeenForPkg -> BrowserTargets.Omnibox.Unknown
-            now - addressWatchedSinceMs < UNREADABLE_GRACE_MS -> BrowserTargets.Omnibox.Unknown
-            else -> BrowserTargets.Omnibox.Unreadable
-        }
+        return addressWatch.observe(omniboxIn(root, pkg), pkg, now)
     }
 
     /**
@@ -823,9 +801,6 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private val SIGNAL_COUNT = InstagramSurface.SIGNAL_IDS.size
         /** Cap the omnibox search; the url_bar sits near the top, so this is plenty. */
         private const val URL_NODE_BUDGET = 600
-        /** How long an allowlisted browser may show no address bar before that counts as unreadable
-         *  rather than as still settling — see [omniboxFor]. */
-        private const val UNREADABLE_GRACE_MS = 5_000L
         /** Min gap between content-change polls (Instagram + browsers), so per-frame events don't thrash. */
         private const val CONTENT_THROTTLE_MS = 700L
         /** How long the installed-browser set is cached before re-query (catches a new browser install). */
