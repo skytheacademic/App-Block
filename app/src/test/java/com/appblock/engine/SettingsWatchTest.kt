@@ -17,9 +17,10 @@ class SettingsWatchTest {
     private fun bounce(
         pkg: String? = "com.android.settings",
         texts: List<CharSequence?>,
-        standDown: Boolean = false,
+        setupIncomplete: Boolean = false,
+        windowOpen: Boolean = false,
         repairMode: Boolean = false,
-    ) = SettingsWatch.shouldBounce(pkg, texts, label, standDown, repairMode)
+    ) = SettingsWatch.shouldBounce(pkg, texts, label, setupIncomplete, windowOpen, repairMode)
 
     @Test fun `bounces the accessibility toggle detail page`() {
         assertTrue(bounce(texts = accessibilityDetail))
@@ -46,8 +47,8 @@ class SettingsWatchTest {
         assertFalse(bounce(pkg = null, texts = appInfo))
     }
 
-    @Test fun `stands down when told to - setup or open change window`() {
-        assertFalse(bounce(texts = turnOffDialog, standDown = true))
+    @Test fun `stands down while setup is still incomplete`() {
+        assertFalse(bounce(texts = turnOffDialog, setupIncomplete = true))
     }
 
     @Test fun `handles null and empty texts`() {
@@ -156,5 +157,82 @@ class SettingsWatchTest {
     @Test fun `repair mode does not resurrect the screens that were never watched`() {
         assertFalse(bounce(texts = unrelatedScreen, repairMode = true))
         assertFalse(bounce(pkg = installer, texts = installDialog, repairMode = true))
+    }
+
+    // ---- B-8: an open window buys Settings, not removal ----
+
+    /**
+     * Turning the service off stays a *gated* loosening (CONSTRAINTS §6) rather than an impossibility,
+     * so the Settings tier still stands down. Any category does: a websites window sat through the
+     * longer 72-hour wait, so reaching Settings with one is never a shortcut past the 2-hour apps gate.
+     */
+    @Test fun `an open window stands the settings tier down`() {
+        assertTrue(bounce(texts = turnOffDialog))
+        assertFalse(bounce(texts = turnOffDialog, windowOpen = true))
+        assertFalse(bounce(texts = accessibilityDetail, windowOpen = true))
+    }
+
+    /**
+     * The finding itself. An open window used to stand down *both* tiers, so a 2-hour apps window
+     * bought a full uninstall — every rule, the blocklist and the stashed key gone for the shortest
+     * wait in the system, which inverts the rule the whole device runs on. Removal now costs the
+     * computer or safe mode, neither of which is an impulse.
+     */
+    @Test fun `an open window does not buy an uninstall`() {
+        assertTrue(bounce(pkg = installer, texts = uninstallDialog, windowOpen = true))
+        assertTrue(bounce(pkg = installer, texts = uninstallDialog, windowOpen = true, repairMode = true))
+    }
+
+    /**
+     * Setup is the one state that disarms everything, and it has to: there is no key yet, so guarding
+     * uninstall would be a trap with no sanctioned way out of it.
+     */
+    @Test fun `setup incomplete stands down both tiers`() {
+        assertFalse(bounce(texts = turnOffDialog, setupIncomplete = true))
+        assertFalse(bounce(pkg = installer, texts = uninstallDialog, setupIncomplete = true))
+    }
+
+    // ---- B-10: the wireless-debugging screen, which never names us ----
+
+    private val wirelessDebugging = listOf<CharSequence?>(
+        "Wireless debugging", "On", "Pair device with QR code", "Pair device with pairing code",
+        "Device name", "IP address & Port",
+    )
+    private val developerOptions = listOf<CharSequence?>(
+        "Developer options", "USB debugging", "Wireless debugging", "Stay awake", "Bug report shortcut",
+    )
+
+    /**
+     * Pairing adb to the phone *from* the phone is what lets Shizuku hand adb-level power to an
+     * ordinary app — no computer needed, and reusable forever once paired. Nothing on the screen
+     * mentions App-Block, so the label match can never see it; this rule doesn't consult the label.
+     */
+    @Test fun `bounces the wireless debugging screen even though it never names the app`() {
+        assertTrue(bounce(texts = wirelessDebugging))
+        assertTrue(bounce(texts = listOf("Pair device with QR code", "Cancel")))
+    }
+
+    /**
+     * And must not take Developer options with it. USB debugging lives there, and adb from the
+     * computer is one of only two ways back in if the app ever needs repairing — walling it off would
+     * be the overlay-permission trap again, one level up. The list carries a "Wireless debugging" row,
+     * so "USB debugging" is what tells the two screens apart.
+     */
+    @Test fun `does not bounce the developer options list`() {
+        assertFalse(bounce(texts = developerOptions))
+    }
+
+    @Test fun `the wireless debugging rule does not depend on the label being readable`() {
+        assertTrue(SettingsWatch.shouldBounce("com.android.settings", wirelessDebugging, "", false))
+    }
+
+    @Test fun `the wireless debugging rule is settings-tier, so a window and repair mode stand it down`() {
+        assertFalse(bounce(texts = wirelessDebugging, windowOpen = true))
+        assertFalse(bounce(texts = wirelessDebugging, repairMode = true))
+        assertFalse(bounce(texts = wirelessDebugging, setupIncomplete = true))
+    }
+
+    @Test fun `the installer tier ignores bypass markers`() {
+        assertFalse(bounce(pkg = installer, texts = wirelessDebugging))
     }
 }

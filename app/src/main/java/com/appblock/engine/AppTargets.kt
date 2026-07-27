@@ -47,7 +47,32 @@ object AppTargets {
     /** Targets enforced by in-app surface detection rather than a whole-package match. */
     val surfaceEnforced: Set<Target> = setOf(Target.INSTAGRAM_REELS_EXPLORE)
 
-    fun targetFor(packageName: String): Target? = packages[packageName]
+    /**
+     * Packages blocked outright, forever, with no rule the user can reach (B-10).
+     *
+     * Shizuku hands adb-level power to ordinary apps once it has been paired over the phone's own
+     * wireless debugging — an escape that needs no computer and, once set up, is reusable silently
+     * forever. It exists on this device for exactly one purpose.
+     *
+     * Deliberately **not** a [DurableSettings] entry, and that is the point rather than a shortcut:
+     * a settings row could be switched off through a 2-hour window, while this can only be undone by
+     * editing source and rebuilding. It also sidesteps a config migration — adding a built-in would
+     * mean bumping [DurableSettings.RULES_VERSION], which re-seeds and would wipe every rule and
+     * picker-added app on the next launch.
+     */
+    val alwaysBlocked: Map<String, Target> = mapOf(
+        "moe.shizuku.privileged.api" to Target("shizuku"),
+    )
+
+    val alwaysBlockedTargets: Set<Target> = alwaysBlocked.values.toSet()
+
+    /**
+     * The hard-block rules injected alongside the user's own (see `ActiveRules.ruleSource`). Kept out
+     * of the persisted settings so they can't be listed, edited, gated, or removed.
+     */
+    val alwaysBlockedRules: List<Rule> = alwaysBlockedTargets.map { Rule(it, RuleMode.HardBlock) }
+
+    fun targetFor(packageName: String): Target? = packages[packageName] ?: alwaysBlocked[packageName]
 
     /**
      * Package → target, including apps the user added on-device (Batch 4).
@@ -60,9 +85,14 @@ object AppTargets {
      * target and its special handling rather than degrading to a plain whole-app block.
      */
     fun targetFor(packageName: String, activeTargets: Set<Target>): Target? =
-        packages[packageName] ?: Target.forPackage(packageName).takeIf { it in activeTargets }
+        packages[packageName]
+            ?: alwaysBlocked[packageName]
+            ?: Target.forPackage(packageName).takeIf { it in activeTargets }
 
     /** True when [target] is actually being enforced today — package match, surface, or user-added. */
     fun isEnforced(target: Target): Boolean =
-        packages.containsValue(target) || target in surfaceEnforced || target.userPackage != null
+        packages.containsValue(target) ||
+            target in surfaceEnforced ||
+            target in alwaysBlockedTargets ||
+            target.userPackage != null
 }

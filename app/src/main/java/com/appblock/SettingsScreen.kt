@@ -1,5 +1,7 @@
 package com.appblock
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Image
@@ -55,6 +57,7 @@ import com.appblock.engine.AppTargets
 import com.appblock.engine.Availability
 import com.appblock.engine.ChangeDirection
 import com.appblock.engine.ChangeResult
+import com.appblock.engine.ConfigExport
 import com.appblock.engine.DayBoundary
 import com.appblock.engine.DayLabels
 import com.appblock.engine.DurableChangeGate
@@ -71,6 +74,7 @@ import com.appblock.engine.TodayUsage
 import com.appblock.engine.UnlockCategory
 import com.appblock.engine.WindowRule
 import java.time.DayOfWeek
+import java.time.LocalDate
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.GeneratedKey
@@ -291,6 +295,30 @@ fun SettingsScreen(
                 )
             }
 
+            item {
+                // Labels have to be resolved in composition (a user-added app borrows its launcher
+                // name), so they're gathered here and handed to the pure renderer as a lookup.
+                val labels = current.targets.keys.associateWith { labelForSettings(it) }
+                // Platform clipboard rather than Compose's LocalClipboardManager, which is deprecated
+                // in favour of a suspend API this one-shot copy has no use for.
+                val clipboard = LocalContext.current.getSystemService(ClipboardManager::class.java)
+                ExportSection(
+                    onCopy = {
+                        // Exports what is *saved*, never the draft — a record of rules that were
+                        // never committed would be a record of nothing that was ever enforced.
+                        val text = ConfigExport.render(
+                            settings = current,
+                            blockedDomains = blocklist,
+                            label = { labels[it] ?: it.key },
+                            scopeNote = { scopeNote(it) },
+                            today = LocalDate.now(),
+                        )
+                        clipboard.setPrimaryClip(ClipData.newPlainText("App-Block rules", text))
+                        message = "Rules copied. Paste them somewhere that survives this phone."
+                    },
+                )
+            }
+
         }
 
         Surface(tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth()) {
@@ -398,9 +426,13 @@ fun SettingsScreen(
 
     if (picking) {
         AppPickerDialog(
-            // Hide anything already covered: the curated packages and every app already added.
-            // Offering TikTok here would create a second, weaker whole-app target beside the real one.
+            // Hide anything already covered: the curated packages, the always-blocked ones, and every
+            // app already added. Offering TikTok would create a second, weaker whole-app target beside
+            // the real one — and offering Shizuku would be worse than that: adding it reads as a
+            // tightening while actually handing a permanently blocked package an editable rule that a
+            // 2-hour window could then switch off.
             excludedPackages = AppTargets.packages.keys +
+                AppTargets.alwaysBlocked.keys +
                 draft.targets.keys.mapNotNull { it.userPackage } +
                 InstagramSurface.PACKAGE,
             onPick = { app ->
@@ -1115,6 +1147,28 @@ private fun BlocklistSection(
                     OutlinedButton(onClick = onStartWebsiteWindow) { Text("Start 72-hour removal window") }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Export the saved rules as text (C-7). Read-only by design — there is no matching import, and the
+ * section says so, because "copy" without that sentence reads like a backup you could restore.
+ */
+@Composable
+private fun ExportSection(onCopy: () -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Keep a copy of your rules", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+            Text(
+                "Copies your caps, schedules, blocked apps and blocked sites as plain text. If this " +
+                    "phone is ever wiped, that text is the only record — App-Block can't read it back " +
+                    "in, so you'd re-enter it by hand. Your lock key is never included.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
+            OutlinedButton(onClick = onCopy) { Text("Copy my rules") }
         }
     }
 }

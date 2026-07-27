@@ -241,26 +241,30 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /**
      * The settings-watch (CONSTRAINTS lever A). A Settings screen about App-Block itself — the
      * Accessibility toggle, its "Turn off?" dialog, App info with Force stop / Uninstall, the
-     * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a
-     * zero-friction escape. Stands down while setup is still incomplete (first-time permission
-     * granting must not be bounced) and while the durable-change window is open, which makes
-     * "switch the service off" a gated loosening like any other (CONSTRAINTS §6). It also drops to
-     * [SettingsWatch]'s repair mode when the overlay permission is gone, so the blocker can't guard
-     * the app out of its own repair.
+     * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a zero-friction
+     * escape. It also covers the wireless-debugging screen, which names nothing of ours (B-10).
+     *
+     * An open durable-change window makes "switch the service off" a gated loosening like any other
+     * (CONSTRAINTS §6) — but only that. It no longer stands down the *installer* tier, so it can't
+     * also buy an uninstall; see [SettingsWatch.shouldBounce] for why that mattered. Setup being
+     * incomplete stands down everything, and a missing overlay permission drops the Settings tier to
+     * repair mode so the blocker can't guard the app out of its own repair.
+     *
      * Returns true when it bounced (the event needs no further handling).
      */
     private fun selfDefense(event: AccessibilityEvent): Boolean {
         val pkg = event.packageName?.toString()
         if (!SettingsWatch.isWatched(pkg)) return false
-        // Any-category isOpen on purpose: a websites window sat through the *longer* (72-h) wait,
-        // so letting it reach Settings is never a shortcut past the 2-h apps gate.
-        val standDown = !Watchdog.setupCompleted(this) || unlockController.isOpen()
-        if (standDown) return false
+        // The stand-downs are passed through rather than short-circuited here, because they no longer
+        // agree: an open window stands down the Settings tier but leaves the installer tier armed
+        // (B-8). Only setup-incomplete disarms everything. Cost is one text walk while a window is
+        // open in Settings, which is bounded and rare.
         val bounce = SettingsWatch.shouldBounce(
             packageName = pkg,
             visibleTexts = visibleWatchedTexts(),
             selfLabel = getString(R.string.app_name),
-            standDown = false,
+            setupIncomplete = !Watchdog.setupCompleted(this),
+            windowOpen = unlockController.isOpen(),
             repairMode = !canDrawOverlay(),
         )
         if (!bounce) return false
@@ -749,7 +753,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun blockMessage(target: Target, reason: BlockReason?): CharSequence = when (reason) {
         BlockReason.TAMPER -> getString(R.string.block_message_tamper)
         BlockReason.SCHEDULE -> getString(R.string.block_message_schedule, labelFor(target))
-        BlockReason.HARD_BLOCK -> getString(R.string.block_message)
+        // The only hard blocks that exist are the always-blocked bypass tools (B-10), and a generic
+        // "you chose to block this" would be a lie there — the user never chose it and can't undo it
+        // from the phone. Say which, and say so.
+        BlockReason.HARD_BLOCK ->
+            if (target in AppTargets.alwaysBlockedTargets) getString(R.string.block_message_bypass_tool)
+            else getString(R.string.block_message)
         else -> getString(R.string.block_message_budget, labelFor(target))
     }
 

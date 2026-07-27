@@ -4,6 +4,7 @@
     <string name="accessibility_description">Detects which apps are on screen (including split-screen panes) so App-Block can show the block screen when a budgeted app is visible. Reads which app owns each window, the text of system Settings screens so it can guard its own toggle, and — in your chosen web browsers — the address bar, so blocked websites can be caught. It does not read page content or other apps.</string>
     <string name="block_title">Blocked</string>
     <string name="block_message">You chose to block this app. Take a breath and go back.</string>
+    <string name="block_message_bypass_tool">This app can hand adb-level control to other apps, which is enough to switch App-Block off. It is blocked permanently and can\'t be unblocked from the phone.</string>
     <string name="block_message_budget">You\'ve used up today\'s time for %1$s. It resets at 4am.</string>
     <string name="block_message_schedule">%1$s is outside its allowed hours right now. It opens again in its next window.</string>
     <string name="block_message_tamper">Clock tampering detected. Everything stays blocked until BOTH automatic date &amp; time AND automatic time zone are back on in Settings.</string>

@@ -2,6 +2,7 @@ package com.appblock
 
 import android.content.Context
 import com.appblock.data.PrefsRuleStore
+import com.appblock.engine.AppTargets
 import com.appblock.engine.DefaultRules
 import com.appblock.engine.DurableSettings
 import com.appblock.engine.ExceptionManager
@@ -29,9 +30,16 @@ object ActiveRules {
 
     fun ruleStore(context: Context): RuleStore = PrefsRuleStore(context, seed)
 
-    /** A live view of the persisted rules for [com.appblock.engine.BudgetCoordinator] (re-read each pass). */
+    /**
+     * A live view of the persisted rules for [com.appblock.engine.BudgetCoordinator] (re-read each pass).
+     *
+     * [AppTargets.alwaysBlockedRules] is appended rather than persisted (B-10). A bypass tool must not
+     * be something the settings screen can list, the gate can weigh, or a 2-hour window can switch
+     * off — and injecting it here keeps it out of [DurableSettings] entirely, so there is no version
+     * bump and therefore no re-seed wiping every rule and picker-added app on the next launch.
+     */
     fun ruleSource(context: Context): RuleSource {
         val store = ruleStore(context)
-        return RuleSource { store.load().toRules() }
+        return RuleSource { store.load().toRules() + AppTargets.alwaysBlockedRules }
     }
 }
