@@ -17,10 +17,22 @@ package com.appblock.engine
  *     on record for this browser and no later absence can reach [BrowserTargets.Omnibox.Unreadable].
  *     A renamed resource-id has no such read behind it and reaches it every time.
  *
- * Both are per-browser, which is why the watch resets whenever [observe] is handed a different package:
- * "we have read Chrome's omnibox" is no evidence at all about Brave's, and carrying the flag across
- * would let a working browser vouch for a broken one. The reset also restarts the grace, since a
- * newly-foregrounded browser deserves the same settle time as the first one did.
+ * Both are evidence about *one browser's current tree*, so the state is per-package ([watches]) and is
+ * dropped by [retain] the moment that browser stops being on screen. Two separate claims ride on that
+ * one rule:
+ *
+ *  - **Chrome's working omnibox is no evidence about Brave's.** Keyed by package, so it can't leak. The
+ *    two also keep separate grace clocks, which is what stops a pair of browsers side by side from
+ *    re-arming each other forever — with one slot between them, neither could ever be called unreadable.
+ *  - **A read only vouches for the tree it was taken from.** Leaving and coming back is where a rebuilt
+ *    tree shows up, and it is the one moment a stale vouch would be caught. Without [retain] the flag
+ *    outlives its evidence indefinitely: Chrome auto-updates overnight with a renamed `url_bar`, our
+ *    process never died, and the vouch taken *before* the update keeps the blocklist enforcing nothing
+ *    until the next reboot. Exactly the silent failure this class exists to prevent, from the inside.
+ *
+ * Expiring the vouch on a *timer* instead would be the obvious fix and is the wrong one — it would run
+ * out mid-article precisely while the toolbar is scrolled away, which is the one moment the vouch is
+ * load-bearing. Foreground-exit is the event that means "different tree"; elapsed time isn't.
  *
  * ⚠️ The grace length is a desk judgement — whether Chrome's scrolled-away toolbar actually leaves the
  * accessibility tree is unverified on hardware. If it turns out it does *and* a fresh launch can
@@ -33,14 +45,11 @@ class AddressWatch(
     private val graceMs: Long = DEFAULT_GRACE_MS,
 ) {
 
-    /** Which browser the current watch belongs to — a different one starts a new watch. */
-    private var watchedPkg: String? = null
+    /** One browser's standing: whether its omnibox has ever read as a committed URL since this watch
+     *  began, and when that was — the two facts an absence has to get past. */
+    private class Watch(var seen: Boolean, val sinceMs: Long)
 
-    /** Whether a committed URL has ever been read since [watchedPkg] took the watch. */
-    private var seenForPkg = false
-
-    /** When the watch for [watchedPkg] started, for the [graceMs] countdown. */
-    private var watchedSinceMs = 0L
+    private val watches = HashMap<String, Watch>()
 
     /**
      * Interpret one raw omnibox read for [pkg].
@@ -51,21 +60,38 @@ class AddressWatch(
      * counts as proof the omnibox is readable here (the caller can be handed
      * [BrowserTargets.Omnibox.Editing] forever from a focused, empty field).
      *
+     * A package with no watch yet starts one at [nowMs], so the grace is measured from the first time
+     * this browser was looked at rather than from service start.
+     *
      * Only an absence can end up blocked, and only once it is both past the grace and unvouched-for.
      */
     fun observe(read: BrowserTargets.Omnibox?, pkg: String, nowMs: Long): BrowserTargets.Omnibox {
-        if (pkg != watchedPkg) {
-            watchedPkg = pkg
-            seenForPkg = false
-            watchedSinceMs = nowMs
-        }
-        if (read is BrowserTargets.Omnibox.Url) seenForPkg = true
+        val watch = watches.getOrPut(pkg) { Watch(seen = false, sinceMs = nowMs) }
+        if (read is BrowserTargets.Omnibox.Url) watch.seen = true
         return when {
             read != null -> read
-            seenForPkg -> BrowserTargets.Omnibox.Unknown
-            nowMs - watchedSinceMs < graceMs -> BrowserTargets.Omnibox.Unknown
+            watch.seen -> BrowserTargets.Omnibox.Unknown
+            nowMs - watch.sinceMs < graceMs -> BrowserTargets.Omnibox.Unknown
             else -> BrowserTargets.Omnibox.Unreadable
         }
+    }
+
+    /**
+     * Keep watches only for the browsers still on screen; anything else has left the foreground and its
+     * next sighting starts clean — full grace, no vouch.
+     *
+     * Called once per window scan with every allowlisted package that had a window in it, which is a
+     * wider set than the one [observe] is called for: the service reads a single browser per pass, but a
+     * browser sitting in the other split-screen pane is still present and must not be evicted.
+     *
+     * Erring: an over-eager eviction hands back a fresh grace, i.e. one [graceMs] of allowing. That is
+     * reachable when our own block overlay prunes the browser out of the window list entirely (see
+     * `holdThroughOcclusion`) — bounded, self-correcting on the next pass, and paid for by closing the
+     * stale-vouch hole above, which has no bound at all.
+     */
+    fun retain(visibleBrowsers: Set<String>) {
+        if (watches.isEmpty()) return
+        watches.keys.retainAll(visibleBrowsers)
     }
 
     companion object {

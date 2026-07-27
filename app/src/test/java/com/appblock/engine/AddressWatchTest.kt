@@ -11,6 +11,9 @@ import org.junit.Test
  *    under the user, for a reason nothing on screen explains. The worst outcome in the feature.
  *  - too lax → a renamed `url_bar` resource-id makes the whole blocklist enforce nothing, silently,
  *    and the only symptom is that blocking has stopped happening. That is the bypass.
+ *
+ * [AddressWatch.retain] is the service telling the watch which browsers are still on screen; the tests
+ * below drive it by hand, one call per window scan, exactly where the service makes it.
  */
 class AddressWatchTest {
 
@@ -62,8 +65,8 @@ class AddressWatchTest {
 
     /**
      * The expensive false positive: the user scrolled a long article and Chrome slid the toolbar away.
-     * One successful read for this browser vouches for every later absence — indefinitely, because the
-     * page was necessarily loaded with the toolbar visible.
+     * One successful read vouches for every later absence for as long as the browser stays on screen,
+     * because the page was necessarily loaded with the toolbar visible.
      */
     @Test fun `one successful read makes every later absence unknown`() {
         val watch = watch(graceMs = 5_000)
@@ -133,8 +136,8 @@ class AddressWatchTest {
         assertEquals(unreadable, watch.observe(null, brave, nowMs = 7_000))
     }
 
-    /** The switch also restarts the clock, so the new browser gets its own full settle time. */
-    @Test fun `switching browsers restarts the grace`() {
+    /** Each browser's grace runs from the first time *that* browser was looked at. */
+    @Test fun `each browser gets its own grace clock`() {
         val watch = watch(graceMs = 5_000)
         watch.observe(null, chrome, nowMs = 0)
         assertEquals(unreadable, watch.observe(null, chrome, nowMs = 6_000))
@@ -145,29 +148,108 @@ class AddressWatchTest {
     }
 
     /**
-     * Coming back to a browser re-arms the grace rather than resuming where it left off — the return is
-     * a fresh foreground, with the same cold tree the first arrival had.
+     * Split screen, and the window walk changing its mind about which pane it reads. With a single
+     * watch slot between them the two browsers evicted each other pass after pass, so neither could
+     * ever accumulate enough grace to be called unreadable — two broken browsers side by side were
+     * permanently allowed. Separate clocks, both of which keep running while the other is being read.
      */
-    @Test fun `returning to a browser re-arms the grace instead of failing closed at once`() {
+    @Test fun `two browsers side by side each keep their own clock and both fail closed`() {
+        val watch = watch(graceMs = 5_000)
+        val both = setOf(chrome, brave)
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 0))
+        watch.retain(both)
+        assertEquals(unknown, watch.observe(null, brave, nowMs = 1_000))
+        watch.retain(both)
+        assertEquals(unreadable, watch.observe(null, chrome, nowMs = 5_000))
+        watch.retain(both)
+        assertEquals(unreadable, watch.observe(null, brave, nowMs = 6_000))
+    }
+
+    /** Being read is not what keeps a watch alive — being on screen is. */
+    @Test fun `a browser in the other pane is not evicted by the one being read`() {
+        val watch = watch(graceMs = 5_000)
+        val both = setOf(chrome, brave)
+        watch.observe(url, brave, nowMs = 0)
+        watch.retain(both)
+        watch.observe(url, chrome, nowMs = 1_000)
+        watch.retain(both)
+        assertEquals(unknown, watch.observe(null, brave, nowMs = 30_000))
+    }
+
+    // ---- leaving the foreground is what retires a watch ----
+
+    /**
+     * The silent fail-open the vouch would otherwise cause. Chrome reads fine at 9am; overnight Chrome
+     * auto-updates with a renamed `url_bar`; our process never died, so a vouch taken against the *old*
+     * tree is still standing and every absence in the new one reads as harmless — the blocklist quietly
+     * enforces nothing until the next reboot. Leaving the foreground is the event that means "different
+     * tree", and it is what retires the vouch.
+     */
+    @Test fun `leaving the browser drops a vouch that could outlive its tree`() {
         val watch = watch(graceMs = 5_000)
         watch.observe(url, chrome, nowMs = 0)
-        watch.observe(url, brave, nowMs = 10_000)
-        assertEquals(unknown, watch.observe(null, chrome, nowMs = 20_000))
-        assertEquals(unreadable, watch.observe(null, chrome, nowMs = 25_000))
+        watch.retain(setOf(chrome))
+        watch.retain(emptySet())                    // Instagram is foreground; Chrome has no window
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 60_000))
+        watch.retain(setOf(chrome))
+        assertEquals(unreadable, watch.observe(null, chrome, nowMs = 66_000))
     }
 
     /**
-     * The cost of re-arming on every switch: two allowlisted browsers alternating pass-to-pass (split
-     * screen, or the window walk changing its mind about which one it reads) never accumulate grace, so
-     * neither can ever be called unreadable. Deliberate — it errs toward allowing, and the alternative
-     * would be a stale clock deciding for a browser that has only just been looked at.
+     * The other half of the same rule, in the opposite direction. Tap Chrome, get a new tab with the
+     * cursor already in the omnibox — present, but never a committed URL, so nothing vouches. Swipe to
+     * Instagram three seconds later. Ten minutes on, come back: the tree isn't built yet on the first
+     * pass, and against a ten-minute-old clock that would be an instant block screen over a browser
+     * that has done nothing wrong.
      */
-    @Test fun `alternating browsers keep re-arming and never fail closed`() {
+    @Test fun `a browser returning after minutes away still gets its settle time`() {
         val watch = watch(graceMs = 5_000)
+        assertEquals(editing, watch.observe(editing, chrome, nowMs = 0))
+        watch.retain(emptySet())
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 600_000))
+    }
+
+    /**
+     * The bug that started this: the watch reset on *seeing a different browser*, not on the browser
+     * leaving, so the identical user action resolved two different ways depending on whether the app
+     * visited in between happened to be a browser. Both paths must now agree.
+     */
+    @Test fun `it makes no difference whether the app in between was a browser`() {
+        val viaBrowser = watch(graceMs = 5_000)
+        viaBrowser.observe(url, chrome, nowMs = 0)
+        viaBrowser.retain(setOf(brave))             // Brave full-screen
+        viaBrowser.retain(setOf(chrome))            // and back
+
+        val viaApp = watch(graceMs = 5_000)
+        viaApp.observe(url, chrome, nowMs = 0)
+        viaApp.retain(emptySet())                   // Instagram full-screen
+        viaApp.retain(setOf(chrome))                // and back
+
+        assertEquals(unknown, viaBrowser.observe(null, chrome, nowMs = 20_000))
+        assertEquals(unknown, viaApp.observe(null, chrome, nowMs = 20_000))
+        assertEquals(unreadable, viaBrowser.observe(null, chrome, nowMs = 26_000))
+        assertEquals(unreadable, viaApp.observe(null, chrome, nowMs = 26_000))
+    }
+
+    /**
+     * The expensive false positive must survive the fix: an article read for half an hour with the
+     * toolbar scrolled away never leaves the foreground, so its vouch is never retired. This is why the
+     * vouch expires on an *event* and not on a timer — a timer would run out exactly here.
+     */
+    @Test fun `staying on screen keeps the vouch through a scrolled-away toolbar`() {
+        val watch = watch(graceMs = 5_000)
+        watch.observe(url, chrome, nowMs = 0)
         repeat(20) {
-            val nowMs = 5_000L * it
-            assertEquals(unknown, watch.observe(null, chrome, nowMs))
-            assertEquals(unknown, watch.observe(null, brave, nowMs + 1_000))
+            watch.retain(setOf(chrome))
+            assertEquals(unknown, watch.observe(null, chrome, nowMs = 10_000 + 90_000L * it))
         }
+    }
+
+    /** The service calls retain on every scan, including the ones with no browser in them at all. */
+    @Test fun `retaining nothing before any read is harmless`() {
+        val watch = watch(graceMs = 5_000)
+        watch.retain(emptySet())
+        watch.retain(setOf(chrome))
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 0))
     }
 }

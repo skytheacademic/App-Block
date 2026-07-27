@@ -118,8 +118,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
      *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
     private var lastSignalConfirmElapsedMs: Long? = null
-    /** Per-browser address-bar watch: turns a missing url_bar into "not yet" or "not ever". See
-     *  [omniboxFor]. */
+    /** Per-browser address-bar watch: turns a missing url_bar into "not yet" or "not ever". Fed the
+     *  read by [omniboxFor] and the on-screen browser set by [resolveForeground]. */
     private val addressWatch = AddressWatch()
 
     private val tickRunnable = object : Runnable {
@@ -360,6 +360,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         var webHost: String? = null
         var browserPkg: String? = null      // whose omnibox we read — also the overlay's exit target
         var omnibox: BrowserTargets.Omnibox? = null   // diagnostics only — what the address bar said
+        // Every allowlisted browser *on screen*, which is wider than the one we read: only the first
+        // browser window gets an omnibox read, but a second one in the other split-screen pane is still
+        // present and its watch must survive the pass. See AddressWatch.retain.
+        val visibleBrowsers = HashSet<String>()
         val browsers = browserPackages()
         val windowList = visibleWindows()
         for (window in windowList) {
@@ -372,6 +376,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val pkg = root.packageName?.toString() ?: return@runCatching
                 if (packageTarget == null) AppTargets.targetFor(pkg, activeTargets())?.let { packageTarget = it }
                 if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
+                if (BrowserTargets.isAllowlisted(pkg)) visibleBrowsers.add(pkg)
                 if (webBlock == null &&
                     (BrowserTargets.isAllowlisted(pkg) || BrowserTargets.isWebApp(pkg) || pkg in browsers)
                 ) {
@@ -393,6 +398,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 }
             }
         }
+        // Retire the watch of any browser that isn't on screen any more, so its next appearance is read
+        // as the fresh tree it is: full grace, and no earlier successful read still vouching for it.
+        // Done after the loop, so a browser we just read is never evicted by its own pass.
+        addressWatch.retain(visibleBrowsers)
         val signals = instagramRoot?.let { collectInstagramSignals(it) }
         if (signals != null && InstagramSurface.REEL_PAGER in signals) noteReelSignal()
         val target = packageTarget ?: signals?.let { InstagramSurface.targetFor(it) }
