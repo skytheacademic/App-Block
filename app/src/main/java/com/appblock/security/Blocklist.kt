@@ -21,16 +21,35 @@ class BlocklistStore(context: Context) {
     fun domains(): List<String> =
         prefs.getStringSet(KEY, emptySet()).orEmpty().sorted()
 
+    /**
+     * The same list, each domain with the wall-clock time it was added (null for anything blocked
+     * before this store recorded dates).
+     *
+     * The timestamp is **display only** — it is never read by [removeIfAuthorized] or by anything
+     * else that gates. That matters: the wall clock is the one input this app treats as hostile
+     * (see the tamper latch), and a date that can be moved must not be able to move a lock. All it
+     * does is answer "how long has this been on the list", which is context, not authority.
+     */
+    fun sites(): List<BlockedSite> =
+        domains().map { BlockedSite(it, prefs.getLong(addedKey(it), 0L).takeIf { at -> at > 0L }) }
+
     fun contains(domain: String): Boolean =
         DomainMatcher.normalizeDomain(domain)?.let { it in current() } ?: false
 
     /**
      * Add a domain (tightening — instant). Input may be a bare domain or a pasted URL; it's normalized
      * to a bare host (`www.` dropped). Returns the stored form, or null if the input isn't a domain.
+     *
+     * Re-adding a domain already on the list keeps its original date: adding is idempotent, and a
+     * stray second add must not make an old commitment look new.
      */
     fun add(input: String): String? {
         val domain = DomainMatcher.normalizeDomain(input) ?: return null
-        write(current() + domain)
+        val known = current()
+        write(known + domain)
+        if (domain !in known) {
+            prefs.edit().putLong(addedKey(domain), System.currentTimeMillis()).apply()
+        }
         return domain
     }
 
@@ -45,6 +64,7 @@ class BlocklistStore(context: Context) {
         val set = current()
         if (normalized !in set) return false
         write(set - normalized)
+        prefs.edit().remove(addedKey(normalized)).apply()
         return true
     }
 
@@ -55,8 +75,20 @@ class BlocklistStore(context: Context) {
         prefs.edit().putStringSet(KEY, HashSet(domains)).apply()
     }
 
+    private fun addedKey(domain: String) = "$KEY_ADDED_PREFIX$domain"
+
     private companion object {
         const val PREFS = "appblock_blocklist"
         const val KEY = "domains"
+
+        /**
+         * Dates live beside the set rather than inside it, so the stored domain set keeps its exact
+         * old shape — nothing needs migrating, and a list blocked before dates existed simply reads
+         * as undated rather than as a decode failure.
+         */
+        const val KEY_ADDED_PREFIX = "added_"
     }
 }
+
+/** A blocked domain and when it went on the list (null if it predates the record). */
+data class BlockedSite(val domain: String, val addedAtMillis: Long?)
