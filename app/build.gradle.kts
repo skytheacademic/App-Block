@@ -86,6 +86,25 @@ android {
     }
 }
 
+/**
+ * Compose screen tests run in the **debug** variant only.
+ *
+ * `createComposeRule()` launches the bare `ComponentActivity` that `ui-test-manifest` declares, and
+ * that artifact is `debugImplementation` — deliberately, since it adds an exported activity and the
+ * release/`debugFast` builds are the hardened ones that go on the phone. Without this filter every
+ * Compose test failed in those two variants with "Unable to resolve activity for …ComponentActivity",
+ * so `./gradlew test` was red on a clean tree even though `testDebugUnitTest` was green. The engine
+ * tests still run in every variant — only the screen tests are scoped.
+ */
+tasks.withType<Test>().configureEach {
+    if (name != "testDebugUnitTest") {
+        filter {
+            excludeTestsMatching("com.appblock.*ScreenTest")
+            isFailOnNoMatchingTests = false
+        }
+    }
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
