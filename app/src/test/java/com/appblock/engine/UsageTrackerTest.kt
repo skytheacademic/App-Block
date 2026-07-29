@@ -33,4 +33,26 @@ class UsageTrackerTest {
         val u = UsageTracker.accrue(BudgetUsage(100L, d1), -50L, d1)
         assertEquals(100L, u.secondsUsed)
     }
+
+    @Test fun `archive keeps days in order, oldest first`() {
+        var h = UsageTracker.archive(emptyList(), DayUsage(d2, 120L))
+        h = UsageTracker.archive(h, DayUsage(d1, 60L))
+        assertEquals(listOf(d1, d2), h.map { it.day })
+    }
+
+    /** Two coordinators share one store, so the same rollover can be seen — and archived — twice. */
+    @Test fun `archiving the same day again replaces it rather than duplicating`() {
+        var h = UsageTracker.archive(emptyList(), DayUsage(d1, 60L))
+        h = UsageTracker.archive(h, DayUsage(d1, 90L))
+        assertEquals(1, h.size)
+        assertEquals(90L, h.single().secondsUsed)
+    }
+
+    @Test fun `archive keeps only the last seven days`() {
+        var h = emptyList<DayUsage>()
+        for (i in 0 until 10) h = UsageTracker.archive(h, DayUsage(d1.plusDays(i.toLong()), i * 60L))
+        assertEquals(UsageTracker.HISTORY_DAYS, h.size)
+        assertEquals(d1.plusDays(3), h.first().day)
+        assertEquals(d1.plusDays(9), h.last().day)
+    }
 }

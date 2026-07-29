@@ -39,6 +39,19 @@ interface EngineStore {
 
     /** Latch (non-null reason) or clear (null) the tamper flag. */
     fun saveTamper(reason: String?)
+
+    /**
+     * The last [UsageTracker.HISTORY_DAYS] *completed* logical days for [target], oldest first.
+     *
+     * Display-only, and deliberately outside the fail-safe rule that governs everything else here:
+     * no policy decision ever reads history, so a lost or unreadable entry costs one bar on a chart
+     * and nothing else. It must therefore fail quietly — unreadable reads as "no history", never as
+     * a reason to block.
+     */
+    fun loadHistory(target: Target): List<DayUsage>
+
+    /** Archive one completed day. Idempotent per day — see [UsageTracker.archive]. */
+    fun recordHistory(target: Target, completed: DayUsage)
 }
 
 /** In-memory store for tests and defaults. No reboot/tamper concerns — lives only for the process. */
@@ -46,6 +59,7 @@ class InMemoryEngineStore : EngineStore {
 
     private val usage = mutableMapOf<Target, BudgetUsage>()
     private val exceptions = mutableMapOf<Target, ExceptionState>()
+    private val history = mutableMapOf<Target, List<DayUsage>>()
     private var anchor: ClockAnchor? = null
     private var tamperReason: String? = null
 
@@ -78,5 +92,11 @@ class InMemoryEngineStore : EngineStore {
 
     override fun saveTamper(reason: String?) {
         tamperReason = reason
+    }
+
+    override fun loadHistory(target: Target): List<DayUsage> = history[target].orEmpty()
+
+    override fun recordHistory(target: Target, completed: DayUsage) {
+        history[target] = UsageTracker.archive(loadHistory(target), completed)
     }
 }

@@ -33,6 +33,32 @@ object EngineCodec {
         return BudgetUsage(secondsUsed = seconds.coerceAtLeast(0L), dayKey = day)
     }
 
+    // ---- history ----
+
+    /**
+     * The rolling history: `epochDay:seconds` entries, comma-separated, oldest first. Epoch days
+     * rather than ISO dates because this string is rewritten on every rollover and stays short.
+     */
+    fun encodeHistory(history: List<DayUsage>): String =
+        history.joinToString(",") { "${it.day.toEpochDay()}:${it.secondsUsed}" }
+
+    /**
+     * Decodes leniently — the one place in this file where leniency is right. History is
+     * display-only, so a damaged entry should cost its own bar rather than the whole week, and a
+     * decode failure here must never be able to look like a reason to block.
+     */
+    fun decodeHistory(raw: String?): List<DayUsage> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return raw.split(',').mapNotNull { entry ->
+            val parts = entry.split(':')
+            if (parts.size != 2) return@mapNotNull null
+            val epochDay = parts[0].toLongOrNull() ?: return@mapNotNull null
+            val seconds = parts[1].toLongOrNull() ?: return@mapNotNull null
+            val day = runCatching { LocalDate.ofEpochDay(epochDay) }.getOrNull() ?: return@mapNotNull null
+            DayUsage(day, seconds.coerceAtLeast(0L))
+        }
+    }
+
     // ---- ExceptionState ----
 
     fun encodeException(state: ExceptionState): String =

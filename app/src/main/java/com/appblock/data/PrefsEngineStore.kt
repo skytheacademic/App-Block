@@ -3,11 +3,13 @@ package com.appblock.data
 import android.content.Context
 import com.appblock.engine.BudgetUsage
 import com.appblock.engine.ClockAnchor
+import com.appblock.engine.DayUsage
 import com.appblock.engine.EngineClock
 import com.appblock.engine.EngineCodec
 import com.appblock.engine.EngineStore
 import com.appblock.engine.ExceptionState
 import com.appblock.engine.Target
+import com.appblock.engine.UsageTracker
 
 /**
  * SharedPreferences-backed [EngineStore]. The service and the UI both run in this app's single
@@ -94,6 +96,14 @@ class PrefsEngineStore(
         }.apply()
     }
 
+    override fun loadHistory(target: Target): List<DayUsage> =
+        EngineCodec.decodeHistory(prefs.getString(historyKey(target), null))
+
+    override fun recordHistory(target: Target, completed: DayUsage) {
+        val next = UsageTracker.archive(loadHistory(target), completed)
+        prefs.edit().putString(historyKey(target), EngineCodec.encodeHistory(next)).apply()
+    }
+
     private fun clearException(target: Target) {
         prefs.edit()
             .remove(excKey(target))
@@ -104,6 +114,7 @@ class PrefsEngineStore(
     private fun usageKey(target: Target) = "usage_${target.key}"
     private fun excKey(target: Target) = "exc_${target.key}"
     private fun excElapsedKey(target: Target) = "exc_elapsed_${target.key}"
+    private fun historyKey(target: Target) = "history_${target.key}"
 
     companion object {
         private const val PREFS = "appblock_engine"
