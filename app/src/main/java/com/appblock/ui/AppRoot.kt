@@ -1,0 +1,500 @@
+package com.appblock.ui
+
+import android.content.pm.ApplicationInfo
+import android.os.SystemClock
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import com.appblock.ActiveRules
+import com.appblock.BuildConfig
+import com.appblock.R
+import com.appblock.data.PrefsEngineStore
+import com.appblock.engine.AppTargets
+import com.appblock.engine.BudgetCoordinator
+import com.appblock.engine.ChangeResult
+import com.appblock.engine.DayBoundary
+import com.appblock.engine.DayUsage
+import com.appblock.engine.DurableUnlockManager
+import com.appblock.engine.DurableUnlockState
+import com.appblock.engine.ExceptionState
+import com.appblock.engine.InstagramSurface
+import com.appblock.engine.Target
+import com.appblock.engine.TargetSettings
+import com.appblock.engine.TargetStatus
+import com.appblock.engine.UnlockCategory
+import com.appblock.engine.UsageTracker
+import com.appblock.security.BlocklistStore
+import com.appblock.security.DurableUnlockController
+import com.appblock.security.LockStore
+import com.appblock.service.AndroidClockIntegrity
+import com.appblock.service.AndroidEngineClock
+import com.appblock.service.AppBlockerAccessibilityService
+import kotlinx.coroutines.delay
+
+/**
+ * The app, above the tabs: one clock, one coordinator, one draft, one unlock cycle.
+ *
+ * Everything lives here rather than inside a tab because the redesign split one screen into four and
+ * the state did not split with it — Apps edits the draft that Lock commits, Sites consumes the same
+ * unlock cycle Lock displays, and Today shows the exceptions the picker starts. Hoisting it is what
+ * keeps the four screens views of one thing rather than four little apps that disagree.
+ */
+@Composable
+fun AppRoot(
+    accessibilityEnabled: Boolean,
+    overlayGranted: Boolean,
+    onOpenAccessibility: () -> Unit,
+    onOpenOverlay: () -> Unit,
+    onOpenDateSettings: () -> Unit,
+) {
+    val context = LocalContext.current
+    val clock = remember { AndroidEngineClock() }
+    val integrity = remember { AndroidClockIntegrity(context) }
+    val engineStore = remember { PrefsEngineStore(context, clock) }
+    val ruleStore = remember { ActiveRules.ruleStore(context) }
+    val rules = remember { RulesDraft(ruleStore) }
+    val lockStore = remember { LockStore(context) }
+    val unlockController = remember { DurableUnlockController(context) }
+    val blocklistStore = remember { BlocklistStore(context) }
+    // The UI's own coordinator over the same prefs store the service writes to — one process, so
+    // that store is the live value. It never calls onForeground, so it only reads usage and
+    // advances/edits exceptions; the service stays the only thing that accrues time.
+    val coordinator = remember {
+        BudgetCoordinator(
+            clock,
+            engineStore,
+            integrity,
+            ActiveRules.ruleSource(context),
+            exceptionWaitMs = ActiveRules.exceptionWaitMs,
+        )
+    }
+
+    var tab by rememberSaveable {
+        mutableStateOf(
+            if (unlockController.state() is DurableUnlockState.Locked) AppTab.TODAY else AppTab.LOCK,
+        )
+    }
+    var message by remember { mutableStateOf<String?>(null) }
+    var receipt by remember { mutableStateOf<LockReceipt?>(null) }
+
+    var statuses by remember { mutableStateOf<List<TargetStatus>>(emptyList()) }
+    var tamperReason by remember { mutableStateOf<String?>(null) }
+    var autoTime by remember { mutableStateOf(true) }
+    var serviceRunning by remember { mutableStateOf(false) }
+    var now by remember { mutableStateOf(clock.nowLocal()) }
+    var unlockState by remember { mutableStateOf<DurableUnlockState>(DurableUnlockState.Locked) }
+    var unlockRemainingMs by remember { mutableLongStateOf(0L) }
+    var keyConfigured by remember { mutableStateOf(lockStore.isConfigured()) }
+
+    var editing by remember { mutableStateOf<Target?>(null) }
+    var pickingApp by remember { mutableStateOf(false) }
+    var pickingException by remember { mutableStateOf(false) }
+    var sizingException by remember { mutableStateOf<ExceptionCandidate?>(null) }
+    var showKeySetup by remember { mutableStateOf(false) }
+    var startCategory by remember { mutableStateOf<UnlockCategory?>(null) }
+
+    var blocklistRefresh by remember { mutableIntStateOf(0) }
+    val sites = remember(blocklistRefresh) { blocklistStore.sites() }
+    var newDomain by remember { mutableStateOf("") }
+    var domainError by remember { mutableStateOf(false) }
+
+    // One second: every countdown on every tab moves on its own rather than jumping when touched.
+    LaunchedEffect(Unit) {
+        var previousPhase = ""
+        while (true) {
+            val state = unlockController.state()
+            val phase = state::class.simpleName.orEmpty()
+            unlockState = state
+            unlockRemainingMs = when (state) {
+                is DurableUnlockState.Pending ->
+                    DurableUnlockManager.msUntilOpen(state, SystemClock.elapsedRealtime())
+                is DurableUnlockState.Open ->
+                    DurableUnlockManager.msUntilClose(state, SystemClock.elapsedRealtime())
+                else -> 0L
+            }
+            statuses = coordinator.snapshot()
+            tamperReason = coordinator.tamperReason()
+            autoTime = integrity.autoTimeEnabled()
+            serviceRunning = AppBlockerAccessibilityService.isRunning
+            keyConfigured = lockStore.isConfigured()
+            now = clock.nowLocal()
+            rules.reload()
+            // A message about a phase must not outlive that phase: "wait started" is a lie the
+            // second the window opens, and the tick can cross that boundary at any moment.
+            if (previousPhase.isNotEmpty() && phase != previousPhase) message = null
+            previousPhase = phase
+            delay(1_000)
+        }
+    }
+
+    val appsWindowOpen = DurableUnlockManager.isOpenFor(unlockState, UnlockCategory.APPS)
+    val websitesWindowOpen = DurableUnlockManager.isOpenFor(unlockState, UnlockCategory.WEBSITES)
+    val statusesByTarget = statuses.associateBy { it.target }
+    val logicalDay = DayBoundary.logicalDay(now)
+    val countdown = formatHmsFromMs(unlockRemainingMs)
+
+    val lockLine = when (unlockState) {
+        is DurableUnlockState.Pending -> stringResource(R.string.lock_line_pending, countdown)
+        is DurableUnlockState.Open -> stringResource(R.string.lock_line_open, countdown)
+        else -> stringResource(R.string.lock_line_locked)
+    }
+
+    val savedMessage = stringResource(R.string.lock_saved)
+    val blockedSaveMessage = stringResource(R.string.lock_blocked_save)
+    val savedOneChangeTitle = stringResource(R.string.lock_saved_one_change)
+    val windowCancelledMessage = stringResource(R.string.lock_window_cancelled)
+    val waitStartedMessage = stringResource(R.string.lock_wait_started)
+    val keyCreatedMessage = stringResource(R.string.lock_key_created)
+    val exceptionCancelledMessage = stringResource(R.string.exception_cancelled)
+    val removeNeedsWindowMessage = stringResource(R.string.sites_remove_needs_window)
+
+    LampScaffold(
+        selected = tab,
+        onSelect = { selected ->
+            tab = selected
+            message = null
+            // The receipt belongs to the visit that earned it. Leaving Lock is the acknowledgement.
+            if (selected != AppTab.LOCK) receipt = null
+        },
+        toast = message?.let { text -> { LampToast(text) { message = null } } },
+    ) {
+        when (tab) {
+            AppTab.TODAY -> TodayTab(
+                rules = rules,
+                statuses = statuses,
+                usageSecondsFor = { target ->
+                    UsageTracker.secondsUsedOn(engineStore.loadUsage(target), logicalDay)
+                },
+                historyFor = { target -> engineStore.loadHistory(target) },
+                now = now,
+                tamperReason = tamperReason,
+                onCancelException = { target -> coordinator.cancelException(target); message = exceptionCancelledMessage },
+                onRequestMoreTime = { pickingException = true },
+                onOpenLock = { tab = AppTab.LOCK },
+            )
+
+            AppTab.APPS -> AppsScreen(
+                rules = rules,
+                statuses = statusesByTarget,
+                now = now,
+                lockLine = lockLine,
+                onEdit = { editing = it },
+                onAdd = { pickingApp = true },
+                onOpenLock = { tab = AppTab.LOCK },
+            )
+
+            AppTab.SITES -> SitesScreen(
+                sites = sites,
+                newDomain = newDomain,
+                inputError = domainError,
+                windowOpen = websitesWindowOpen,
+                windowCountdown = when {
+                    websitesWindowOpen -> countdown
+                    (unlockState as? DurableUnlockState.Pending)?.category == UnlockCategory.WEBSITES -> countdown
+                    else -> null
+                },
+                canStartWindow = unlockState is DurableUnlockState.Locked && keyConfigured,
+                onNewDomainChange = { newDomain = it; domainError = false; message = null },
+                onAdd = {
+                    val added = blocklistStore.add(newDomain)
+                    if (added != null) {
+                        newDomain = ""
+                        domainError = false
+                        blocklistRefresh++
+                        message = context.getString(R.string.sites_blocked_toast, added)
+                    } else {
+                        domainError = true
+                    }
+                },
+                onRemove = { domain ->
+                    if (blocklistStore.removeIfAuthorized(domain, websitesWindowOpen)) {
+                        unlockController.consume()   // single-use: one site per website window
+                        blocklistRefresh++
+                        message = context.getString(R.string.sites_removed_toast, domain)
+                    } else {
+                        message = removeNeedsWindowMessage
+                    }
+                },
+                onStartWindow = { startCategory = UnlockCategory.WEBSITES },
+            )
+
+            AppTab.LOCK -> LockScreen(
+                state = lockStateFor(unlockState, keyConfigured, countdown, unlockRemainingMs, now),
+                receipt = receipt,
+                changes = rules.changes,
+                direction = rules.direction,
+                appsWindowOpen = appsWindowOpen,
+                protection = protectionItems(
+                    accessibilityEnabled = accessibilityEnabled,
+                    overlayGranted = overlayGranted,
+                    autoTime = autoTime,
+                    tamperReason = tamperReason,
+                    serviceRunning = serviceRunning,
+                    debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                    onOpenAccessibility = onOpenAccessibility,
+                    onOpenOverlay = onOpenOverlay,
+                    onOpenDateSettings = onOpenDateSettings,
+                ),
+                keyConfigured = keyConfigured,
+                onCreateKey = { showKeySetup = true },
+                onStartWindow = { startCategory = UnlockCategory.APPS },
+                onCancelWindow = { unlockController.cancel(); message = windowCancelledMessage },
+                onDiscard = { rules.discard(); message = null },
+                onSave = {
+                    val loosening = rules.loosens
+                    val summary = rules.changes.firstOrNull()
+                    when (rules.commit(appsWindowOpen)) {
+                        is ChangeResult.Applied -> if (loosening) {
+                            unlockController.consume()   // single-use: this was your one change
+                            receipt = LockReceipt(
+                                title = savedOneChangeTitle,
+                                body = context.getString(
+                                    R.string.lock_saved_one_change_body,
+                                    summary?.detail.orEmpty(),
+                                    formatClock(now),
+                                ),
+                            )
+                            message = null
+                        } else {
+                            message = savedMessage
+                        }
+                        is ChangeResult.Blocked -> message = blockedSaveMessage
+                    }
+                },
+                labelFor = { target -> shortLabelFor(target) },
+            )
+        }
+    }
+
+    // ---- sheets ----
+
+    editing?.let { target ->
+        rules.draft.targets[target]?.let { settings ->
+            LimitsSheet(
+                target = target,
+                settings = settings,
+                direction = rules.direction,
+                dirty = rules.dirty,
+                onWeekday = { v -> rules.update(target) { it.copy(weekdayMinutes = v) } },
+                onWeekend = { v -> rules.update(target) { it.copy(weekendMinutes = v) } },
+                onCeiling = { v -> rules.update(target) { it.copy(exceptionMaxMinutes = v) } },
+                onSchedule = { schedule -> rules.setSchedule(target, schedule) },
+                // Built-ins can only be switched off (itself a gated loosening); an app you added
+                // can be dropped entirely — which the gate reads as a loosening all the same.
+                onRemove = if (target.userPackage != null) {
+                    { rules.remove(target); editing = null }
+                } else {
+                    null
+                },
+                onDismiss = { editing = null },
+            )
+        }
+    }
+
+    if (pickingApp) {
+        AppPickerSheet(
+            // Hide anything already covered: the curated packages and every app already added.
+            // Offering TikTok here would create a second, weaker whole-app target beside the real one.
+            excludedPackages = AppTargets.packages.keys +
+                rules.draft.targets.keys.mapNotNull { it.userPackage } +
+                InstagramSurface.PACKAGE,
+            onPick = { app ->
+                rules.add(Target.forPackage(app.packageName), NEW_APP_DEFAULTS)
+                pickingApp = false
+                message = context.getString(R.string.apps_added, app.label)
+            },
+            onDismiss = { pickingApp = false },
+        )
+    }
+
+    if (pickingException) {
+        ExceptionPickSheet(
+            candidates = statuses.map { it.toExceptionCandidate() },
+            onPick = { candidate ->
+                pickingException = false
+                sizingException = candidate
+            },
+            onDismiss = { pickingException = false },
+        )
+    }
+
+    sizingException?.let { candidate ->
+        ExceptionAmountSheet(
+            candidate = candidate,
+            windowMinutes = rules.saved.exceptionWindowMinutes,
+            waitMs = ActiveRules.exceptionWaitMs,
+            now = now,
+            onConfirm = { extra ->
+                coordinator.requestException(candidate.target, extra, rules.saved.exceptionWindowMinutes)
+                sizingException = null
+            },
+            onDismiss = { sizingException = null },
+        )
+    }
+
+    if (showKeySetup) {
+        KeySetupSheet(
+            onConfirm = { generated ->
+                lockStore.setKey(generated)
+                keyConfigured = true
+                showKeySetup = false
+                message = keyCreatedMessage
+            },
+            onDismiss = { showKeySetup = false },
+        )
+    }
+
+    startCategory?.let { category ->
+        StartWindowSheet(
+            category = category,
+            verify = { code -> lockStore.verify(code) },
+            onVerified = {
+                unlockController.request(category)
+                startCategory = null
+                tab = AppTab.LOCK
+                message = waitStartedMessage
+            },
+            onDismiss = { startCategory = null },
+        )
+    }
+}
+
+/** Today's own assembly, kept beside the screen it feeds rather than inside the root's body. */
+@Composable
+private fun TodayTab(
+    rules: RulesDraft,
+    statuses: List<TargetStatus>,
+    usageSecondsFor: (Target) -> Long,
+    historyFor: (Target) -> List<DayUsage>,
+    now: java.time.LocalDateTime,
+    tamperReason: String?,
+    onCancelException: (Target) -> Unit,
+    onRequestMoreTime: () -> Unit,
+    onOpenLock: () -> Unit,
+) {
+    val logicalDay = DayBoundary.logicalDay(now)
+    // Today reads the *saved* settings, never the draft: it answers "how am I doing against the
+    // rules in force", which an unsaved edit has not changed.
+    val rows = todayRows(
+        settings = rules.saved,
+        statuses = statuses,
+        usageSecondsFor = usageSecondsFor,
+        today = logicalDay,
+        todayDayOfWeek = logicalDay.dayOfWeek,
+    )
+    val exception = statuses.firstNotNullOfOrNull { status ->
+        when (val state = status.exception) {
+            is ExceptionState.None -> null
+            is ExceptionState.Pending -> TodayException(
+                target = status.target,
+                extraMinutes = state.extraMinutes,
+                active = false,
+                remainingMs = status.exceptionActivatesInMs ?: 0L,
+                raisedCapMinutes = (status.normalCapMinutes + state.extraMinutes)
+                    .coerceAtMost(status.exceptionMaxMinutes),
+                windowMinutes = state.windowMinutes,
+            )
+            is ExceptionState.Active -> TodayException(
+                target = status.target,
+                extraMinutes = state.extraMinutes,
+                active = true,
+                remainingMs = status.exceptionEndsInMs ?: 0L,
+                raisedCapMinutes = status.effectiveCapMinutes,
+                windowMinutes = rules.saved.exceptionWindowMinutes,
+            )
+        }
+    }
+
+    TodayScreen(
+        now = now,
+        logicalDay = logicalDay,
+        rows = rows,
+        remainingSeconds = statuses.sumOf { it.remainingSeconds },
+        usedMinutes = (statuses.sumOf { it.usedSeconds } / 60L).toInt(),
+        capMinutes = statuses.sumOf { it.effectiveCapMinutes },
+        closedCount = rows.count { it.state == TargetState.SPENT || it.state == TargetState.CLOSED },
+        exception = exception,
+        tamperReason = tamperReason,
+        week = weekRows(
+            settings = rules.saved,
+            today = logicalDay,
+            historyFor = historyFor,
+            todaySecondsFor = usageSecondsFor,
+        ),
+        onCancelException = { exception?.let { onCancelException(it.target) } },
+        onRequestMoreTime = onRequestMoreTime,
+        onOpenLock = onOpenLock,
+    )
+}
+
+private fun TargetStatus.toExceptionCandidate(): ExceptionCandidate = ExceptionCandidate(
+    target = target,
+    capMinutes = normalCapMinutes,
+    ceilingMinutes = exceptionMaxMinutes,
+    existingPhase = when (exception) {
+        is ExceptionState.Pending -> ExceptionPhase.PENDING
+        is ExceptionState.Active -> ExceptionPhase.ACTIVE
+        is ExceptionState.None -> null
+    },
+)
+
+private fun lockStateFor(
+    state: DurableUnlockState,
+    keyConfigured: Boolean,
+    countdown: String,
+    remainingMs: Long,
+    now: java.time.LocalDateTime,
+): LockState {
+    if (!keyConfigured) return LockState.NoKey
+    return when (state) {
+        is DurableUnlockState.Locked -> LockState.Locked
+        is DurableUnlockState.Pending -> {
+            val total = waitMsFor(state.category)
+            LockState.Pending(
+                category = state.category,
+                countdown = countdown,
+                elapsedFraction = if (total <= 0L) 0f else ((total - remainingMs).toFloat() / total),
+                // Derived from the deadline rather than stored: the wait is monotonic, so the only
+                // honest wall-clock statement about it is "this many milliseconds either side of now".
+                startedAt = formatClockIn(now, -(total - remainingMs)),
+                opensAt = formatClockIn(now, remainingMs),
+            )
+        }
+        is DurableUnlockState.Open -> LockState.Open(state.category, countdown)
+    }
+}
+
+/**
+ * The wait this build actually uses. Mirrors [DurableUnlockController]'s own choice — the throwaway
+ * `debugFast` variant shrinks both waits so the cycle is verifiable on-device in minutes — so the
+ * progress track can't claim a 2-hour wait while the controller is running a 2-minute one.
+ */
+private fun waitMsFor(category: UnlockCategory): Long =
+    if (BuildConfig.FAST_CAPS) {
+        when (category) {
+            UnlockCategory.APPS -> DurableUnlockController.FAST_WAIT_MS
+            UnlockCategory.WEBSITES -> DurableUnlockController.FAST_WEBSITES_WAIT_MS
+        }
+    } else {
+        category.defaultWaitMs
+    }
+
+/**
+ * Limits a newly added app starts with. Deliberately a real cap rather than 0: adding at any cap is a
+ * tightening (the app had no limit at all a moment ago), and it can be dropped to 0 for free —
+ * whereas a default of 0 that felt too harsh would cost a 2-hour window to relax.
+ */
+private val NEW_APP_DEFAULTS = TargetSettings(
+    enabled = true,
+    weekdayMinutes = 30,
+    weekendMinutes = 30,
+    exceptionMaxMinutes = 60,
+)
