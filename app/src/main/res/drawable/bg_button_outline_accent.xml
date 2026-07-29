@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The primary button, in XML: a 1 px accent outline on transparent. The accent is a line, a mark and
+  a bar in this design — never a large fill — so the block screen's only button is drawn the same way
+  the Compose ones are.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#38D9A05C" />
+            <stroke android:width="1dp" android:color="@color/lamp_accent" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <stroke android:width="1dp" android:color="@color/lamp_accent" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</selector>
