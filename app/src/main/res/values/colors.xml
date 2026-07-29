@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#1B1B1F</color>
+    <!-- Lamp tokens that the XML layers need. Compose reads its own copies from ui/theme/Lamp.kt. -->
+    <color name="lamp_bg">#17130F</color>
+    <!-- The block overlay's ground: deliberately deeper than the app's, so being blocked doesn't
+         look like being in the app. -->
+    <color name="lamp_block_ground">#120E0A</color>
+    <color name="lamp_surface">#241D17</color>
+    <color name="lamp_text">#EFE7DC</color>
+    <color name="lamp_accent">#D9A05C</color>
+    <color name="lamp_neutral_400">#C8BDAE</color>
+    <color name="lamp_neutral_500">#A5988A</color>
+    <color name="lamp_row_rule">#14EFE7DC</color>
+    <!--
+      The launcher icon's background is a vector layer (@drawable/ic_launcher_background), not a
+      colour, so the old #1B1B1F ic_launcher_background colour is gone rather than left to shadow it.
+    -->
 </resources>
