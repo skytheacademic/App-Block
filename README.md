@@ -22,6 +22,9 @@ Still the software-friction tier — force-stop or uninstall defeat it. The opti
 
 ## Build
 - Requirements: JDK 17 + Android SDK (platform 35). Android Studio (Ladybug or newer) optional.
+- CI: every push runs `testDebugUnitTest` and builds the debug APK
+  ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). A green run attaches `app-debug.apk` as a
+  workflow artifact — downloadable and sideloadable straight from the GitHub mobile app, no laptop.
 - CLI: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`. The Gradle wrapper is committed, so no separate Gradle install is needed.
   - Create a `local.properties` with `sdk.dir` pointing at your Android SDK (gitignored; per machine).
 - Release: `./gradlew assembleRelease` signs only if `keystore.properties` + the `.jks` are present at
