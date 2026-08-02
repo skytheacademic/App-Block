@@ -34,6 +34,41 @@ as items complete. Cute, glanceable, keeps momentum visible.
 - A small state table (stage | done/total | status) lives beside the TODO and drives the fill;
   recount whenever the TODO changes.
 
+## Running a hardware gate: phase it by build variant
+
+A device gate is usually planned as "install the build, walk the list". That breaks as soon as the
+list gets long, because **three things you need are properties of different builds**:
+
+1. **It's the artifact that ships** — signed with the real key, real timings, minified.
+2. **It's diagnosable** — emits the internal state you need to tell a pass from a lucky pass.
+3. **It's fast to exercise** — hours-long waits compressed to seconds.
+
+(1) actively excludes (2) and (3): a release build that logged its decisions would be leaking, and
+one with test timings isn't the thing you're shipping. So stop trying to find one build that does
+all three and **split the session into phases, one per variant.**
+
+**Give the QA variant its own `applicationIdSuffix`** so it installs *alongside* the real app rather
+than over it. This is the move that makes phasing cheap:
+- no uninstall, so **no config wipe** — state-migration checks stay runnable
+- the QA build can never inherit the real app's granted permissions via an in-place update, which
+  matters a lot if those grants are the thing under test
+
+**Order the phases by what can't be replayed.** Anything observable only *once* — a migration from
+the previously-installed version, a first-launch path, a one-way state change — goes first, before
+anything else perturbs the state it reads. Everything else can be re-run.
+
+**Tag every checklist item with its phase** (`[P1]`, `[P2]`, …). An untagged list silently assumes
+one build and you find out at the phone.
+
+**Write the costs into the checklist, not just the plan:**
+- the QA variant needs its **own** permission grants and its own first-run setup — budget the minutes
+- **two instances of the app now run at once**, often with the same label. Attribute behavior by log
+  output, not by looking at the UI; only one of them logs
+- if the app defends itself, **disabling the real instance to isolate the QA one is itself a guarded
+  action** — don't plan a test that requires spending a real unlock to run
+- **capture any state you'd hate to re-enter before phase 1** — if the app can export its config,
+  that export is both a checklist item and the session's insurance
+
 ## Docs split
 - **Repo (public):** README (what + how to build), code, this playbook. Nothing personal.
 - **Private planning folder (synced, outside git):** STATUS (current state, lean) · TODO (the gated
@@ -47,7 +82,9 @@ as items complete. Cute, glanceable, keeps momentum visible.
   spec runs as fast JVM unit tests, no emulator.
 - **Store interfaces in the engine, Android impls in `data/`** → tests swap in in-memory fakes.
 - **`debugFast` build variant**: real code, compressed timings behind a `FAST_CAPS` flag, own
-  `applicationIdSuffix` → installable next to the real app for on-device QA.
+  `applicationIdSuffix` → installable next to the real app for on-device QA. Gate diagnostic logging
+  on `DEBUG || FAST_CAPS` so the shipped build stays silent. See "Running a hardware gate" — the
+  suffix is what makes a phased device session cheap.
 - **Release signing**: gitignored `keystore.properties` + `.jks`, graceful unsigned fallback when
   absent — builds work on any machine, signs only where the key lives.
 - **Backtick JUnit test names** as a living spec (`` `reboot mid-wait restarts the clock` ``).

@@ -19,10 +19,13 @@ import android.widget.TextView
 import android.widget.Toast
 import com.appblock.ActiveRules
 import com.appblock.BuildConfig
+import com.appblock.MainActivity
 import com.appblock.R
 import com.appblock.data.InstalledApps
 import com.appblock.data.PrefsEngineStore
+import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
+import com.appblock.engine.AddressWatch
 import com.appblock.engine.AppTargets
 import com.appblock.engine.BlockReason
 import com.appblock.engine.BrowserPolicy
@@ -31,8 +34,10 @@ import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
 import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
+import com.appblock.engine.OcclusionHold
 import com.appblock.engine.RuleSource
 import com.appblock.engine.SettingsWatch
+import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
@@ -70,10 +75,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * when what's blocked is an app (→ Home instead). See [exitOverlay].
      */
     private var overlayExitBrowserPkg: String? = null
+    private lateinit var clock: AndroidEngineClock
     private lateinit var coordinator: BudgetCoordinator
     private lateinit var ruleSource: RuleSource
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
+    private lateinit var witnessStore: SignalWitnessStore
 
     /** Briefly-cached set of targets with a live rule — see [activeTargets]. */
     private var activeTargetsCache: Set<Target>? = null
@@ -98,7 +105,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      *  from a tree that simply doesn't have the reel pager in it). */
     private var lastIgNodeCount = 0
     /** The last real read taken before our overlay started occluding it — see [holdThroughOcclusion]. */
-    private var heldForeground: Foreground? = null
+    private val occlusionHold = OcclusionHold<Foreground>()
+    /**
+     * The package of the last window-state change, which is how the hold learns the user has moved on:
+     * events keep arriving with a package name even while `getWindows()` is pruned to nothing. See
+     * [noteForegroundPackage] for what deliberately doesn't count.
+     */
+    private var lastWindowPackage: String? = null
+    /** Cached `canDrawOverlays` — see [canDrawOverlay]. */
+    private var overlayGranted = true
+    private var overlayGrantedAtMs = 0L
+    /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
+     *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
+    private var lastSignalConfirmElapsedMs: Long? = null
+    /** Per-browser address-bar watch: turns a missing url_bar into "not yet" or "not ever". Fed the
+     *  read by [omniboxFor] and the on-screen browser set by [resolveForeground]. */
+    private val addressWatch = AddressWatch()
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -111,7 +133,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         isRunning = true
-        val clock = AndroidEngineClock()
+        clock = AndroidEngineClock()
         ruleSource = ActiveRules.ruleSource(this)
         coordinator = BudgetCoordinator(
             clock,
@@ -122,6 +144,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         )
         unlockController = DurableUnlockController(this)
         blocklistStore = BlocklistStore(this)
+        witnessStore = SignalWitnessStore(this)
     }
 
     /**
@@ -143,12 +166,27 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return fresh
     }
 
+    /**
+     * Every event goes through here, so nothing thrown inside may escape: an uncaught exception on
+     * this callback kills the service, and a dead service blocks nothing until the watchdog notices up
+     * to 15 minutes later. The `lateinit` fields are the concrete risk — events can arrive before
+     * [onServiceConnected] has finished wiring them, and that throws
+     * `UninitializedPropertyAccessException` rather than anything the inner guards catch.
+     *
+     * Swallowing is the right call here specifically because the loop is self-healing: the next event
+     * or the 5-second tick re-runs the whole decision from scratch, so one lost pass costs nothing.
+     */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        runCatching { handleEvent(event) }
+    }
+
+    private fun handleEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val type = event.eventType
         val windowEvent = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             type == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         if (!windowEvent && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) noteForegroundPackage(event)
         if (selfDefense(event)) return
         if (windowEvent) {
             pump()
@@ -167,6 +205,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Record who owns the screen, for the occlusion hold's "the user moved on" test.
+     *
+     * Two kinds of event carry our own package and must NOT count as moving on:
+     *  - the block overlay itself being added or removed, and the self-defense Toast. Treating those as
+     *    a foreground change would release the hold every time the overlay appears, which is precisely
+     *    the once-a-second oscillation [holdThroughOcclusion] exists to stop.
+     *  - so only our real UI qualifies, identified by class: opening App-Block *is* leaving the blocked
+     *    app, and the block screen shouldn't sit on top of the app's own settings.
+     */
+    private fun noteForegroundPackage(event: AccessibilityEvent) {
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName && event.className?.toString() != MainActivity::class.java.name) return
+        lastWindowPackage = pkg
+    }
+
+    /**
      * One decision cycle: resolve what's foreground (surface-aware for Instagram, URL-aware for
      * browsers), tick the engine, apply the overlay, and keep ticking while anything blockable — a live
      * target, a visible Instagram window, or a visible browser — is on screen.
@@ -178,10 +232,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // Seed the occlusion hold with the read that *caused* this overlay. Without it there is a
         // one-scan gap: the overlay goes up, the next scan already comes back pruned, and nothing has
         // been held yet - so the block drops for ~200ms and hands back a free frame of the reel.
-        if (overlayView != null && heldForeground == null &&
-            (fg.target != null || fg.webBlock != null)
-        ) {
-            heldForeground = fg
+        if (overlayView != null && (fg.target != null || fg.webBlock != null)) {
+            occlusionHold.seed(fg, lastWindowPackage, SystemClock.elapsedRealtime())
         }
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
@@ -189,24 +241,31 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /**
      * The settings-watch (CONSTRAINTS lever A). A Settings screen about App-Block itself — the
      * Accessibility toggle, its "Turn off?" dialog, App info with Force stop / Uninstall, the
-     * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a
-     * zero-friction escape. Stands down while setup is still incomplete (first-time permission
-     * granting must not be bounced) and while the durable-change window is open, which makes
-     * "switch the service off" a gated loosening like any other (CONSTRAINTS §6).
+     * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a zero-friction
+     * escape. It also covers the wireless-debugging screen, which names nothing of ours (B-10).
+     *
+     * An open durable-change window makes "switch the service off" a gated loosening like any other
+     * (CONSTRAINTS §6) — but only that. It no longer stands down the *installer* tier, so it can't
+     * also buy an uninstall; see [SettingsWatch.shouldBounce] for why that mattered. Setup being
+     * incomplete stands down everything, and a missing overlay permission drops the Settings tier to
+     * repair mode so the blocker can't guard the app out of its own repair.
+     *
      * Returns true when it bounced (the event needs no further handling).
      */
     private fun selfDefense(event: AccessibilityEvent): Boolean {
         val pkg = event.packageName?.toString()
         if (!SettingsWatch.isWatched(pkg)) return false
-        // Any-category isOpen on purpose: a websites window sat through the *longer* (72-h) wait,
-        // so letting it reach Settings is never a shortcut past the 2-h apps gate.
-        val standDown = !Watchdog.setupCompleted(this) || unlockController.isOpen()
-        if (standDown) return false
+        // The stand-downs are passed through rather than short-circuited here, because they no longer
+        // agree: an open window stands down the Settings tier but leaves the installer tier armed
+        // (B-8). Only setup-incomplete disarms everything. Cost is one text walk while a window is
+        // open in Settings, which is bounded and rare.
         val bounce = SettingsWatch.shouldBounce(
             packageName = pkg,
             visibleTexts = visibleWatchedTexts(),
             selfLabel = getString(R.string.app_name),
-            standDown = false,
+            setupIncomplete = !Watchdog.setupCompleted(this),
+            windowOpen = unlockController.isOpen(),
+            repairMode = !canDrawOverlay(),
         )
         if (!bounce) return false
         performGlobalAction(GLOBAL_ACTION_HOME)
@@ -216,6 +275,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             Toast.makeText(this, getString(R.string.self_defense_bounce), Toast.LENGTH_SHORT).show()
         }
         return true
+    }
+
+    /**
+     * Whether the block overlay can still be drawn, cached for [OVERLAY_CHECK_TTL_MS] because this is
+     * consulted per Settings event and is a binder call. Defaults to granted so a check that hasn't
+     * happened yet leaves the self-defense armed rather than open.
+     */
+    private fun canDrawOverlay(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - overlayGrantedAtMs > OVERLAY_CHECK_TTL_MS) {
+            overlayGranted = Settings.canDrawOverlays(this)
+            overlayGrantedAtMs = now
+        }
+        return overlayGranted
     }
 
     /** All visible text (text + contentDescription) of windows owned by watched settings packages. */
@@ -286,7 +359,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         var webBlock: BrowserPolicy.WebBlock? = null
         var webHost: String? = null
         var browserPkg: String? = null      // whose omnibox we read — also the overlay's exit target
-        var rawUrl: String? = null          // diagnostics only — what the omnibox actually read
+        var omnibox: BrowserTargets.Omnibox? = null   // diagnostics only — what the address bar said
+        // Every allowlisted browser *on screen*, which is wider than the one we read: only the first
+        // browser window gets an omnibox read, but a second one in the other split-screen pane is still
+        // present and its watch must survive the pass. See AddressWatch.retain.
+        val visibleBrowsers = HashSet<String>()
         val browsers = browserPackages()
         val windowList = visibleWindows()
         for (window in windowList) {
@@ -299,23 +376,40 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val pkg = root.packageName?.toString() ?: return@runCatching
                 if (packageTarget == null) AppTargets.targetFor(pkg, activeTargets())?.let { packageTarget = it }
                 if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
-                if (webBlock == null && (BrowserTargets.isAllowlisted(pkg) || pkg in browsers)) {
+                if (BrowserTargets.isAllowlisted(pkg)) visibleBrowsers.add(pkg)
+                if (webBlock == null &&
+                    (BrowserTargets.isAllowlisted(pkg) || BrowserTargets.isWebApp(pkg) || pkg in browsers)
+                ) {
                     browserVisible = true
-                    val url = if (BrowserTargets.isAllowlisted(pkg)) urlInBrowser(root, pkg) else null
+                    val read =
+                        if (BrowserTargets.isAllowlisted(pkg)) omniboxFor(root, pkg)
+                        else BrowserTargets.Omnibox.Unknown
                     browserPkg = pkg
-                    rawUrl = url
-                    webBlock = BrowserPolicy.decide(pkg, isBrowser = pkg in browsers, url = url, blocklist = blocklistStore.domains().toSet())
-                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && url != null) webHost = DomainMatcher.host(url)
+                    omnibox = read
+                    webBlock = BrowserPolicy.decide(
+                        pkg,
+                        isBrowser = pkg in browsers,
+                        omnibox = read,
+                        blocklist = blocklistStore.domains().toSet(),
+                    )
+                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE && read is BrowserTargets.Omnibox.Url) {
+                        webHost = DomainMatcher.host(read.value)
+                    }
                 }
             }
         }
+        // Retire the watch of any browser that isn't on screen any more, so its next appearance is read
+        // as the fresh tree it is: full grace, and no earlier successful read still vouching for it.
+        // Done after the loop, so a browser we just read is never evicted by its own pass.
+        addressWatch.retain(visibleBrowsers)
         val signals = instagramRoot?.let { collectInstagramSignals(it) }
+        if (signals != null && InstagramSurface.REEL_PAGER in signals) noteReelSignal()
         val target = packageTarget ?: signals?.let { InstagramSurface.targetFor(it) }
         val read = Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost, browserPkg)
         val effective = holdThroughOcclusion(read)
         diagnose(
             windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target,
-            browserPkg, rawUrl, webBlock, effective.webBlock,
+            browserPkg, omnibox, webBlock, effective.webBlock,
         )
         return effective
     }
@@ -336,23 +430,29 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * altogether (`windows=1` — only our own overlay left). So "is the blocked app still on screen?"
      * is not a usable release condition; we blinded ourselves by blocking.
      *
-     * So the hold is unconditional while the overlay is displayed, which costs nothing: behind a
-     * full-screen overlay the user cannot navigate at all. The two real exits are untouched — the
-     * overlay's own Close button ([hideOverlay] + Home), and the engine deciding ALLOW (a granted
-     * exception, the 4am reset), since the hold only freezes *foreground resolution*, never the
-     * allow/block decision. And the failure direction is the right one: a blocker must never talk
-     * itself out of blocking.
+     * The hold used to be unconditional while the overlay was up, on the reasoning that behind a
+     * full-screen overlay the user can't navigate anyway. That reasoning was wrong: Home still works
+     * behind an overlay, so the block screen would follow the user to the launcher and stay there,
+     * leaving the overlay's own Close button as the only way out. [OcclusionHold] adds the two release
+     * conditions — the event stream reporting a different foreground package, and a one-minute backstop
+     * for when those events don't come — while keeping the failure direction right: a blocker must
+     * never talk itself out of blocking.
+     *
+     * The engine's other exits are untouched either way, since the hold freezes only *foreground
+     * resolution* and never the allow/block decision: Close ([hideOverlay] + [exitOverlay]), a granted
+     * exception, the 4am reset.
      */
     private fun holdThroughOcclusion(read: Foreground): Foreground {
         if (overlayView == null) {
-            heldForeground = null
+            occlusionHold.release()
             return read
         }
+        val now = SystemClock.elapsedRealtime()
         if (read.target != null || read.webBlock != null) {   // a real read got through; refresh the hold
-            heldForeground = read
+            occlusionHold.arm(read, lastWindowPackage, now)
             return read
         }
-        return heldForeground ?: read
+        return occlusionHold.sustain(lastWindowPackage, now) ?: read
     }
 
     /** The visible windows, or an empty list if the system refuses them (never throw out of a scan). */
@@ -376,7 +476,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         target: Target?,
         effectiveTarget: Target?,
         browserPkg: String?,
-        rawUrl: String?,
+        omnibox: BrowserTargets.Omnibox?,
         webBlock: BrowserPolicy.WebBlock?,
         effectiveWeb: BrowserPolicy.WebBlock?,
     ) {
@@ -389,10 +489,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             effectiveWeb != webBlock -> " HELD=$effectiveWeb"
             else -> ""
         }
-        // Browser half, for Gate D. urlRead distinguishes the three ways website blocking can fail:
-        // browser not recognised at all, url_bar unreadable (null), or read fine but not matched.
+        // Browser half, for Gate D. addr distinguishes every way website blocking can fail: browser
+        // not recognised at all, address bar being typed in, not found yet, proven unreadable, or read
+        // fine but not matched.
+        //
+        // Host only, never the full URL. The whole point of the omnibox read is that it sees every
+        // page you visit, and debugFast is the build that runs on the real phone during real browsing
+        // — so logging paths and query strings would put your actual browsing history in logcat, where
+        // any app holding READ_LOGS could take it. The host is the only part the matcher uses anyway,
+        // so nothing diagnostic is lost.
+        val addr = when (omnibox) {
+            null -> "NONE"
+            is BrowserTargets.Omnibox.Url -> DomainMatcher.host(omnibox.value) ?: "UNPARSED"
+            else -> omnibox.toString().substringAfterLast('$')
+        }
         val web = if (browserPkg == null) "" else
-            " browser=${browserPkg.substringAfterLast('.')} urlRead=${rawUrl ?: "NULL"} web=$webBlock"
+            " browser=${browserPkg.substringAfterLast('.')} addr=$addr web=$webBlock"
         val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
             "igNodes=$lastIgNodeCount igSignals=${signals?.map { it.substringAfterLast('/') }} " +
             "target=$target overlay=${overlayView != null}$held$web"
@@ -425,6 +537,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return found
     }
 
+    /**
+     * Record that the reel pager was really seen, which is what re-confirms [SignalCanary] against the
+     * installed Instagram version. Throttled hard: the scan runs a couple of times a second while
+     * Instagram is open, and each confirmation is a PackageManager lookup plus a prefs write, whereas
+     * one sighting an hour carries exactly the same information.
+     */
+    private fun noteReelSignal() {
+        val now = SystemClock.elapsedRealtime()
+        val last = lastSignalConfirmElapsedMs
+        if (last != null && now - last < SIGNAL_CONFIRM_THROTTLE_MS) return
+        lastSignalConfirmElapsedMs = now
+        runCatching { witnessStore.confirm(clock.wallClockMs()) }
+    }
+
     /** [node]'s resource-id, or null if the node died under us mid-walk. */
     private fun idOf(node: AccessibilityNodeInfo): String? =
         runCatching { node.viewIdResourceName }.getOrNull()
@@ -443,9 +569,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return children
     }
 
-    /** The URL shown in an allowlisted browser's omnibox ([BrowserTargets.urlBarId]), or null if
-     *  unreadable / a blank tab. Bounded DFS — the url_bar sits near the top of the tree. */
-    private fun urlInBrowser(root: AccessibilityNodeInfo, pkg: String): String? {
+    /**
+     * What an allowlisted browser's address bar ([BrowserTargets.urlBarId]) is showing, or null when
+     * the node isn't in the tree at all. Bounded DFS — the url_bar sits near the top of the tree.
+     *
+     * Null and [BrowserTargets.Omnibox.Editing] are deliberately different answers: "there is no
+     * address bar here" and "the address bar is showing nothing committed" look identical to the old
+     * nullable-String return, and only [omniboxFor] can tell them apart into allow and block.
+     */
+    private fun omniboxIn(root: AccessibilityNodeInfo, pkg: String): BrowserTargets.Omnibox? {
         val id = BrowserTargets.urlBarId(pkg)
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         stack.addLast(root)
@@ -455,17 +587,29 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             if (idOf(node) == id) {
                 // Only a committed URL counts - not mid-typing autocomplete, not the empty-field hint.
                 // See BrowserTargets.committedUrl; both failures were seen live at Gate D.
-                return runCatching {
+                val url = runCatching {
                     BrowserTargets.committedUrl(
                         text = node.text?.toString(),
                         focused = node.isFocused,
                         showingHintText = node.isShowingHintText,
                     )
                 }.getOrNull()
+                return if (url != null) BrowserTargets.Omnibox.Url(url) else BrowserTargets.Omnibox.Editing
             }
             stack.addAll(childrenOf(node))
         }
         return null
+    }
+
+    /**
+     * The raw read plus the timing that resolves a missing address bar into "not yet" or "not ever" —
+     * see [AddressWatch], which owns that judgement and the state behind it. All this side contributes
+     * is the tree read and the clock, neither of which can leave the service.
+     */
+    private fun omniboxFor(root: AccessibilityNodeInfo, pkg: String): BrowserTargets.Omnibox {
+        // Clock read before the walk, so the walk's own cost never counts against the grace.
+        val now = SystemClock.elapsedRealtime()
+        return addressWatch.observe(omniboxIn(root, pkg), pkg, now)
     }
 
     /**
@@ -618,7 +762,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun blockMessage(target: Target, reason: BlockReason?): CharSequence = when (reason) {
         BlockReason.TAMPER -> getString(R.string.block_message_tamper)
         BlockReason.SCHEDULE -> getString(R.string.block_message_schedule, labelFor(target))
-        BlockReason.HARD_BLOCK -> getString(R.string.block_message)
+        // The only hard blocks that exist are the always-blocked bypass tools (B-10), and a generic
+        // "you chose to block this" would be a lie there — the user never chose it and can't undo it
+        // from the phone. Say which, and say so.
+        BlockReason.HARD_BLOCK ->
+            if (target in AppTargets.alwaysBlockedTargets) getString(R.string.block_message_bypass_tool)
+            else getString(R.string.block_message)
         else -> getString(R.string.block_message_budget, labelFor(target))
     }
 
@@ -628,6 +777,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             if (host != null) getString(R.string.block_message_site_named, host)
             else getString(R.string.block_message_site)
         BrowserPolicy.WebBlock.NON_ALLOWLISTED_BROWSER -> getString(R.string.block_message_browser)
+        BrowserPolicy.WebBlock.WEB_APP -> getString(R.string.block_message_web_app)
+        BrowserPolicy.WebBlock.UNREADABLE_ADDRESS -> getString(R.string.block_message_unreadable)
     }
 
     private fun hideOverlay() {
@@ -676,6 +827,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** How long the active-target set is reused before re-reading the rules — see [activeTargets]. */
         private const val ACTIVE_TARGETS_TTL_MS = 3_000L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
+        /** How long `canDrawOverlays` is cached before re-checking — see [canDrawOverlay]. Short,
+         *  because it decides when the self-defense stands down to let the user re-grant it. */
+        private const val OVERLAY_CHECK_TTL_MS = 5_000L
+        /** Min gap between reel-pager confirmations — see [noteReelSignal]. */
+        private const val SIGNAL_CONFIRM_THROTTLE_MS = 60L * 60 * 1_000
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it

@@ -4,8 +4,19 @@ package com.appblock.engine
  * Persisted snapshot of both clocks (plus the boot count) at the last engine pass — the tamper
  * guard's baseline. Lives in the store so it survives process restarts: without that, killing the
  * service process between "set the date forward" and "open TikTok" would blind the guard.
+ *
+ * [zoneOffsetSeconds] is **nullable on purpose**: anchors written before the timezone guard existed
+ * carry no offset, and there is no safe value to invent for them. Defaulting to 0 would read as a
+ * multi-hour "zone change" on the first pass after an update for anyone not sitting on UTC, latching
+ * the tamper flag and blocking everything the moment the update lands. Null means "unknown — record
+ * it, compare from the next pass", which costs one pass of coverage exactly once.
  */
-data class ClockAnchor(val wallMs: Long, val elapsedMs: Long, val bootCount: Int)
+data class ClockAnchor(
+    val wallMs: Long,
+    val elapsedMs: Long,
+    val bootCount: Int,
+    val zoneOffsetSeconds: Int? = null,
+)
 
 /**
  * Persistence for the runtime state the engine can't recompute: per-target daily usage, per-target

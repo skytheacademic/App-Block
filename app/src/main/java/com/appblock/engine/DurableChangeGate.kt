@@ -27,6 +27,13 @@ sealed interface ChangeResult {
 
     /** The edit loosens enforcement and no unlock is active — needs the stashed QR / computer. */
     data class Blocked(val direction: ChangeDirection) : ChangeResult
+
+    /**
+     * A window is open, but the edit loosens in more than one place. A window buys one change, and
+     * this is the [loosenings] it would have spent itself on — the caller lists them so the user can
+     * keep one and undo the rest.
+     */
+    data class TooManyLoosenings(val loosenings: List<Loosening>) : ChangeResult
 }
 
 /**
@@ -36,13 +43,32 @@ sealed interface ChangeResult {
  */
 object DurableChangeGate {
 
-    /** [proposed] is allowed unless it loosens enforcement while [unlocked] is false. */
+    /**
+     * [proposed] is allowed unless it loosens enforcement without an open window — or loosens in more
+     * than one place, which one window doesn't cover.
+     *
+     * **One window buys one change** (CONSTRAINTS §6; user's call, 2026-07-26 — the fix for audit
+     * finding B-4). This used to gate on the *direction* of the whole edit, so a window authorized one
+     * `save` rather than one change: two hours of waiting bought a single press of Save that could
+     * raise every cap to 24 hours, blank every schedule and remove every app at once. The wait was
+     * doing almost no work, because the thing it rationed was unbounded in size.
+     *
+     * Counted per [FieldChange], the same units the screen already lists back to the user, and the
+     * same shape as the websites path — one blocklist removal per window. Raising a weekday cap and a
+     * weekend cap is therefore two changes and two cycles. That is the intended answer for a
+     * commitment device: the friction has to scale with how much access is being handed back, or it
+     * isn't friction.
+     *
+     * Tightenings alongside are free and uncounted — you may always bind yourself harder, and doing so
+     * in the same edit shouldn't cost the window.
+     */
     fun applyChange(current: DurableSettings, proposed: DurableSettings, unlocked: Boolean): ChangeResult {
-        val direction = classify(current, proposed)
-        return if (direction == ChangeDirection.LOOSEN && !unlocked) {
-            ChangeResult.Blocked(direction)
-        } else {
-            ChangeResult.Applied(proposed)
+        val loosenings = looseningReasons(current, proposed)
+        return when {
+            loosenings.isEmpty() -> ChangeResult.Applied(proposed)
+            !unlocked -> ChangeResult.Blocked(ChangeDirection.LOOSEN)
+            loosenings.size > 1 -> ChangeResult.TooManyLoosenings(loosenings)
+            else -> ChangeResult.Applied(proposed)
         }
     }
 

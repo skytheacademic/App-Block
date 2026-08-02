@@ -17,6 +17,18 @@ fun interface RuleSource {
 interface RuleStore {
     fun load(): DurableSettings
     fun save(settings: DurableSettings)
+
+    /**
+     * The user's stored config, preserved because it could no longer be decoded — non-null means the
+     * rules in force are build defaults rather than what they configured, and every app they added
+     * from the picker is gone with it.
+     *
+     * Defaulted so only the persistent store has to care: an in-memory store has nothing to corrupt.
+     */
+    fun corruptBlob(): String? = null
+
+    /** Forget a quarantined config, once the user has rebuilt their rules over it. */
+    fun acknowledgeCorrupt() {}
 }
 
 /** In-memory store for tests. Seeded explicitly; no versioning/re-seed (that's the Android layer's job). */

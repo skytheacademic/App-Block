@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.annotation.Config
 import org.xmlpull.v1.XmlPullParser
 
 /**
@@ -22,8 +23,14 @@ import org.xmlpull.v1.XmlPullParser
  * was never in our tree and reels never blocked, while `uiautomator dump` (whose UiAutomation sets
  * that flag) showed the id fine. Every id in ig-dumps/MAPPING.md was read from such a dump, so the
  * live service must scan with the same flag or the whole mapping is unsound.
+ *
+ * The SDK pin matters here even though this test asserts on XML attributes and nothing SDK-specific:
+ * with no `@Config`, Robolectric takes its SDK from `targetSdk`, so this was the one test in the suite
+ * that would start downloading (and failing on) a new android-all jar the moment the toolchain moved.
+ * Every other Robolectric test in the project already pins 34; this one was the exception.
  */
 @RunWith(AndroidJUnit4::class)
+@Config(sdk = [34])
 class AccessibilityConfigTest {
 
     private fun configAttrs(): XmlResourceParser {
@@ -71,6 +78,23 @@ class AccessibilityConfigTest {
         assertEquals(
             true,
             parser.getAttributeBooleanValue(ANDROID_NS, "canRetrieveWindowContent", false),
+        )
+    }
+
+    /**
+     * Third member of the "silently fatal declaration" family, and the only one whose failure is
+     * triggered by someone else: Android 17's Advanced Protection Mode revokes accessibility from
+     * every service not declaring itself a tool. Losing this line doesn't break a build or a test
+     * run — it just means the next person to enable Advanced Protection turns the blocker off
+     * permanently, with no key and no wait.
+     */
+    @Test
+    fun declaresItselfAnAccessibilityTool() {
+        val parser = configAttrs()
+        assertTrue(
+            "isAccessibilityTool missing: Android 17 Advanced Protection revokes the accessibility " +
+                "permission from services that don't declare it, which is a one-toggle bypass",
+            parser.getAttributeBooleanValue(ANDROID_NS, "isAccessibilityTool", false),
         )
     }
 
