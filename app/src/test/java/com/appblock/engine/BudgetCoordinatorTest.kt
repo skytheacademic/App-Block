@@ -137,4 +137,35 @@ class BudgetCoordinatorTest {
         assertNull(c.tick().target)
         assertEquals(used, store.loadUsage(Target.INSTAGRAM_REELS_EXPLORE)!!.secondsUsed)
     }
+
+    @Test fun `the day roll archives the day that just ended and starts the new one at zero`() {
+        val clock = FakeClock()
+        val store = InMemoryEngineStore()
+        val c = coordinator(clock, store)
+        c.onForeground(tiktok)
+        clock.advance(12 * minute)
+        c.tick()
+        assertEquals(12 * 60L, store.loadUsage(Target.TIKTOK)!!.secondsUsed)
+
+        // Past 4am the next morning: a new logical day, so the counter resets.
+        clock.local = LocalDateTime.of(2026, 7, 25, 10, 0)
+        clock.advance(3 * minute)
+        c.tick()
+
+        assertEquals(3 * 60L, store.loadUsage(Target.TIKTOK)!!.secondsUsed)
+        val archived = store.loadHistory(Target.TIKTOK).single()
+        assertEquals(java.time.LocalDate.of(2026, 7, 24), archived.day)
+        assertEquals(12 * 60L, archived.secondsUsed)
+    }
+
+    /** History is a chart, never an input — a full archived week must not change today's decision. */
+    @Test fun `history is not consulted by any decision`() {
+        val clock = FakeClock()
+        val store = InMemoryEngineStore()
+        store.recordHistory(Target.TIKTOK, DayUsage(java.time.LocalDate.of(2026, 7, 23), 24 * 3600L))
+        val c = coordinator(clock, store)
+        c.onForeground(tiktok)
+        clock.advance(minute)
+        assertEquals(Access.ALLOW, c.tick().access)
+    }
 }

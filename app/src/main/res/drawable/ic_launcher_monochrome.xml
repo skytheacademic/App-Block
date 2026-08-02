@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Icon option 8e — "Ration", themed (monochrome) layer. One colour; alpha carries the taper.
+  Note: the two dim bars are the weak point of this option at small sizes — check it on a busy wallpaper.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#000000"
+        android:pathData="M32.4,28.08 H75.6 a4.32,4.32 0 0,1 0,8.64 H32.4 a4.32,4.32 0 0,1 0,-8.64 z" />
+
+    <path
+        android:fillColor="#000000"
+        android:pathData="M36.72,45.36 H71.28 a4.32,4.32 0 0,1 0,8.64 H36.72 a4.32,4.32 0 0,1 0,-8.64 z" />
+
+    <path
+        android:fillColor="#000000"
+        android:fillAlpha="0.55"
+        android:pathData="M42.12,62.64 H65.88 a4.32,4.32 0 0,1 0,8.64 H42.12 a4.32,4.32 0 0,1 0,-8.64 z" />
+
+    <path
+        android:fillColor="#000000"
+        android:fillAlpha="0.28"
+        android:pathData="M47.52,79.92 H60.48 a4.32,4.32 0 0,1 0,8.64 H47.52 a4.32,4.32 0 0,1 0,-8.64 z" />
+</vector>

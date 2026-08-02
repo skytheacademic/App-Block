@@ -1,34 +1,129 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The block screen. A deeper room than the app (#120E0A vs the app's #17130F), so being blocked does
+  not look like being in the app — this is the one surface you meet when you have already lost the
+  argument with yourself, and it should feel like somewhere else.
+
+  Left-aligned and vertically centred rather than centred-centred: centred text reads as a dialog
+  asking something, and this is not asking.
+
+  The two fact rows below the rule are **constants of the system**, not of this particular block —
+  the day resets at 04:00 and more time costs a 1-hour wait, whatever stopped you. The block's own
+  reason is in @id/block_message, which the accessibility service sets from the reason-aware string
+  set (block_message_budget / _schedule / _tamper / _site / _browser). Those two ids are the only
+  contract this layout has with service/: a TextView at block_message and a Button at block_close.
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:gravity="center"
-    android:background="#FF0E0E12"
-    android:padding="32dp">
+    android:gravity="center_vertical"
+    android:background="@color/lamp_block_ground"
+    android:padding="28dp">
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/block_title"
-        android:textColor="#FFFFFF"
-        android:textSize="30sp"
-        android:textStyle="bold" />
+        android:textColor="@color/lamp_text"
+        android:textSize="60sp"
+        android:fontFamily="@font/inter_medium"
+        android:letterSpacing="-0.035"
+        android:lineSpacingMultiplier="0.98"
+        android:includeFontPadding="false" />
 
     <TextView
         android:id="@+id/block_message"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:gravity="center"
+        android:layout_marginTop="14dp"
         android:text="@string/block_message"
-        android:textColor="#C9C9CF"
-        android:textSize="16sp" />
+        android:textColor="@color/lamp_neutral_400"
+        android:textSize="15sp"
+        android:fontFamily="@font/inter_regular" />
 
-    <Button
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="6dp"
+        android:background="@drawable/block_rule" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="11dp"
+        android:paddingBottom="11dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/block_fact_resets"
+            android:textColor="@color/lamp_neutral_500"
+            android:textSize="12.5sp"
+            android:fontFamily="@font/inter_regular" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/block_fact_resets_value"
+            android:textColor="@color/lamp_text"
+            android:textSize="12.5sp"
+            android:fontFamily="@font/inter_regular"
+            android:fontFeatureSettings="tnum" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/lamp_row_rule" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingTop="11dp"
+        android:paddingBottom="11dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/block_fact_more_time"
+            android:textColor="@color/lamp_neutral_500"
+            android:textSize="12.5sp"
+            android:fontFamily="@font/inter_regular" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/block_fact_more_time_value"
+            android:textColor="@color/lamp_neutral_400"
+            android:textSize="12.5sp"
+            android:fontFamily="@font/inter_regular" />
+    </LinearLayout>
+
+    <!--
+      Explicit AppCompatButton, not <Button>: a Material theme's view inflater would swap a bare
+      <Button> for a MaterialButton, which owns its own background and would quietly drop the accent
+      outline below. The service does findViewById<Button>, which this still satisfies.
+    -->
+    <androidx.appcompat.widget.AppCompatButton
         android:id="@+id/block_close"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="28dp"
-        android:text="@string/block_go_back" />
+        android:layout_marginTop="26dp"
+        android:minWidth="0dp"
+        android:minHeight="42dp"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:background="@drawable/bg_button_outline_accent"
+        android:text="@string/block_go_back"
+        android:textAllCaps="false"
+        android:textColor="@color/lamp_accent"
+        android:textSize="14sp"
+        android:fontFamily="@font/inter_medium"
+        android:stateListAnimator="@null" />
 </LinearLayout>

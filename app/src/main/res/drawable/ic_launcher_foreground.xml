@@ -1,17 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Icon option 8e — "Ration": the day's allowance tapering away, echoing the seven-day strip inside the app.
+  Foreground layer. Four stadium bars (h 8.64, r 4.32), stack spans y 28.08 → 88.56 — inside the safe zone.
+  Top two are the accent (spent), the lower two step down the ramp (what's left).
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- bar 1 — w 51.84, accent #D9A05C -->
     <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="6"
-        android:pathData="M54,54 m-22,0 a22,22 0 1,0 44,0 a22,22 0 1,0 -44,0" />
+        android:fillColor="#D9A05C"
+        android:pathData="M32.4,28.08 H75.6 a4.32,4.32 0 0,1 0,8.64 H32.4 a4.32,4.32 0 0,1 0,-8.64 z" />
+
+    <!-- bar 2 — w 43.2 -->
     <path
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFF"
-        android:strokeWidth="6"
-        android:strokeLineCap="round"
-        android:pathData="M39,39 L69,69" />
+        android:fillColor="#D9A05C"
+        android:pathData="M36.72,45.36 H71.28 a4.32,4.32 0 0,1 0,8.64 H36.72 a4.32,4.32 0 0,1 0,-8.64 z" />
+
+    <!-- bar 3 — w 32.4, accent-700 #8F6538 -->
+    <path
+        android:fillColor="#8F6538"
+        android:pathData="M42.12,62.64 H65.88 a4.32,4.32 0 0,1 0,8.64 H42.12 a4.32,4.32 0 0,1 0,-8.64 z" />
+
+    <!-- bar 4 — w 21.6, accent-900 #3D2C1B -->
+    <path
+        android:fillColor="#3D2C1B"
+        android:pathData="M47.52,79.92 H60.48 a4.32,4.32 0 0,1 0,8.64 H47.52 a4.32,4.32 0 0,1 0,-8.64 z" />
 </vector>
