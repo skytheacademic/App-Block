@@ -218,6 +218,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName && event.className?.toString() != MainActivity::class.java.name) return
         lastWindowPackage = pkg
+        // Reaching here is the proof that the moved-on release condition has a live channel to work
+        // with, which is what retires the hold's timeout backstop (C-1). It is fed only by the events
+        // that survive the filter above, so the overlay cannot prove the point by its own churn.
+        occlusionHold.noteForegroundEvent()
     }
 
     /**
@@ -437,6 +441,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * conditions — the event stream reporting a different foreground package, and a one-minute backstop
      * for when those events don't come — while keeping the failure direction right: a blocker must
      * never talk itself out of blocking.
+     *
+     * The backstop is conditional on that stream having gone quiet from the start (C-1, Gate F Phase 3):
+     * firing it unconditionally dropped the overlay for ~0.2 s every 60 s, leaving the blocked page
+     * unobstructed and tappable each time. [noteForegroundPackage] is what stands it down.
      *
      * The engine's other exits are untouched either way, since the hold freezes only *foreground
      * resolution* and never the allow/block decision: Close ([hideOverlay] + [exitOverlay]), a granted
