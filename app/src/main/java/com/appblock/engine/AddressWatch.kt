@@ -34,15 +34,31 @@ package com.appblock.engine
  * out mid-article precisely while the toolbar is scrolled away, which is the one moment the vouch is
  * load-bearing. Foreground-exit is the event that means "different tree"; elapsed time isn't.
  *
- * ⚠️ The grace length is a desk judgement — whether Chrome's scrolled-away toolbar actually leaves the
- * accessibility tree is unverified on hardware. If it turns out it does *and* a fresh launch can
- * restore an already-scrolled tab, that is where a false positive would come from.
+ * ## The false block that came out of all this, and [idsVouched] (2026-08-03)
+ *
+ * ⚠️ **The two paragraphs above are correct about trees and were wrong about ids, and the difference
+ * cost a user-visible defect.** The scenario the class doc called unverified turned out to be ordinary
+ * browsing: scroll a page (Chrome hides the omnibox and *keeps* it hidden) → switch apps → [retain]
+ * drops the watch → switch back to the still-scrolled tab. The omnibox is still absent, the in-memory
+ * vouch is gone, and five seconds later the page the user was reading is blocked for no visible reason.
+ *
+ * The in-memory vouch is still here and still right — it is what a read proves about *this tree*. What
+ * it cannot carry is what a read proves about the **id**, which only moves when the browser is updated.
+ * That belongs to a durable, version-keyed record, injected here as [idsVouched] and owned by
+ * [com.appblock.data.OmniboxWitnessStore]. It is asked only about an absence that has already failed
+ * the in-memory tests, and it is deliberately consulted *before* the settling grace: a vouched id makes
+ * the absence innocent no matter how long it has lasted, which is exactly the scrolled-tab case.
+ *
+ * The default is `{ false }`, which reproduces the pre-2026-08-03 behaviour exactly — so every test
+ * written against the old rule still means what it meant.
  *
  * Pure and time-injected like [OcclusionHold]: the service supplies the raw read (it needs an
- * `AccessibilityNodeInfo` to take one) and the clock, and this owns the state that spans passes.
+ * `AccessibilityNodeInfo` to take one), the clock, and the durable vouch, and this owns the state that
+ * spans passes.
  */
 class AddressWatch(
     private val graceMs: Long = DEFAULT_GRACE_MS,
+    private val idsVouched: (String) -> Boolean = { false },
 ) {
 
     /** One browser's standing: whether its omnibox has ever read as a committed URL since this watch
@@ -63,7 +79,9 @@ class AddressWatch(
      * A package with no watch yet starts one at [nowMs], so the grace is measured from the first time
      * this browser was looked at rather than from service start.
      *
-     * Only an absence can end up blocked, and only once it is both past the grace and unvouched-for.
+     * Only an absence can end up blocked, and only once it has got past all three innocent readings:
+     * a successful read in this tree, a vouched id for this browser's installed version, and the
+     * settling grace.
      */
     fun observe(read: BrowserTargets.Omnibox?, pkg: String, nowMs: Long): BrowserTargets.Omnibox {
         val watch = watches.getOrPut(pkg) { Watch(seen = false, sinceMs = nowMs) }
@@ -71,6 +89,10 @@ class AddressWatch(
         return when {
             read != null -> read
             watch.seen -> BrowserTargets.Omnibox.Unknown
+            // Before the grace, not after it: the scrolled-tab case has no time limit, so a rule that
+            // only applied once the grace expired would still block for the first five seconds of
+            // every return trip.
+            idsVouched(pkg) -> BrowserTargets.Omnibox.Unknown
             nowMs - watch.sinceMs < graceMs -> BrowserTargets.Omnibox.Unknown
             else -> BrowserTargets.Omnibox.Unreadable
         }

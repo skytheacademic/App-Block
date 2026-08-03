@@ -18,7 +18,9 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import com.appblock.MainActivity
 import com.appblock.R
+import com.appblock.data.OmniboxWitnessStore
 import com.appblock.data.SignalWitnessStore
+import com.appblock.engine.BrowserTargets
 import com.appblock.engine.SignalCanary
 import com.appblock.util.isAccessibilityServiceEnabled
 import java.util.concurrent.TimeUnit
@@ -41,6 +43,16 @@ class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(contex
         if (!Watchdog.setupCompleted(ctx)) return Result.success()  // don't nag before first setup
         Watchdog.report(ctx, Watchdog.currentHealth(ctx))
         Watchdog.reportSignalDrift(ctx, SignalWitnessStore(ctx).refresh(System.currentTimeMillis()))
+        // Only the browsers the blocklist is actually enforced through — a browser that isn't installed
+        // has no id to have drifted, and one that isn't allowlisted is blocked outright anyway.
+        val omnibox = OmniboxWitnessStore(ctx)
+        Watchdog.reportOmniboxDrift(
+            ctx,
+            omnibox.worstHealth(
+                BrowserTargets.allowlist.filter { omnibox.installedVersion(it) != null },
+                System.currentTimeMillis(),
+            ),
+        )
         return Result.success()
     }
 }
@@ -52,6 +64,7 @@ object Watchdog {
     private const val NOTIFICATION_ID = Notifications.HEALTH
     private const val SIGNAL_CHANNEL_ID = "appblock_signal"
     private const val SIGNAL_NOTIFICATION_ID = Notifications.SIGNAL_DRIFT
+    private const val OMNIBOX_NOTIFICATION_ID = Notifications.OMNIBOX_DRIFT
     private const val RUNTIME_PREFS = "appblock_runtime"
     private const val KEY_SETUP_DONE = "setup_done"
 
@@ -180,6 +193,50 @@ object Watchdog {
             NotificationCompat.Builder(context, SIGNAL_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle(context.getString(R.string.signal_title))
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .build(),
+        )
+    }
+
+    /**
+     * The address-bar drift prompt — the loud half of the B-7 redesign (2026-08-03).
+     *
+     * Website blocking used to fail *closed* on an unreadable address bar, which caught a renamed
+     * `url_bar` but also blocked ordinary browsing (returning to a tab whose toolbar had scrolled away).
+     * The version-keyed vouch removed the false positive; this is what stops that from turning the
+     * silent failure back on. Chrome updating and its omnibox id moving now costs a week of allowing
+     * plus this prompt, instead of an unexplained block or a blocklist quietly enforcing nothing.
+     *
+     * Shares the drift channel and the shape of [reportSignalDrift] deliberately — same class of
+     * message, same "this can be a false positive, so it must cost a swipe" reasoning, distinct id.
+     */
+    fun reportOmniboxDrift(context: Context, health: SignalCanary.Health) {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (health != SignalCanary.Health.STALE) {
+            manager.cancel(OMNIBOX_NOTIFICATION_ID)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        manager.createNotificationChannel(
+            NotificationChannel(
+                SIGNAL_CHANNEL_ID,
+                context.getString(R.string.signal_channel_name),
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ),
+        )
+        val text = context.getString(R.string.omnibox_text)
+        manager.notify(
+            OMNIBOX_NOTIFICATION_ID,
+            NotificationCompat.Builder(context, SIGNAL_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(context.getString(R.string.omnibox_title))
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setAutoCancel(true)
