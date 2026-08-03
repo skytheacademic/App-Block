@@ -1,0 +1,21 @@
+<resources>
+    <!--
+      Build-type label overrides. The debug build now has its own applicationId
+      (com.appblock.debug), so it installs *alongside* the release daily driver rather than
+      replacing it — which means the launcher and the Accessibility services list each show two
+      App-Block entries. Identical labels would make those lists ambiguous, and on this device
+      ambiguity is a real failure: enabling the wrong Accessibility row leaves the strict build
+      switched off while it looks switched on.
+
+      INVARIANT — accessibility_label must contain app_name as a substring.
+      SettingsWatch.shouldBounce() decides "this screen is about us" with
+      texts.any { it.contains(selfLabel) }, where selfLabel is getString(R.string.app_name). The
+      Accessibility detail page's visible text is the *service* label. Suffixing only app_name
+      would give selfLabel "App-Block (debug)" against a page reading "App-Block detection",
+      which no longer contains it — the debug build would quietly stop defending its own
+      Accessibility toggle, i.e. the variant used for testing would behave unlike the real one.
+      Hence "App-Block (debug) detection", not "App-Block detection (debug)".
+    -->
+    <string name="app_name">App-Block (debug)</string>
+    <string name="accessibility_label">App-Block (debug) detection</string>
+</resources>
