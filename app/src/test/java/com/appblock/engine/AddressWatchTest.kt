@@ -28,6 +28,12 @@ class AddressWatchTest {
     private fun watch(graceMs: Long = AddressWatch.DEFAULT_GRACE_MS) =
         AddressWatch(graceMs = graceMs)
 
+    /** A watch whose durable, version-keyed vouch says the named browsers' omnibox ids are good. */
+    private fun vouchedWatch(
+        vararg vouched: String,
+        graceMs: Long = AddressWatch.DEFAULT_GRACE_MS,
+    ) = AddressWatch(graceMs = graceMs, idsVouched = { it in vouched })
+
     // ---- a node that was found is a real answer; the watch has no business rewriting it ----
 
     @Test fun `a committed URL passes through untouched`() {
@@ -84,6 +90,55 @@ class AddressWatchTest {
         val watch = watch(graceMs = 5_000)
         watch.observe(editing, chrome, nowMs = 0)
         watch.observe(editing, chrome, nowMs = 1_000)
+        assertEquals(unreadable, watch.observe(null, chrome, nowMs = 6_000))
+    }
+
+    // ---- the durable, version-keyed vouch (B-7 false block, 2026-08-03) ----
+
+    /**
+     * **The defect, reproduced.** Read an article in Chrome; Chrome hides the omnibox on scroll and
+     * keeps it hidden. Switch to another app — [AddressWatch.retain] drops the watch, correctly, because
+     * the tree can be rebuilt. Switch back to the *same still-scrolled tab*: the omnibox is still gone,
+     * the in-memory vouch is gone with the watch, and five seconds later the page the user was reading
+     * is blocked with nothing on screen explaining it.
+     *
+     * The durable vouch is what makes that absence innocent — the id was proven on this browser version
+     * and a scrolled toolbar cannot un-prove it. Fails without `idsVouched`.
+     */
+    @Test fun `returning to a scrolled tab is not unreadable once the id is vouched for`() {
+        val watch = vouchedWatch(chrome, graceMs = 5_000)
+        assertEquals(url, watch.observe(url, chrome, nowMs = 0))    // article loads, toolbar visible
+        watch.retain(setOf(chrome))
+        watch.retain(emptySet())                                    // user switches apps
+        // Back on the still-scrolled tab: fresh watch, no in-memory vouch, toolbar still gone.
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 60_000))
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 600_000))
+    }
+
+    /** The scrolled tab has no time limit, so the vouch has to outrank the grace, not follow it. */
+    @Test fun `a vouched id is innocent from the first pass, not only after the grace`() {
+        val watch = vouchedWatch(chrome, graceMs = 5_000)
+        watch.observe(null, chrome, nowMs = 0)
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 6_000))
+    }
+
+    /** The vouch is per package, exactly like the in-memory one — Chrome's id says nothing about Brave's. */
+    @Test fun `a vouch for one browser does not cover another`() {
+        val watch = vouchedWatch(chrome, graceMs = 5_000)
+        watch.observe(null, chrome, nowMs = 0)
+        watch.observe(null, brave, nowMs = 0)
+        assertEquals(unknown, watch.observe(null, chrome, nowMs = 6_000))
+        assertEquals(unreadable, watch.observe(null, brave, nowMs = 6_000))
+    }
+
+    /**
+     * And the bypass stays shut. An unvouched id — which is what a browser update produces, since the
+     * vouch is keyed on versionCode — still reaches unreadable once the grace is out. This is the case
+     * B-7 exists for: a renamed `url_bar` must not leave the blocklist quietly enforcing nothing.
+     */
+    @Test fun `an unvouched id still blocks after the grace`() {
+        val watch = vouchedWatch(brave, graceMs = 5_000)
+        watch.observe(null, chrome, nowMs = 0)
         assertEquals(unreadable, watch.observe(null, chrome, nowMs = 6_000))
     }
 

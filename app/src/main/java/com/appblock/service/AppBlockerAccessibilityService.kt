@@ -22,6 +22,7 @@ import com.appblock.BuildConfig
 import com.appblock.MainActivity
 import com.appblock.R
 import com.appblock.data.InstalledApps
+import com.appblock.data.OmniboxWitnessStore
 import com.appblock.data.PrefsEngineStore
 import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
@@ -81,6 +82,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
     private lateinit var witnessStore: SignalWitnessStore
+    private lateinit var omniboxWitnessStore: OmniboxWitnessStore
 
     /** Briefly-cached set of targets with a live rule — see [activeTargets]. */
     private var activeTargetsCache: Set<Target>? = null
@@ -119,8 +121,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
     private var lastSignalConfirmElapsedMs: Long? = null
     /** Per-browser address-bar watch: turns a missing url_bar into "not yet" or "not ever". Fed the
-     *  read by [omniboxFor] and the on-screen browser set by [resolveForeground]. */
-    private val addressWatch = AddressWatch()
+     *  read by [omniboxFor], the on-screen browser set by [resolveForeground], and the durable
+     *  version-keyed vouch by [omniboxIdsVouched]. */
+    private val addressWatch = AddressWatch(idsVouched = ::omniboxIdsVouched)
+    /** Cached omnibox-vouch verdicts, package → (vouched, elapsed-at). See [omniboxIdsVouched]. */
+    private val omniboxVouchCache = HashMap<String, Pair<Boolean, Long>>()
+    /** Last time each browser's readable omnibox was written through to the witness store. */
+    private val lastOmniboxConfirmElapsedMs = HashMap<String, Long>()
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -145,6 +152,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         unlockController = DurableUnlockController(this)
         blocklistStore = BlocklistStore(this)
         witnessStore = SignalWitnessStore(this)
+        omniboxWitnessStore = OmniboxWitnessStore(this)
     }
 
     /**
@@ -617,8 +625,48 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun omniboxFor(root: AccessibilityNodeInfo, pkg: String): BrowserTargets.Omnibox {
         // Clock read before the walk, so the walk's own cost never counts against the grace.
         val now = SystemClock.elapsedRealtime()
-        return addressWatch.observe(omniboxIn(root, pkg), pkg, now)
+        val resolved = addressWatch.observe(omniboxIn(root, pkg), pkg, now)
+        if (resolved is BrowserTargets.Omnibox.Url) noteOmniboxRead(pkg, now)
+        return resolved
     }
+
+    /**
+     * Record that this browser's address bar really was readable, which is what re-confirms its id for
+     * the installed version (see [OmniboxWitnessStore]). Throttled per package, because a committed URL
+     * reads on every pass while a browser is on screen and each confirm is a prefs write plus a
+     * PackageManager hit — but never throttled the *first* time in a service lifetime, since that is
+     * the write that clears a stale canary.
+     */
+    private fun noteOmniboxRead(pkg: String, nowMs: Long) {
+        val last = lastOmniboxConfirmElapsedMs[pkg]
+        if (last != null && nowMs - last < OMNIBOX_CONFIRM_THROTTLE_MS) return
+        lastOmniboxConfirmElapsedMs[pkg] = nowMs
+        runCatching { omniboxWitnessStore.confirm(pkg, clock.wallClockMs()) }
+    }
+
+    /**
+     * Whether an absent address bar in [pkg] is still innocent on the strength of the durable,
+     * version-keyed vouch — the fix for the scrolled-tab false block (B-7, 2026-08-03).
+     *
+     * Cached per package for [OMNIBOX_HEALTH_TTL_MS]: this is asked on every pass while a browser is
+     * visible, and answering it costs a prefs read and a PackageManager lookup. Staleness is harmless
+     * in both directions — the window is a minute, and the underlying fact only changes when a browser
+     * is updated.
+     *
+     * Fails **open** if anything goes wrong, including being asked before [onServiceConnected] has
+     * wired the store. An exception here would otherwise mean "no vouch", i.e. the block this whole
+     * change exists to stop, fired because a prefs read threw.
+     */
+    private fun omniboxIdsVouched(pkg: String): Boolean = runCatching {
+        val now = SystemClock.elapsedRealtime()
+        val cached = omniboxVouchCache[pkg]
+        if (cached != null && now - cached.second < OMNIBOX_HEALTH_TTL_MS) return@runCatching cached.first
+        val vouched = OmniboxWitnessStore.vouches(
+            omniboxWitnessStore.refresh(pkg, clock.wallClockMs()),
+        )
+        omniboxVouchCache[pkg] = vouched to now
+        vouched
+    }.getOrDefault(true)
 
     /**
      * Installed browsers = packages handling a wildcard http VIEW+BROWSABLE intent, cached for
@@ -840,6 +888,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val OVERLAY_CHECK_TTL_MS = 5_000L
         /** Min gap between reel-pager confirmations — see [noteReelSignal]. */
         private const val SIGNAL_CONFIRM_THROTTLE_MS = 60L * 60 * 1_000
+        /** Min gap between omnibox confirmations, per browser — see [noteOmniboxRead]. Shorter than the
+         *  reel throttle because a readable omnibox is the ordinary case, so it costs a write far more
+         *  often, and losing one confirmation costs nothing. */
+        private const val OMNIBOX_CONFIRM_THROTTLE_MS = 10L * 60 * 1_000
+        /** How long an omnibox vouch verdict is cached — see [omniboxIdsVouched]. The fact behind it
+         *  only changes when a browser updates, so a minute of staleness is free. */
+        private const val OMNIBOX_HEALTH_TTL_MS = 60_000L
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
