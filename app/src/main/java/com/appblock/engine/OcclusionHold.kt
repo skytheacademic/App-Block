@@ -19,9 +19,38 @@ package com.appblock.engine
  *     and they carry a package name. A state change from a package other than the one we armed on means
  *     the user left — release. Costs at worst a brief flicker if it misfires (the read comes back
  *     blockable and the overlay returns within a frame or two).
- *  2. **[holdLimitMs] since the last real read.** A backstop for "the events never came" — unverified
- *     on hardware, so it must not be the only exit. One minute bounds the stuck-overlay case; the price
- *     when the hold is doing real work is one sub-second re-read per minute.
+ *  2. **[holdLimitMs] since the last real read, but only while (1) has never been seen to work.** A
+ *     backstop for "the events never came", which is the *only* thing it was ever for. See below — it
+ *     used to run unconditionally, and that was a defect.
+ *
+ * ## Why the backstop is conditional (C-1, Gate F Phase 3, 2026-07-27)
+ *
+ * It used to fire regardless, and on hardware that was a **bypass**, not a safety net. Sitting on a
+ * blocked page, the overlay dropped for 148–256 ms once every 60 s, indefinitely — measured five times,
+ * one per minute to the second, and visible to the naked eye. During the gap the blocked page is not
+ * merely showing: it is unobstructed and **tappable**.
+ *
+ * The mechanism is that the backstop acts on evidence it has already decided not to trust. Behind the
+ * overlay every read comes back pruned; the hold exists precisely because those reads are worthless.
+ * When the timeout expired it released anyway and returned null, so the caller believed the pruned read,
+ * took the overlay down, the tree un-pruned, the page re-read as blocked, and the overlay was redrawn a
+ * fifth of a second later. Then it repeated, forever. The class doc used to price this as "one
+ * sub-second re-read per minute", which was numerically right and the wrong judgement: nobody had asked
+ * whether a person can see it. They can.
+ *
+ * Raising the limit was rejected — a longer fuse makes the exposure rarer, not absent, and the exposure
+ * is the whole problem. The fix is that condition (1) had already been proven on this hardware and the
+ * code was still hedging against it: Gate F Phase 1 released 5/5 in 0.8–0.9 s, dwell time irrelevant,
+ * and the 60-s backstop never once fired in anger. So while the event stream is demonstrably reporting
+ * foreground changes, the moved-on test covers the stuck-overlay case on its own and the timeout has
+ * nothing left to protect. [noteForegroundEvent] is that demonstration.
+ *
+ * **The accepted cost, stated plainly:** on a device where events genuinely stopped naming packages
+ * *after* having named one, the block screen would follow the user to the launcher and stay there. Its
+ * own Close button still exits, the engine's exits are untouched, and no such device has been observed.
+ * That is an annoyance with a visible way out; the behaviour it replaces was a commitment device that
+ * unlocked itself for a fifth of a second every minute. A blocker must never talk itself out of
+ * blocking, and the unconditional backstop did exactly that.
  *
  * Generic over the read type so [com.appblock.service.AppBlockerAccessibilityService]'s `Foreground`
  * stays private to the service. This class owns the held value outright — the service must not keep its
@@ -35,8 +64,35 @@ class OcclusionHold<T : Any>(
     private var heldPackage: String? = null
     private var heldSinceMs = 0L
 
+    /**
+     * Whether the event stream has ever been observed to report a foreground change — see the class
+     * doc. Deliberately a latch for the life of the service and **not** cleared by [release]: it is a
+     * fact about whether this channel works on this device, not about any one hold.
+     *
+     * Deliberately not a "silent for N seconds" test either, which is the shape this first took. A user
+     * sitting still on a blocked page produces no window-state events at all, so silence there is
+     * indistinguishable from a dead stream — and treating it as dead reproduces the exact once-a-minute
+     * flash this change removes.
+     */
+    private var foregroundEventSeen = false
+
     /** Whether anything is currently held — for the caller's "seed me once" check and diagnostics. */
     val isArmed: Boolean get() = held != null
+
+    /** True while the timeout backstop is still load-bearing, i.e. before [noteForegroundEvent]. */
+    val backstopArmed: Boolean get() = !foregroundEventSeen
+
+    /**
+     * The event stream just named a foreground package, so the moved-on release condition demonstrably
+     * works here and the timeout backstop stands down for good.
+     *
+     * Call this for the events the caller is willing to act on in [sustain] — our own overlay and toast
+     * churn is filtered out upstream and must stay filtered, or the hold would be proven live by its own
+     * side effects.
+     */
+    fun noteForegroundEvent() {
+        foregroundEventSeen = true
+    }
 
     /**
      * A real read got through the pruning: (re)arm on it and restart the [holdLimitMs] countdown.
@@ -73,12 +129,15 @@ class OcclusionHold<T : Any>(
      */
     fun sustain(foregroundPackage: String?, nowMs: Long): T? {
         val current = held ?: return null
-        if (nowMs - heldSinceMs >= holdLimitMs) {
+        // Order matters for the reasoning even though both branches release: the moved-on test is the
+        // real exit and is asked first, so the backstop is only ever consulted about a case it alone
+        // can answer.
+        val armedOn = heldPackage
+        if (armedOn != null && foregroundPackage != null && foregroundPackage != armedOn) {
             release()
             return null
         }
-        val armedOn = heldPackage
-        if (armedOn != null && foregroundPackage != null && foregroundPackage != armedOn) {
+        if (backstopArmed && nowMs - heldSinceMs >= holdLimitMs) {
             release()
             return null
         }

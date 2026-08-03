@@ -94,13 +94,83 @@ class OcclusionHoldTest {
         assertNull(hold.sustain(launcher, nowMs = 10_000))
     }
 
-    // ---- release condition 2: the timeout backstop ----
+    // ---- release condition 2: the timeout backstop, and what disarms it ----
 
+    /** With no foreground event ever seen, the moved-on test has no channel and the backstop is the exit. */
     @Test fun `holds right up to the limit and lets go on it`() {
         val hold = hold(limitMs = 60_000)
         hold.arm(reel, instagram, nowMs = 0)
+        assertTrue(hold.backstopArmed)
         assertEquals(reel, hold.sustain(instagram, nowMs = 59_999))
         assertNull(hold.sustain(instagram, nowMs = 60_000))
+    }
+
+    /**
+     * **The C-1 regression (Gate F Phase 3, 2026-07-27).** This is the flash itself: sitting still on a
+     * blocked page, the overlay dropped for 148–256 ms once every 60 s, forever, leaving the page
+     * unobstructed and tappable. The timeout was firing while the moved-on test was demonstrably
+     * working, so it released on a pruned read it had already decided not to trust.
+     *
+     * Fails against the pre-fix `sustain`, which returned null here.
+     */
+    @Test fun `a working event stream retires the backstop, so a live block never expires`() {
+        val hold = hold(limitMs = 60_000)
+        hold.noteForegroundEvent()
+        hold.arm(reel, instagram, nowMs = 0)
+        assertFalse(hold.backstopArmed)
+        assertEquals(reel, hold.sustain(instagram, nowMs = 60_000))
+        assertEquals(reel, hold.sustain(instagram, nowMs = 600_000))
+        assertTrue(hold.isArmed)
+    }
+
+    /** Retiring the backstop must not cost the exit it was standing in for. */
+    @Test fun `moving on still releases once the backstop is retired`() {
+        val hold = hold(limitMs = 60_000)
+        hold.noteForegroundEvent()
+        hold.arm(reel, instagram, nowMs = 0)
+        assertNull(hold.sustain(launcher, nowMs = 300_000))
+        assertFalse(hold.isArmed)
+    }
+
+    /**
+     * The proof is about the device, not about one block, so it outlives the hold that observed it —
+     * otherwise the flash would simply return on the next overlay.
+     */
+    @Test fun `the proof survives a release`() {
+        val hold = hold(limitMs = 60_000)
+        hold.noteForegroundEvent()
+        hold.arm(reel, instagram, nowMs = 0)
+        hold.release()
+        hold.arm(reel, instagram, nowMs = 1_000)
+        assertEquals(reel, hold.sustain(instagram, nowMs = 500_000))
+    }
+
+    /**
+     * An event arriving mid-hold counts too — the channel is proven the moment it speaks, and the hold
+     * it interrupts is exactly the one that would otherwise have flashed.
+     */
+    @Test fun `an event arriving mid-hold retires the backstop`() {
+        val hold = hold(limitMs = 60_000)
+        hold.arm(reel, instagram, nowMs = 0)
+        assertEquals(reel, hold.sustain(instagram, nowMs = 30_000))
+        hold.noteForegroundEvent()
+        assertEquals(reel, hold.sustain(instagram, nowMs = 120_000))
+    }
+
+    /**
+     * A hold armed with no package has no moved-on test of its own, but the backstop is a statement
+     * about the *stream*, not about this hold. Once the stream is proven, an event will name the next
+     * package too — so this must not silently become a permanent hold with no exit at all... which is
+     * why the caller releases on [OcclusionHold.release] paths the overlay owns (Close, allow, engine
+     * exits). Pinned so the trade is deliberate rather than discovered later.
+     */
+    @Test fun `a proven stream plus an unknown armed package leaves the moved-on test as the only exit`() {
+        val hold = hold(limitMs = 10_000)
+        hold.noteForegroundEvent()
+        hold.arm(reel, foregroundPackage = null, nowMs = 0)
+        assertEquals(reel, hold.sustain(launcher, nowMs = 100_000))
+        hold.release()
+        assertFalse(hold.isArmed)
     }
 
     /** Every read that gets through the pruning restarts the countdown, so a live block never expires. */
