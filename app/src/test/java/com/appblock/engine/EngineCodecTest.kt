@@ -60,4 +60,27 @@ class EngineCodecTest {
         assertEquals(ExceptionState.None, EngineCodec.decodeException("pending|tiktok|30|120|9999"))
         assertEquals(ExceptionState.None, EngineCodec.decodeException("active|x|25|5000"))
     }
+
+    @Test fun `history round-trips`() {
+        val history = listOf(
+            DayUsage(LocalDate.of(2026, 7, 22), 600L),
+            DayUsage(LocalDate.of(2026, 7, 23), 1800L),
+        )
+        assertEquals(history, EngineCodec.decodeHistory(EngineCodec.encodeHistory(history)))
+    }
+
+    /**
+     * History is display-only, so — uniquely in this codec — a damaged entry costs its own bar and
+     * the rest of the week survives. Nothing it feeds can widen access, so leniency is safe here in
+     * a way it deliberately is not for usage or exceptions.
+     */
+    @Test fun `a damaged history entry is dropped, not the whole week`() {
+        val decoded = EngineCodec.decodeHistory("20291:600,rubbish,20292:1800")
+        assertEquals(listOf(600L, 1800L), decoded.map { it.secondsUsed })
+    }
+
+    @Test fun `absent history decodes to nothing`() {
+        assertEquals(emptyList<DayUsage>(), EngineCodec.decodeHistory(null))
+        assertEquals(emptyList<DayUsage>(), EngineCodec.decodeHistory(""))
+    }
 }

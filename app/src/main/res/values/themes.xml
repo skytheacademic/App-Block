@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.AppBlock" parent="Theme.Material3.DayNight.NoActionBar" />
+    <!--
+      Dark-only, to match the Compose theme (ui/theme/Theme.kt). windowBackground is the Lamp ground
+      so the first frame of a cold start is already the app's colour rather than a Material default
+      flashing through before Compose draws.
+    -->
+    <style name="Theme.AppBlock" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/lamp_bg</item>
+    </style>
 </resources>

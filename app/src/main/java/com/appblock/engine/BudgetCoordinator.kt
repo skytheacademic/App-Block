@@ -319,7 +319,15 @@ class BudgetCoordinator(
         carryMs[t] = totalMs % 1000L
         if (seconds <= 0L) return
         val today = DayBoundary.logicalDay(clock.nowLocal())
-        store.saveUsage(t, UsageTracker.accrue(store.loadUsage(t), seconds, today))
+        val previous = store.loadUsage(t)
+        // The 4am rollover, caught at the one moment it is visible: the stored row is from an
+        // earlier logical day and is about to be reset to zero by `accrue`. Archive it first, so the
+        // week strip has a record. Display-only — nothing downstream reads it, and a target you
+        // never opened simply has no entry for that day, which is the truth.
+        if (previous != null && previous.dayKey < today) {
+            store.recordHistory(t, DayUsage(previous.dayKey, previous.secondsUsed))
+        }
+        store.saveUsage(t, UsageTracker.accrue(previous, seconds, today))
     }
 
     private fun decideCurrent(rules: List<Rule>): Decision {

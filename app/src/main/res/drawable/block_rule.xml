@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The block screen's one rule: accent on the left, gone by 65%. A full-width divider would read as
+  the top of a table; this reads as an underline under "Blocked" and stops.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="0"
+        android:startColor="@color/lamp_accent"
+        android:centerColor="#00D9A05C"
+        android:centerX="0.65"
+        android:endColor="#00D9A05C"
+        android:type="linear" />
+</shape>

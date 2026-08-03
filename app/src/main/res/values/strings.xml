@@ -14,6 +14,15 @@
     <string name="block_message_web_app">This is a website installed as an app, so it has no address bar to check against your blocklist. Open the site in Chrome instead.</string>
     <string name="block_message_unreadable">App-Block can\'t read this browser\'s address bar, so it can\'t tell which site you\'re on. Blocked until it can — if this keeps happening, the browser has probably updated.</string>
     <string name="block_go_back">Go back</string>
+    <!--
+      Facts about the system, not about this block — the layout is static, and the block's own reason
+      lives in the reason-aware messages above. "04:00" is DayBoundary.DEFAULT_RESET_HOUR and the
+      1-hour wait is ExceptionManager.WAIT_MS; both are compile-time constants of a release build.
+    -->
+    <string name="block_fact_resets">day resets</string>
+    <string name="block_fact_resets_value">04:00</string>
+    <string name="block_fact_more_time">more time</string>
+    <string name="block_fact_more_time_value">1-hour wait</string>
     <string name="watchdog_channel_name">Blocking health</string>
     <string name="watchdog_title">App-Block is not protecting you</string>
     <string name="watchdog_title_degraded">App-Block is only half working</string>
@@ -29,4 +38,222 @@
     <string name="unlock_channel_name">Change window</string>
     <string name="unlock_title">Your settings window is open</string>
     <string name="unlock_text">You have 15 minutes to make one change to your limits, then it locks again.</string>
+
+    <!-- ==== Navigation ==== -->
+    <string name="tab_today">Today</string>
+    <string name="tab_apps">Apps</string>
+    <string name="tab_sites">Sites</string>
+    <string name="tab_lock">Lock</string>
+    <string name="action_ok">OK</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_open_lock">Lock</string>
+
+    <!-- ==== Today ==== -->
+    <string name="today_hero_caption">remaining, all apps</string>
+    <!-- e.g. "37 of 55 min used · 1 of 3 closed now" -->
+    <string name="today_hero_sub">%1$d of %2$d min used · %3$d of %4$d closed now</string>
+    <string name="today_col_target">target</string>
+    <string name="today_col_used_cap">used / cap</string>
+    <string name="today_total">total</string>
+    <string name="today_request_more">Request more time</string>
+    <string name="today_week_label">last 7 days · minutes used</string>
+    <string name="today_sub_reopens">reopens %1$s</string>
+    <string name="today_sub_outside">outside %1$s–%2$s</string>
+    <!-- e.g. "+5:00 at 20:12" — the raise, and the clock time it lands. -->
+    <string name="today_sub_exception_pending">+%1$d:00 at %2$s</string>
+    <string name="chip_blocked">blocked</string>
+    <string name="chip_closed">closed</string>
+    <string name="chip_off">off</string>
+    <string name="chip_raised">+%1$d min</string>
+    <string name="scope_note_instagram">Counts Reels and Explore only. Feed, Stories and DMs stay free.</string>
+    <string name="tamper_banner_title">The clock was changed by hand</string>
+    <!-- Recovery needs BOTH One UI toggles — date &amp; time *and* time zone (see
+         BudgetCoordinator.trustedClock). Naming only the first sends you to Settings to do something
+         that doesn't clear the latch, which is the worst possible instruction while everything is
+         blocked. Kept in step with block_message_tamper on the overlay. -->
+    <string name="tamper_banner_body">%1$s. Everything stays blocked until BOTH &quot;Set time automatically&quot; AND &quot;Set time zone automatically&quot; are back on in Settings.</string>
+
+    <!-- ==== Exception flow ==== -->
+    <string name="exception_banner_pending">%1$s +%2$d min in %3$s</string>
+    <string name="exception_banner_pending_sub">then %1$s at %2$d min cap</string>
+    <string name="exception_banner_active">%1$s +%2$d min active · ends %3$s</string>
+    <string name="exception_banner_active_sub">%1$s of the window left</string>
+    <string name="exception_pick_title">More time for</string>
+    <string name="exception_pick_body">Each app has its own ceiling — an exception can\'t pass it.</string>
+    <string name="exception_pick_sub">cap %1$s · ceiling %2$s</string>
+    <string name="exception_pick_already_pending">exception already pending</string>
+    <string name="exception_pick_already_active">exception already active</string>
+    <string name="exception_pick_no_headroom">already at its ceiling</string>
+    <string name="exception_amount_title">%1$s · more time</string>
+    <string name="exception_extra_label">Extra</string>
+    <string name="exception_extra_value">+%1$d min</string>
+    <string name="exception_extra_hint">5-minute steps, up to the %1$s ceiling.</string>
+    <string name="exception_fact_cap">today\'s cap</string>
+    <string name="exception_fact_lasts">raised cap lasts</string>
+    <string name="exception_fact_starts">starts after</string>
+    <string name="exception_fact_starts_value">%1$s wait · %2$s</string>
+    <string name="exception_blocks_stay_on">Blocks stay on during the wait.</string>
+    <string name="exception_start_wait">Start %1$s wait</string>
+    <string name="exception_cancelled">Exception cancelled.</string>
+
+    <!-- ==== Apps ==== -->
+    <string name="action_add">Add</string>
+    <string name="action_done">Done</string>
+    <string name="apps_sub">Adding is instant. Removing, or raising a cap, needs the 2 h window.</string>
+    <string name="apps_rule_every_day">%1$s every day · raise to %2$s</string>
+    <string name="apps_rule_split">%1$s %2$s · %3$s %4$s</string>
+    <string name="apps_note_closed">Closed now — opens in its next window.</string>
+    <string name="apps_note_spent">Spent — reopens %1$s.</string>
+    <string name="apps_note_exception">Exception pending: +%1$d:00 in %2$s, then %3$s.</string>
+    <string name="apps_added">Added %1$s. Set its limits, then commit on Lock.</string>
+
+    <!-- ==== Limits sheet ==== -->
+    <string name="limits_title">%1$s limits</string>
+    <string name="limits_weekday">Weekday cap</string>
+    <string name="limits_weekend">Weekend cap</string>
+    <string name="limits_ceiling">Exception ceiling</string>
+    <string name="limits_remove_app">Remove app</string>
+    <string name="limits_hint_clean">No unsaved changes.</string>
+    <string name="limits_hint_loosen">Loosening — commit it on the Lock tab, inside a window.</string>
+    <string name="limits_hint_tighten">Tightening — commit it on the Lock tab; it saves immediately.</string>
+    <string name="schedule_toggle">Limit to certain hours</string>
+    <string name="schedule_from">From</string>
+    <string name="schedule_to">To</string>
+    <string name="schedule_add">+ Add hours</string>
+    <string name="schedule_remove">Remove these hours</string>
+    <string name="schedule_no_days">Pick at least one day — with none, this window does nothing.</string>
+    <string name="schedule_overnight">Runs past midnight: %1$s until %2$s the next morning.</string>
+    <string name="schedule_explainer">Allowed only inside these hours on their days. Blocked otherwise — and all day on days no rule covers.</string>
+
+    <!-- ==== App picker ==== -->
+    <string name="picker_title">Block another app</string>
+    <string name="picker_body">Adding is instant. Removing one later needs the 2 h window.</string>
+    <string name="picker_search">Search</string>
+    <string name="picker_no_match">No app matches that.</string>
+    <string name="picker_all_blocked">Every app you can open is already blocked.</string>
+
+    <!-- ==== Sites ==== -->
+    <string name="action_remove">Remove</string>
+    <string name="sites_count">%1$d blocked</string>
+    <string name="sites_sub">Caught in the address bar of Chrome and Brave. Other browsers are blocked as apps.</string>
+    <string name="sites_placeholder">reddit.com</string>
+    <string name="sites_adding_instant">Adding is instant.</string>
+    <string name="sites_invalid">That doesn\'t look like a website address.</string>
+    <string name="sites_col_domain">domain</string>
+    <string name="sites_col_added">added</string>
+    <string name="sites_col_removal">removal</string>
+    <string name="sites_added_unknown">—</string>
+    <string name="sites_removal_cost">72 h</string>
+    <string name="sites_empty">No blocked sites yet.</string>
+    <string name="sites_lock_title">Removals are locked</string>
+    <string name="sites_lock_sub">Key → 72 h wait → 15 min window → one site.</string>
+    <string name="sites_lock_pending_sub">Window opens in %1$s. Blocks stay on until then.</string>
+    <string name="sites_lock_open_title">Window open — remove one site</string>
+    <string name="sites_lock_open_sub">%1$s left. One site, then it locks again.</string>
+    <string name="sites_start_window">Start removal window</string>
+    <string name="sites_browsers">browsers</string>
+    <string name="sites_browsers_other">every other browser</string>
+    <string name="sites_browsers_note">Unlisted browsers are blocked as apps — including Samsung Internet, the system default.</string>
+    <string name="sites_blocked_toast">Blocked %1$s.</string>
+    <string name="sites_removed_toast">Removed %1$s — that was your one change, locked again.</string>
+    <string name="sites_remove_needs_window">Removing a site needs the 72-hour website window.</string>
+
+    <!-- ==== Lock ==== -->
+    <string name="lock_locked">Locked</string>
+    <string name="lock_locked_sub">Tightening a limit saves immediately, no key.</string>
+    <string name="lock_nokey_title">No key set</string>
+    <string name="lock_nokey_body">Anything can be loosened until you create one. Then stash its QR off this phone.</string>
+    <string name="lock_create_key">Create lock key</string>
+    <string name="lock_costs">loosening costs</string>
+    <string name="lock_cost_apps">Raise a cap, turn an app off, remove an app</string>
+    <string name="lock_cost_apps_sub">key → wait → 15 min window → one change</string>
+    <string name="lock_cost_apps_value">2 h</string>
+    <string name="lock_cost_sites">Remove a website</string>
+    <string name="lock_cost_sites_sub">separate cycle · one site per window</string>
+    <string name="lock_cost_sites_value">72 h</string>
+    <string name="lock_start_window">Start window</string>
+    <string name="lock_category_apps">Apps window</string>
+    <string name="lock_category_websites">Websites window</string>
+    <string name="lock_kicker_waiting">%1$s · waiting</string>
+    <string name="lock_kicker_open">%1$s · open</string>
+    <string name="lock_waiting_body">Then a 15-minute window for one change. Blocks stay on throughout.</string>
+    <string name="lock_open_body">One change lands, then it locks again. Miss it and the cycle restarts from the key.</string>
+    <string name="lock_started_at">started %1$s</string>
+    <string name="lock_opens_at">opens %1$s</string>
+    <string name="lock_cancel_wait">Cancel wait</string>
+    <string name="lock_cancel_window">Cancel window</string>
+    <string name="lock_cancel_restarts">Cancelling restarts the cycle.</string>
+    <string name="lock_unsaved">unsaved changes</string>
+    <string name="lock_more_changes">…and %1$d more</string>
+    <string name="lock_hint_open">The window is open — accepting applies the whole set and relocks.</string>
+    <string name="lock_hint_gated">One loosening in the set gates the whole save: key → 2 h → 15 min.</string>
+    <string name="lock_hint_free">All tightening — saves immediately, no key.</string>
+    <string name="lock_discard">Discard</string>
+    <string name="lock_save">Save</string>
+    <string name="lock_accept_one">Accept one change</string>
+    <string name="lock_protection">protection</string>
+    <string name="lock_key_set">Key set</string>
+    <string name="lock_key_missing">No key set</string>
+    <string name="lock_key_hash_only">hash only</string>
+    <string name="lock_saved">Saved.</string>
+    <string name="lock_saved_one_change">Saved — that was your one change</string>
+    <string name="lock_saved_one_change_body">%1$s. Locked again at %2$s.</string>
+    <string name="lock_blocked_save">That loosens your limits — start the change window first (key → 2 h → 15 min).</string>
+    <!-- A window buys one change (CONSTRAINTS §6). Shown when the window is open and the edit still
+         can't land, which is the confusing case — so name the count and say what to do about it. -->
+    <string name="lock_too_many_loosenings">A window covers one change; this edit loosens %1$d. Undo all but one.</string>
+    <string name="lock_loosening_count_hint">Your window covers one change, and this edit loosens %1$d. Undo all but the one you want — the others each need their own window.</string>
+    <string name="lock_window_cancelled">Change window cancelled.</string>
+    <string name="lock_wait_started">Wait started. You\'ll get a notification when the window opens.</string>
+    <string name="lock_key_created">Lock key set. Stash the QR somewhere you can\'t reach on impulse.</string>
+
+    <!-- Protection list -->
+    <string name="protection_accessibility">Accessibility service</string>
+    <string name="protection_accessibility_on">on</string>
+    <string name="protection_accessibility_off">Nothing is detected, so nothing is blocked. Enable it in Settings → Accessibility.</string>
+    <string name="protection_overlay">Display over other apps</string>
+    <string name="protection_overlay_on">granted</string>
+    <string name="protection_overlay_off">Falling back to kick-to-home — no block screen.</string>
+    <string name="protection_autotime">Automatic date &amp; time</string>
+    <string name="protection_autotime_on">on</string>
+    <string name="protection_autotime_off">The clock can be set by hand. Any change latches every target blocked until it\'s back on.</string>
+    <string name="protection_service">Blocking service</string>
+    <string name="protection_service_on">running</string>
+    <string name="protection_service_off">The service isn\'t running, so nothing is blocked. Re-enable the Accessibility service to restart it.</string>
+    <string name="protection_debug_build">Debug build</string>
+    <string name="protection_debug_build_body">This build is debuggable — its data can be edited over ADB. Install a release build for real use.</string>
+    <string name="lock_export">Keep a copy of your rules</string>
+    <string name="lock_export_body">Copies your caps, schedules, blocked apps and blocked sites as plain text. If this phone is ever wiped, that text is the only record — App-Block can\'t read it back in, so you\'d re-enter it by hand. Your lock key is never included.</string>
+    <string name="lock_export_copy">Copy rules</string>
+    <string name="lock_export_done">Rules copied. Paste them somewhere that survives this phone.</string>
+    <string name="protection_rules_unreadable">Your saved rules couldn\'t be read</string>
+    <string name="protection_rules_unreadable_body">App-Block fell back to its built-in defaults, so any app you added yourself is no longer blocked. Rebuild what\'s missing in Apps — adding and tightening are always free. The unreadable copy has been kept.</string>
+    <string name="protection_reels_stale">Reels detection needs a re-check</string>
+    <string name="protection_reels_stale_body">Instagram has updated since App-Block last recognised the Reels player. Open Reels once — if you get the block screen it still works and this disappears. If you don\'t, the Reels rule has stopped working.</string>
+    <string name="action_grant">Grant</string>
+    <string name="action_enable">Enable</string>
+    <string name="action_settings">Settings</string>
+
+    <!-- ==== Key + unlock sheets ==== -->
+    <string name="key_title">Your lock key</string>
+    <string name="key_qr_description">Lock key QR code</string>
+    <string name="key_code_label">the code inside it</string>
+    <string name="key_stash_instruction">Print it, or photograph it and put the photo somewhere off this phone — a drawer, a friend. Then delete it from here.</string>
+    <string name="key_stash_detail">24 characters from an alphabet with no O/0, I/1/L or Q. Only a one-way hash is stored, so this screen can\'t be shown again. Lose the key and rules change only by rebuilding from your computer.</string>
+    <string name="key_stashed_confirm">I\'ve stashed it — lock it in</string>
+    <string name="key_scan">Scan the stashed QR</string>
+    <string name="key_scan_prompt">Point the camera at your stashed key QR</string>
+    <string name="key_or_type">or type it</string>
+    <string name="key_code_placeholder">XXXX-XXXX-XXXX-XXXX-XXXX-XXXX</string>
+    <string name="key_format_hint">24 characters. Case and dashes don\'t matter.</string>
+    <string name="key_mismatch">That code doesn\'t match.</string>
+    <string name="window_title_apps">Start change window</string>
+    <string name="window_title_websites">Start website-removal window</string>
+    <string name="window_body_apps">Your stashed key starts a 2-hour wait. Then 15 minutes for one change.</string>
+    <string name="window_body_websites">Your stashed key starts a 72-hour wait. Then 15 minutes to remove one site.</string>
+    <string name="window_action_apps">Start 2-hour wait</string>
+    <string name="window_action_websites">Start 72-hour wait</string>
+    <string name="lock_line_locked">Locked. Tightening saves now; loosening needs the 2 h window.</string>
+    <string name="lock_line_pending">Window opens in %1$s.</string>
+    <string name="lock_line_open">Window open — %1$s left.</string>
 </resources>

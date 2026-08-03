@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -60,5 +61,32 @@ class BlocklistStoreTest {
         store.add("reddit.com")
         store.add("www.reddit.com")   // normalizes to the same domain
         assertEquals(listOf("reddit.com"), store.domains())
+    }
+
+    @Test fun `add records when the domain went on the list`() {
+        store.add("reddit.com")
+        assertNotNull(store.sites().single().addedAtMillis)
+    }
+
+    /** A stray second add must not make an old commitment look new. */
+    @Test fun `re-adding keeps the original date`() {
+        store.add("reddit.com")
+        val first = store.sites().single().addedAtMillis
+        store.add("www.reddit.com")
+        assertEquals(first, store.sites().single().addedAtMillis)
+    }
+
+    /** Domains blocked before dates were recorded read as undated, not as a decode failure. */
+    @Test fun `a domain stored without a date reads as undated`() {
+        app.getSharedPreferences("appblock_blocklist", 0).edit()
+            .putStringSet("domains", setOf("reddit.com")).commit()
+        assertNull(BlocklistStore(app).sites().single().addedAtMillis)
+    }
+
+    @Test fun `removing a domain drops its date too`() {
+        store.add("reddit.com")
+        store.removeIfAuthorized("reddit.com", authorized = true)
+        store.add("reddit.com")
+        assertNotNull(store.sites().single().addedAtMillis)
     }
 }
