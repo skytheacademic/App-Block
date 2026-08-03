@@ -24,5 +24,8 @@ internal object Notifications {
     /** Instagram's reel ids may have drifted — dismissable, withdrawn when re-confirmed. */
     const val SIGNAL_DRIFT = 3
 
-    val ALL = listOf(HEALTH, UNLOCK_WINDOW, SIGNAL_DRIFT)
+    /** A browser's address-bar id may have drifted — dismissable, withdrawn when re-confirmed. */
+    const val OMNIBOX_DRIFT = 4
+
+    val ALL = listOf(HEALTH, UNLOCK_WINDOW, SIGNAL_DRIFT, OMNIBOX_DRIFT)
 }
