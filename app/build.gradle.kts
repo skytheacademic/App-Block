@@ -54,6 +54,18 @@ android {
     }
 
     buildTypes {
+        // Its own applicationId, for the opposite reason to debugFast's below: not to stop this
+        // build swapping itself in, but so it can get onto the phone at all. This variant is what
+        // CI publishes, and CI is the only build route that doesn't need the laptop and a cable.
+        // Unsuffixed it was package `com.appblock` signed with the debug key — the same package as
+        // the release daily driver but a different signature, so it could neither update it
+        // (INSTALL_FAILED_UPDATE_INCOMPATIBLE) nor install beside it. A green CI run produced an
+        // APK that could not reach the device by any route. As com.appblock.debug it installs
+        // alongside: download the artifact on the phone, install, no cable involved.
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             // R8 on: smaller APK, and stripped metadata makes on-device bypass tinkering harder.
             isMinifyEnabled = true

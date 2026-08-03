@@ -1,0 +1,15 @@
+<resources>
+    <!--
+      Same reasoning as app/src/debug/res/values/strings.xml — debugFast already carried its own
+      applicationId (com.appblock.fast) and so could already sit beside the release install, but
+      it was still labelled "App-Block", which left the Accessibility list ambiguous. This is the
+      1-minute-caps throwaway; mistaking it for the strict build is the worst version of that
+      mix-up, since it looks like protection and expires in a minute.
+
+      The same INVARIANT applies: accessibility_label must contain app_name as a substring, or
+      SettingsWatch stops recognising the Accessibility page as being about us. See the debug
+      source set for the full explanation.
+    -->
+    <string name="app_name">App-Block (fast)</string>
+    <string name="accessibility_label">App-Block (fast) detection</string>
+</resources>
