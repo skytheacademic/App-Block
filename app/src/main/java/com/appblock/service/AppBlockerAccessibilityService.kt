@@ -37,6 +37,7 @@ import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.OcclusionHold
 import com.appblock.engine.RuleSource
+import com.appblock.engine.ServiceLiveness
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
@@ -139,7 +140,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        isRunning = true
+        liveness.connected(this)
         clock = AndroidEngineClock()
         ruleSource = ActiveRules.ruleSource(this)
         coordinator = BudgetCoordinator(
@@ -858,7 +859,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
-        isRunning = false
+        // Identity-checked: if a replacement has already connected, this instance is a corpse and must
+        // not retract its claim. See ServiceLiveness.
+        liveness.destroyed(this)
         stopTicking()
         hideOverlay()
         super.onDestroy()
@@ -902,9 +905,16 @@ class AppBlockerAccessibilityService : AccessibilityService() {
          *  redirect can bounce off. See [exitOverlay]. */
         private const val NEUTRAL_URL = "about:blank"
 
-        /** Liveness flag for the watchdog: true only while the system has this service running. */
-        @Volatile
-        var isRunning: Boolean = false
-            private set
+        /**
+         * Liveness for the watchdog and the Lock tab's protection list.
+         *
+         * Delegated to [ServiceLiveness] rather than kept as a `Boolean` here, because Android does not
+         * promise to destroy the outgoing instance before connecting its replacement, and a plain flag
+         * shared by two instances is then written last by the corpse. Defensive, not a fix for anything
+         * observed — see that class for why the 2026-08-04 report turned out not to be this.
+         */
+        private val liveness = ServiceLiveness()
+
+        val isRunning: Boolean get() = liveness.isRunning
     }
 }
