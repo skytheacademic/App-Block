@@ -149,7 +149,7 @@ class AppRootScreenTest {
         goTo("Lock")
         compose.onNodeWithText("Accept one change").assertIsNotEnabled()
         compose.onNodeWithText("no key to open a window with", substring = true).assertExists()
-        assertEquals(30, tiktokWeekday())
+        assertEquals(15, xWeekday())
     }
 
     /** The same refusal *with* a key: still blocked, but now the quoted cost is one you can pay. */
@@ -157,7 +157,7 @@ class AppRootScreenTest {
     fun `loosening is blocked while locked, and names the cost once a key exists`() {
         LockStore(app).setKey(LockKeys.generate())
         show()
-        openTikTokLimits()
+        openXLimits()
         stepper("plus", "Weekday cap").tapInSheet()
         closeSheet()
         goTo("Lock")
