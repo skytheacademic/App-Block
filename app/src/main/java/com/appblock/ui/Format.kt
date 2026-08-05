@@ -64,15 +64,13 @@ fun formatLogicalDay(day: LocalDate): String = DAY_FORMAT.format(day)
 /** When today's budgets come back: the 4am reset, as a clock reading. */
 fun formatResetHour(): String = formatHm(DayBoundary.DEFAULT_RESET_HOUR * 60)
 
-/** Time from now until the next 4am reset, in seconds — the block screen's "in 8 h 48 m". */
-fun secondsUntilReset(now: LocalDateTime): Long {
-    val minuteOfDay = now.hour * 60 + now.minute
-    val resetMinute = DayBoundary.DEFAULT_RESET_HOUR * 60
-    val minutesLeft = Math.floorMod(resetMinute - minuteOfDay, MINUTES_PER_DAY)
-    return minutesLeft * 60L - now.second
-}
-
-/** A coarse "how long until" for the block screen: `8 h 48 m`, `48 m`. */
+/**
+ * A coarse "how long until" for the block screen: `8 h 48 m`, `48 m`.
+ *
+ * The seconds this renders come from the engine ([com.appblock.engine.DayBoundary.secondsUntilReset],
+ * [com.appblock.engine.Schedule.nextOpening]) — this file used to carry its own copy of the reset
+ * countdown, which is how a screen ends up counting down to a boundary the engine doesn't use.
+ */
 fun formatCoarse(totalSeconds: Long): String {
     val minutes = (totalSeconds.coerceAtLeast(0L) + 59) / 60
     val h = minutes / 60

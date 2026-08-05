@@ -93,20 +93,30 @@ class DurableUnlockController(private val context: Context) {
     /** Cancel a wait/window without making a change (tightening direction — always allowed). */
     fun cancel() = consume()
 
-    private fun waitMsFor(category: UnlockCategory): Long =
-        if (BuildConfig.FAST_CAPS) {
-            when (category) {
-                UnlockCategory.APPS -> FAST_WAIT_MS
-                UnlockCategory.WEBSITES -> FAST_WEBSITES_WAIT_MS
-            }
-        } else {
-            category.defaultWaitMs
-        }
-
     companion object {
         /** Fast-build durations so the flow is verifiable on-device without waiting hours. */
         const val FAST_WAIT_MS = 2L * 60L * 1000L           // apps: 2-minute wait
         const val FAST_WEBSITES_WAIT_MS = 4L * 60L * 1000L  // websites: 4 min — visibly longer, proves the category wiring
         const val FAST_WINDOW_MS = 60L * 1000L              // 1-minute window
+
+        /**
+         * What a [category] change actually costs on **this build** — the real wait, or `debugFast`'s
+         * short one.
+         *
+         * Public because the block screen quotes this number ([com.appblock.engine.BlockFacts.Route]),
+         * and a second copy that read [UnlockCategory.defaultWaitMs] directly would tell the throwaway
+         * build's user to expect 72 hours for a window that opens in four minutes. One function, one
+         * answer — the [com.appblock.engine.ExceptionManager] wait is threaded through
+         * [com.appblock.ActiveRules.exceptionWaitMs] for exactly the same reason.
+         */
+        fun waitMsFor(category: UnlockCategory): Long =
+            if (BuildConfig.FAST_CAPS) {
+                when (category) {
+                    UnlockCategory.APPS -> FAST_WAIT_MS
+                    UnlockCategory.WEBSITES -> FAST_WEBSITES_WAIT_MS
+                }
+            } else {
+                category.defaultWaitMs
+            }
     }
 }

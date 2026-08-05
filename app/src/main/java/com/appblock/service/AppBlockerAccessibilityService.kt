@@ -28,6 +28,7 @@ import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
 import com.appblock.engine.AddressWatch
 import com.appblock.engine.AppTargets
+import com.appblock.engine.BlockFacts
 import com.appblock.engine.BlockReason
 import com.appblock.engine.BrowserPolicy
 import com.appblock.engine.BrowserTargets
@@ -37,12 +38,19 @@ import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.OcclusionHold
 import com.appblock.engine.RuleSource
+import com.appblock.engine.Schedule
 import com.appblock.engine.ServiceLiveness
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
+// The shared formatters, so the block screen's clock readings and durations are rendered by the same
+// rules as the Today hero and the limits table. See com.appblock.ui.Format's own doc — the fact row
+// is one of the three call sites it exists for.
+import com.appblock.ui.formatCoarse
+import com.appblock.ui.formatHm
+import com.appblock.ui.formatWindow
 
 /**
  * The live blocker. Inputs that drive it:
@@ -702,10 +710,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     ) {
         val message: CharSequence?
         val key: String?
+        val facts: BlockFacts.Facts?
         when {
             webBlock != null -> {
                 message = webMessage(webBlock, webHost)
                 key = "w:$webBlock:${webHost ?: ""}"
+                facts = BlockFacts.forWeb(webBlock)
                 // Only a blocked *site* steers the browser; a non-allowlisted browser is an app block.
                 overlayExitBrowserPkg =
                     if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE) webPkg else null
@@ -713,15 +723,23 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             decision.access == Access.BLOCK && decision.target != null -> {
                 message = blockMessage(decision.target, decision.reason)
                 key = "t:${decision.target}:${decision.reason}"
+                facts = BlockFacts.forTarget(
+                    reason = decision.reason,
+                    schedule = scheduleFor(decision.target),
+                    alwaysBlocked = decision.target in AppTargets.alwaysBlockedTargets,
+                    now = clock.nowLocal(),
+                    exceptionWaitMs = ActiveRules.exceptionWaitMs,
+                )
                 overlayExitBrowserPkg = null
             }
             else -> {
                 message = null
                 key = null
+                facts = null
             }
         }
-        if (message != null && key != null) {
-            if (!showOverlay(message, key)) {
+        if (message != null && key != null && facts != null) {
+            if (!showOverlay(message, key, facts)) {
                 // Overlay permission revoked or addView failed: blocking must not silently vanish.
                 // Home, not the browser-steering exit - this fires every tick, and re-issuing a
                 // navigation intent at 5s intervals would be its own kind of loop.
@@ -778,22 +796,29 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Show (or refresh in place) the block overlay with [message]; [key] identifies what's currently
-     * shown, so a changed cause updates the text instead of leaving a stale one. Returns true when the
-     * overlay is up (already or newly added).
+     * Show (or refresh in place) the block overlay with [message] and [facts]; [key] identifies what's
+     * currently shown, so a changed cause updates the text instead of leaving a stale one. Returns true
+     * when the overlay is up (already or newly added).
+     *
+     * The message is gated on [key] and the fact rows deliberately are not: their cause hasn't changed
+     * but their *numbers* have, and "in 8 h 48 m" left alone for eight hours is worse than no countdown
+     * at all. [applyFacts] compares before it writes, so the 5-second tick costs nothing until a
+     * rendered minute actually rolls over.
      */
-    private fun showOverlay(message: CharSequence, key: String): Boolean {
+    private fun showOverlay(message: CharSequence, key: String, facts: BlockFacts.Facts): Boolean {
         overlayView?.let { view ->
             if (key != overlayKey) {
                 view.findViewById<TextView>(R.id.block_message).text = message
                 overlayKey = key
             }
+            applyFacts(view, facts)
             return true
         }
         if (!Settings.canDrawOverlays(this)) return false
 
         val view = LayoutInflater.from(this).inflate(R.layout.overlay_block, null)
         view.findViewById<TextView>(R.id.block_message).text = message
+        applyFacts(view, facts)
         view.findViewById<Button>(R.id.block_close).setOnClickListener {
             hideOverlay()
             exitOverlay()
@@ -838,11 +863,78 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         BrowserPolicy.WebBlock.UNREADABLE_ADDRESS -> getString(R.string.block_message_unreadable)
     }
 
+    /** The blocked target's own schedule, for the countdown to its next window. */
+    private fun scheduleFor(target: Target): Schedule? =
+        ruleSource.rules().firstOrNull { it.target == target }?.schedule
+
+    /** The four strings the two fact rows are showing — cached so an unchanged tick writes nothing. */
+    private data class FactRows(
+        val whenLabel: String,
+        val whenValue: String,
+        val routeLabel: String,
+        val routeValue: String,
+    )
+
+    private var overlayFacts: FactRows? = null
+
+    private fun applyFacts(view: View, facts: BlockFacts.Facts) {
+        val rows = render(facts)
+        if (rows == overlayFacts) return
+        view.findViewById<TextView>(R.id.block_fact_when_label).text = rows.whenLabel
+        view.findViewById<TextView>(R.id.block_fact_when_value).text = rows.whenValue
+        view.findViewById<TextView>(R.id.block_fact_route_label).text = rows.routeLabel
+        view.findViewById<TextView>(R.id.block_fact_route_value).text = rows.routeValue
+        overlayFacts = rows
+    }
+
+    /**
+     * [BlockFacts] carries no strings, so this is the one place its cases become words. Every clock
+     * reading and duration is rendered by the shared formatters, not typed — the same rule the Today
+     * hero and the limits table follow, so the block screen can't disagree with them about a minute.
+     */
+    private fun render(facts: BlockFacts.Facts): FactRows {
+        val (whenLabel, whenValue) = when (val r = facts.returns) {
+            is BlockFacts.Returns.AtDayReset -> R.string.block_fact_when_resets to
+                getString(R.string.block_fact_at, formatHm(r.minuteOfDay), formatCoarse(r.secondsUntil))
+            is BlockFacts.Returns.AtWindow -> R.string.block_fact_when_reopens to
+                getString(R.string.block_fact_at, formatHm(r.minuteOfDay), formatCoarse(r.secondsUntil))
+            BlockFacts.Returns.NoAllowedHours -> R.string.block_fact_when_reopens to
+                getString(R.string.block_fact_no_hours)
+            BlockFacts.Returns.NotOnItsOwn -> R.string.block_fact_when_lifts to
+                getString(R.string.block_fact_not_on_its_own)
+            BlockFacts.Returns.WhenAddressReadable -> R.string.block_fact_when_clears to
+                getString(R.string.block_fact_when_readable)
+        }
+        val (routeLabel, routeValue) = when (val r = facts.route) {
+            is BlockFacts.Route.ExceptionWait -> R.string.block_fact_route_more_time to
+                getString(R.string.block_fact_wait, formatWindow((r.waitMs / 60_000L).toInt()))
+            is BlockFacts.Route.ChangeWindow -> R.string.block_fact_route_unblocking to
+                getString(
+                    R.string.block_fact_change_window,
+                    formatWindow((DurableUnlockController.waitMsFor(r.category) / 60_000L).toInt()),
+                )
+            BlockFacts.Route.EditTheHours -> R.string.block_fact_route_more_time to
+                getString(R.string.block_fact_edit_hours)
+            BlockFacts.Route.RestoreAutomaticTime -> R.string.block_fact_route_to_clear to
+                getString(R.string.block_fact_auto_time)
+            BlockFacts.Route.NotFromThisPhone -> R.string.block_fact_route_unblocking to
+                getString(R.string.block_fact_not_from_phone)
+            BlockFacts.Route.UseAnAllowedBrowser -> R.string.block_fact_route_way_through to
+                getString(R.string.block_fact_allowed_browser)
+            BlockFacts.Route.ShowTheAddressBar -> R.string.block_fact_route_way_through to
+                getString(R.string.block_fact_show_address_bar)
+        }
+        return FactRows(getString(whenLabel), whenValue, getString(routeLabel), routeValue)
+    }
+
     private fun hideOverlay() {
         overlayView?.let { view ->
             runCatching { windowManager.removeView(view) }
             overlayView = null
             overlayKey = null
+            // The cache belongs to the view that just went away; keeping it would leave the next
+            // overlay showing the inflated placeholder rows whenever the facts happened to match.
+            overlayFacts = null
         }
     }
 
