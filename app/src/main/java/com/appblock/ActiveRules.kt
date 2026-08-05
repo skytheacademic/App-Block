@@ -20,9 +20,18 @@ import com.appblock.engine.RuleStore
  */
 object ActiveRules {
 
-    /** The defaults for this build variant — what the store seeds from. */
+    /**
+     * The defaults for this build variant — what the store seeds from.
+     *
+     * [DefaultRules.seededOff] applies to the real rules only: `debugFast` exists to prove a block
+     * fires in ~90 s, so seeding its TikTok off would retire that test.
+     */
     val seed: DurableSettings =
-        DurableSettings.from(if (BuildConfig.FAST_CAPS) DefaultRules.fastRules else DefaultRules.rules)
+        if (BuildConfig.FAST_CAPS) {
+            DurableSettings.from(DefaultRules.fastRules)
+        } else {
+            DurableSettings.from(DefaultRules.rules, disabled = DefaultRules.seededOff)
+        }
 
     /** Exception wait: 1 hour for real builds; `debugFast` shrinks it to 1 min so activation is testable. */
     val exceptionWaitMs: Long =

@@ -59,22 +59,40 @@ data class DurableSettings(
          * Bump this in source (with a defaults edit) to force the persisting store to re-seed on the
          * next launch — the "change durable rules from the computer" path (CONSTRAINTS.md §6).
          * (v2: target entries gained an optional schedule.)
+         * (v3: TikTok seeds disabled — see [DefaultRules.seededOff]. 2026-08-05, user's call.)
          */
-        const val RULES_VERSION: Int = 2
+        const val RULES_VERSION: Int = 3
 
         /** Default temporary-exception window (minutes) — a durable pre-set, editable behind the gate. */
         const val DEFAULT_EXCEPTION_WINDOW_MINUTES: Int = 60
 
-        /** Seed a settings object from a [DefaultRules]-shaped rule list (all seeded targets enabled). */
+        /**
+         * Seed a settings object from a [DefaultRules]-shaped rule list. Targets in [disabled] are
+         * seeded **present but off**: kept in [targets] with their caps intact, omitted from
+         * [toRules], and therefore not enforced.
+         *
+         * **Why "off" and not simply absent**, since dropping the rule would also stop enforcement:
+         * an absent built-in cannot be restored from the phone. `AppPickerSheet` excludes
+         * `AppTargets.packages`, so TikTok's packages are unofferable by design (offering one would
+         * create a second, weaker whole-app target beside the real one). Seeded-off keeps the row on
+         * the Apps tab, and switching it back on is `!o.enabled && n.enabled` — a **TIGHTEN** in
+         * [DurableChangeGate.changes] — so it saves free and instantly, with no key and no window.
+         * Absent would make re-enabling a laptop rebuild; off makes it one tap.
+         *
+         * It also keeps the decision in the record: [ConfigExport] prints "Not blocked" for a disabled
+         * target precisely so a config rebuilt from an export can't read "deliberately unenforced" as
+         * "forgotten".
+         */
         fun from(
             rules: List<Rule>,
             exceptionWindowMinutes: Int = DEFAULT_EXCEPTION_WINDOW_MINUTES,
             version: Int = RULES_VERSION,
+            disabled: Set<Target> = emptySet(),
         ): DurableSettings {
             val targets = rules.mapNotNull { rule ->
                 (rule.mode as? RuleMode.DailyBudget)?.let { mode ->
                     rule.target to TargetSettings(
-                        enabled = true,
+                        enabled = rule.target !in disabled,
                         weekdayMinutes = mode.weekdayMinutes,
                         weekendMinutes = mode.weekendMinutes,
                         exceptionMaxMinutes = mode.exceptionMaxMinutes,
