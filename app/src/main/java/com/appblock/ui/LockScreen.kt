@@ -615,6 +615,8 @@ fun protectionItems(
     serviceRunning: Boolean,
     rulesWereCorrupt: Boolean,
     signalStale: Boolean,
+    /** Website blocking's own canary — see [com.appblock.data.OmniboxWitnessStore.installedHealth]. */
+    omniboxStale: Boolean,
     debuggable: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit,
@@ -685,6 +687,26 @@ fun protectionItems(
                 okLabel = "",
                 ok = false,
                 consequence = stringResource(R.string.protection_reels_stale_body),
+            ),
+        )
+    }
+    if (omniboxStale) {
+        // The last of the three drift/quiet-failure rows, and the one that was left as a notification
+        // only when the vouch landed (2026-08-03): PR #3 had just deleted SettingsScreen.kt, so adding
+        // a card would have been a seventh feature to hand-port through the redesign merge.
+        //
+        // Says both directions on purpose. STALE means a browser updated a week ago and App-Block has
+        // not read its address bar since — and the failure has already been silent in one direction
+        // (during that week an unreadable bar was vouched for, so the blocklist was not being applied)
+        // and turns loud in the other from now on (AddressWatch withdraws the vouch, so a bar it
+        // cannot read is a block). Naming only one of those would leave the row true today and wrong
+        // tomorrow. Both are cleared by the same thing, which is the action line.
+        add(
+            ProtectionItem(
+                title = stringResource(R.string.protection_omnibox_stale),
+                okLabel = "",
+                ok = false,
+                consequence = stringResource(R.string.protection_omnibox_stale_body),
             ),
         )
     }

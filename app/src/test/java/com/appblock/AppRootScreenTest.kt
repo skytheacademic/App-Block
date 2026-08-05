@@ -1,6 +1,7 @@
 package com.appblock
 
 import android.app.Application
+import android.content.pm.PackageInfo
 import android.os.SystemClock
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.SemanticsNodeInteraction
@@ -18,8 +19,10 @@ import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.work.testing.WorkManagerTestInitHelper
+import com.appblock.data.OmniboxWitnessStore
 import com.appblock.engine.DurableUnlockState
 import com.appblock.engine.RuleStore
+import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
 import com.appblock.security.DurableUnlockStore
 import com.appblock.security.LockKeys
@@ -31,6 +34,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -52,6 +56,9 @@ class AppRootScreenTest {
     private val app: Application = ApplicationProvider.getApplicationContext()
     private lateinit var ruleStore: RuleStore
 
+    /** The allowlisted browser the drift cases stage; [com.appblock.engine.BrowserTargets.allowlist]. */
+    private val CHROME = "com.android.chrome"
+
     @Before
     fun setUp() {
         WorkManagerTestInitHelper.initializeTestWorkManager(app)
@@ -59,6 +66,9 @@ class AppRootScreenTest {
         // ActiveRules, so asserting against the same prefs file is what proves the save landed.
         app.getSharedPreferences("appblock_rules", 0).edit().clear().commit()
         app.getSharedPreferences("appblock_lock", 0).edit().clear().commit()
+        // The canary witnesses live here. Cleared for the same reason as the two above: the drift row
+        // is staged by writing one, and a case that inherited another's would be asserting nothing.
+        app.getSharedPreferences("appblock_runtime", 0).edit().clear().commit()
         ruleStore = ActiveRules.ruleStore(app)
         ruleStore.load()   // seed
     }
@@ -164,6 +174,59 @@ class AppRootScreenTest {
         compose.onNodeWithText("Accept one change").assertIsNotEnabled()
         compose.onNodeWithText("gates the whole save", substring = true).assertExists()
         assertEquals(15, xWeekday())
+    }
+
+    /**
+     * The omnibox-drift row, the in-app half of the B-7 canary (the notification half has fired since
+     * 2026-08-03; this was deferred so it wouldn't become a seventh feature to hand-port through the
+     * redesign merge).
+     *
+     * Staged rather than asserted on a real device state: Chrome is installed into the shadow package
+     * manager at versionCode 2, and the witness records a confirmation on version **1** first seen
+     * eight days ago — past [com.appblock.data.OmniboxWitnessStore.GRACE_MS] — which is precisely
+     * [SignalCanary.Health.STALE]: the browser updated a week ago and its address bar has not been read
+     * since.
+     */
+    @Test
+    fun `address-bar drift reaches the Lock protection list, not only the notification`() {
+        installChrome()
+        val eightDaysAgo = System.currentTimeMillis() - 8L * 24 * 60 * 60 * 1_000
+        OmniboxWitnessStore(app).save(
+            CHROME,
+            SignalCanary.Witness(
+                confirmedVersion = 1L,
+                confirmedAtMs = eightDaysAgo,
+                installedVersion = 2L,
+                installedSeenAtMs = eightDaysAgo,
+            ),
+        )
+        show()
+        goTo("Lock")
+        compose.onNodeWithText("Website blocking needs a re-check").assertExists()
+    }
+
+    /**
+     * The discriminator, not just the absence of a browser: Chrome *is* installed and its omnibox has
+     * been read on the version that's installed now. A row that appeared here would be the drift
+     * warning firing at ordinary browsing — the same "fires hardest at the user who is complying"
+     * failure [SignalCanary] rejects the naive canary for.
+     */
+    @Test
+    fun `a browser whose address bar reads fine raises no drift row`() {
+        installChrome()
+        OmniboxWitnessStore(app).confirm(CHROME, System.currentTimeMillis())
+        show()
+        goTo("Lock")
+        compose.onNodeWithText("Website blocking needs a re-check").assertDoesNotExist()
+    }
+
+    private fun installChrome() {
+        shadowOf(app.packageManager).installPackage(
+            PackageInfo().apply {
+                packageName = CHROME
+                longVersionCode = 2L
+            },
+        )
     }
 
     /** Apps' foot line is the other place the keyless state was overstating what a loosening costs. */

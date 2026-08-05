@@ -7,11 +7,17 @@
   Left-aligned and vertically centred rather than centred-centred: centred text reads as a dialog
   asking something, and this is not asking.
 
-  The two fact rows below the rule are **constants of the system**, not of this particular block —
-  the day resets at 04:00 and more time costs a 1-hour wait, whatever stopped you. The block's own
-  reason is in @id/block_message, which the accessibility service sets from the reason-aware string
-  set (block_message_budget / _schedule / _tamper / _site / _browser). Those two ids are the only
-  contract this layout has with service/: a TextView at block_message and a Button at block_close.
+  The two fact rows below the rule answer the two questions every block raises — **when it lifts on
+  its own** and **the way through** — and both are facts about *this* block, filled in by the service
+  from com.appblock.engine.BlockFacts. They used to be hard-coded here as "constants of the system"
+  (`day resets 04:00` / `more time 1-hour wait`), which was true of a budget block and wrong about
+  every other kind: a schedule block is not waiting on 04:00, and no exception wait moves it at all.
+  See BlockFacts for the full account.
+
+  The block's own reason stays in @id/block_message, which the service sets from the reason-aware
+  string set (block_message_budget / _schedule / _tamper / _site / _browser). The contract this layout
+  has with service/ is six ids: block_message, block_close, and the four fact TextViews. The strings
+  left in here are what a preview renders and what a failed lookup would show — never what ships.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
@@ -57,18 +63,20 @@
         android:paddingBottom="11dp">
 
         <TextView
+            android:id="@+id/block_fact_when_label"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="@string/block_fact_resets"
+            android:text="@string/block_fact_when_resets"
             android:textColor="@color/lamp_neutral_500"
             android:textSize="12.5sp"
             android:fontFamily="@font/inter_regular" />
 
         <TextView
+            android:id="@+id/block_fact_when_value"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/block_fact_resets_value"
+            android:text="@string/block_fact_no_hours"
             android:textColor="@color/lamp_text"
             android:textSize="12.5sp"
             android:fontFamily="@font/inter_regular"
@@ -88,18 +96,20 @@
         android:paddingBottom="11dp">
 
         <TextView
+            android:id="@+id/block_fact_route_label"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="@string/block_fact_more_time"
+            android:text="@string/block_fact_route_more_time"
             android:textColor="@color/lamp_neutral_500"
             android:textSize="12.5sp"
             android:fontFamily="@font/inter_regular" />
 
         <TextView
+            android:id="@+id/block_fact_route_value"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="@string/block_fact_more_time_value"
+            android:text="@string/block_fact_not_from_phone"
             android:textColor="@color/lamp_neutral_400"
             android:textSize="12.5sp"
             android:fontFamily="@font/inter_regular" />

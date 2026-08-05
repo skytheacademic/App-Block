@@ -16,8 +16,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.appblock.ActiveRules
-import com.appblock.BuildConfig
 import com.appblock.R
+import com.appblock.data.OmniboxWitnessStore
 import com.appblock.data.PrefsEngineStore
 import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.AppTargets
@@ -112,9 +112,11 @@ fun AppRoot(
     // rather than on the 1s tick — the canary reads Instagram's version out of PackageManager, and
     // neither can change while the user is looking at this screen.
     var signalHealth by remember { mutableStateOf(SignalCanary.Health.NO_APP) }
+    var omniboxHealth by remember { mutableStateOf(SignalCanary.Health.NO_APP) }
     var rulesWereCorrupt by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         signalHealth = SignalWitnessStore(context).refresh(System.currentTimeMillis())
+        omniboxHealth = OmniboxWitnessStore(context).installedHealth(System.currentTimeMillis())
         // The draft's first load() is what detects and quarantines an unreadable config, so it has
         // to have run before the flag is read — asking first would always come back clean on a cold
         // start. RulesDraft.load() happens in its constructor, above.
@@ -281,6 +283,7 @@ fun AppRoot(
                     serviceRunning = serviceRunning,
                     rulesWereCorrupt = rulesWereCorrupt,
                     signalStale = signalHealth == SignalCanary.Health.STALE,
+                    omniboxStale = omniboxHealth == SignalCanary.Health.STALE,
                     debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
                     onOpenAccessibility = onOpenAccessibility,
                     onOpenOverlay = onOpenOverlay,
@@ -529,7 +532,10 @@ private fun lockStateFor(
     return when (state) {
         is DurableUnlockState.Locked -> LockState.Locked
         is DurableUnlockState.Pending -> {
-            val total = waitMsFor(state.category)
+            // The controller's own function, not a copy of it: this used to be mirrored here, and a
+            // mirror is how the progress track ends up drawing a 2-hour wait the controller is
+            // running in two minutes.
+            val total = DurableUnlockController.waitMsFor(state.category)
             LockState.Pending(
                 category = state.category,
                 countdown = countdown,
@@ -543,21 +549,6 @@ private fun lockStateFor(
         is DurableUnlockState.Open -> LockState.Open(state.category, countdown)
     }
 }
-
-/**
- * The wait this build actually uses. Mirrors [DurableUnlockController]'s own choice — the throwaway
- * `debugFast` variant shrinks both waits so the cycle is verifiable on-device in minutes — so the
- * progress track can't claim a 2-hour wait while the controller is running a 2-minute one.
- */
-private fun waitMsFor(category: UnlockCategory): Long =
-    if (BuildConfig.FAST_CAPS) {
-        when (category) {
-            UnlockCategory.APPS -> DurableUnlockController.FAST_WAIT_MS
-            UnlockCategory.WEBSITES -> DurableUnlockController.FAST_WEBSITES_WAIT_MS
-        }
-    } else {
-        category.defaultWaitMs
-    }
 
 /**
  * Limits a newly added app starts with. Deliberately a real cap rather than 0: adding at any cap is a

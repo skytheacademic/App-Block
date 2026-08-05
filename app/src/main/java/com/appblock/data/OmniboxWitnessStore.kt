@@ -1,6 +1,7 @@
 package com.appblock.data
 
 import android.content.Context
+import com.appblock.engine.BrowserTargets
 import com.appblock.engine.SignalCanary
 
 /**
@@ -92,6 +93,19 @@ class OmniboxWitnessStore(context: Context) {
     fun confirm(pkg: String, nowMs: Long) {
         save(pkg, SignalCanary.confirm(load(pkg), installedVersion(pkg), nowMs))
     }
+
+    /**
+     * The verdict for website blocking as a whole: the worst across every allowlisted browser that is
+     * actually on the phone.
+     *
+     * A browser that isn't installed has no id to have drifted, and one that isn't allowlisted is
+     * blocked outright as an app, so neither belongs in the verdict. That filter used to live in
+     * [com.appblock.service.WatchdogWorker] alone; it is here now because the Lock protection row asks
+     * the same question, and two callers deciding separately which browsers count is how the row and
+     * the notification would come to disagree on screen.
+     */
+    fun installedHealth(nowMs: Long): SignalCanary.Health =
+        worstHealth(BrowserTargets.allowlist.filter { installedVersion(it) != null }, nowMs)
 
     /** The worst verdict across the allowlisted browsers that are actually installed. */
     fun worstHealth(packages: Collection<String>, nowMs: Long): SignalCanary.Health {

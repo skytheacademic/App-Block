@@ -15,14 +15,37 @@
     <string name="block_message_unreadable">App-Block can\'t read this browser\'s address bar, so it can\'t tell which site you\'re on. Blocked until it can — if this keeps happening, the browser has probably updated.</string>
     <string name="block_go_back">Go back</string>
     <!--
-      Facts about the system, not about this block — the layout is static, and the block's own reason
-      lives in the reason-aware messages above. "04:00" is DayBoundary.DEFAULT_RESET_HOUR and the
-      1-hour wait is ExceptionManager.WAIT_MS; both are compile-time constants of a release build.
+      The block screen's two fact rows, filled in per block from com.appblock.engine.BlockFacts.
+
+      REPLACED 2026-08-05 (was: block_fact_resets/_value + block_fact_more_time/_value, four fixed
+      strings baked into overlay_block.xml). They read "day resets 04:00" and "more time 1-hour wait"
+      under EVERY block, which is true of a budget block and false of the other five. The two that
+      matter: a schedule block is not waiting on 04:00 and cannot be shortened by any wait at all
+      (PolicyEngine.scheduleAllows gates before the budget path, so an exception raises a cap that
+      isn't what stopped you), and a blocked site costs the 72-hour cycle, not an hour.
+
+      Labels — the left column, one per Returns/Route case.
     -->
-    <string name="block_fact_resets">day resets</string>
-    <string name="block_fact_resets_value">04:00</string>
-    <string name="block_fact_more_time">more time</string>
-    <string name="block_fact_more_time_value">1-hour wait</string>
+    <string name="block_fact_when_resets">day resets</string>
+    <string name="block_fact_when_reopens">reopens</string>
+    <string name="block_fact_when_lifts">lifts</string>
+    <string name="block_fact_when_clears">clears</string>
+    <string name="block_fact_route_more_time">more time</string>
+    <string name="block_fact_route_unblocking">unblocking</string>
+    <string name="block_fact_route_way_through">the way through</string>
+    <string name="block_fact_route_to_clear">to clear</string>
+    <!-- Values — the right column. Clock readings and durations come from the engine, never typed. -->
+    <string name="block_fact_at">%1$s · in %2$s</string>
+    <string name="block_fact_no_hours">no hours allowed</string>
+    <string name="block_fact_not_on_its_own">not on its own</string>
+    <string name="block_fact_when_readable">when the address bar shows</string>
+    <string name="block_fact_wait">%1$s wait</string>
+    <string name="block_fact_change_window">%1$s change window</string>
+    <string name="block_fact_edit_hours">changing the hours</string>
+    <string name="block_fact_auto_time">automatic time back on</string>
+    <string name="block_fact_not_from_phone">not from this phone</string>
+    <string name="block_fact_allowed_browser">Chrome or Brave</string>
+    <string name="block_fact_show_address_bar">scroll up to show it</string>
     <string name="watchdog_channel_name">Blocking health</string>
     <string name="watchdog_title">App-Block is not protecting you</string>
     <string name="watchdog_title_degraded">App-Block is only half working</string>
@@ -33,7 +56,13 @@
     <string name="signal_title">Reels blocking needs a re-check</string>
     <string name="signal_text">Instagram has updated since App-Block last recognised the Reels player, so reels may not be getting blocked any more. Open Reels once — if the block screen appears, everything is fine and this will go away.</string>
     <string name="omnibox_title">Website blocking needs a re-check</string>
-    <string name="omnibox_text">Your browser has updated since App-Block last managed to read its address bar, so blocked sites may not be getting blocked any more. Open the browser and load any page with the address bar showing — that re-checks it, and this will go away.</string>
+    <!--
+      REVISED 2026-08-05, to stop contradicting the Lock row that now shows the same state. It said
+      only "blocked sites may not be getting blocked any more", which describes the seven days that
+      have just ENDED by the time this fires: at STALE the vouch is withdrawn, so an unreadable bar
+      becomes a block. Keep this in step with protection_omnibox_stale_body.
+    -->
+    <string name="omnibox_text">Your browser updated a week ago and App-Block hasn\'t managed to read its address bar since. Blocked sites may have been slipping through, and from now on pages it can\'t read get blocked instead. Open the browser on any page with the address bar showing — that re-checks it, and this will go away.</string>
     <string name="self_defense_bounce">App-Block is locked. Changing its system access needs the stashed key and the change window.</string>
     <string name="unlock_channel_name">Change window</string>
     <string name="unlock_title">Your settings window is open</string>
@@ -242,6 +271,17 @@
     <string name="protection_rules_unreadable_body">App-Block fell back to its built-in defaults, so any app you added yourself is no longer blocked. Rebuild what\'s missing in Apps — adding and tightening are always free. The unreadable copy has been kept.</string>
     <string name="protection_reels_stale">Reels detection needs a re-check</string>
     <string name="protection_reels_stale_body">Instagram has updated since App-Block last recognised the Reels player. Open Reels once — if you get the block screen it still works and this disappears. If you don\'t, the Reels rule has stopped working.</string>
+    <!--
+      The in-app half of the omnibox-drift canary, deferred 2026-08-03 and added 2026-08-05.
+
+      Deliberately states BOTH directions, because the two drift canaries fail opposite ways and this
+      one changes direction at exactly the moment the row appears. Reels drift only ever under-blocks.
+      Address-bar drift under-blocks for the seven days OmniboxWitnessStore vouches through, then
+      over-blocks once AddressWatch withdraws the vouch and an unreadable bar counts as Unreadable.
+      One sentence for each, and the same re-check clears both.
+    -->
+    <string name="protection_omnibox_stale">Website blocking needs a re-check</string>
+    <string name="protection_omnibox_stale_body">Your browser updated a week ago and App-Block hasn\'t managed to read its address bar since, so it can\'t tell which site you\'re on. Until it can, blocked sites may have been slipping through — and from now on pages it can\'t read get blocked instead. Open the browser on any page with the address bar showing: that re-checks it and clears this either way.</string>
     <string name="action_grant">Grant</string>
     <string name="action_enable">Enable</string>
     <string name="action_settings">Settings</string>

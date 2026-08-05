@@ -20,7 +20,6 @@ import com.appblock.MainActivity
 import com.appblock.R
 import com.appblock.data.OmniboxWitnessStore
 import com.appblock.data.SignalWitnessStore
-import com.appblock.engine.BrowserTargets
 import com.appblock.engine.SignalCanary
 import com.appblock.util.isAccessibilityServiceEnabled
 import java.util.concurrent.TimeUnit
@@ -43,15 +42,11 @@ class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(contex
         if (!Watchdog.setupCompleted(ctx)) return Result.success()  // don't nag before first setup
         Watchdog.report(ctx, Watchdog.currentHealth(ctx))
         Watchdog.reportSignalDrift(ctx, SignalWitnessStore(ctx).refresh(System.currentTimeMillis()))
-        // Only the browsers the blocklist is actually enforced through — a browser that isn't installed
-        // has no id to have drifted, and one that isn't allowlisted is blocked outright anyway.
-        val omnibox = OmniboxWitnessStore(ctx)
+        // installedHealth owns "which browsers count" — shared with the Lock protection row, which asks
+        // the identical question and must not answer it differently.
         Watchdog.reportOmniboxDrift(
             ctx,
-            omnibox.worstHealth(
-                BrowserTargets.allowlist.filter { omnibox.installedVersion(it) != null },
-                System.currentTimeMillis(),
-            ),
+            OmniboxWitnessStore(ctx).installedHealth(System.currentTimeMillis()),
         )
         return Result.success()
     }

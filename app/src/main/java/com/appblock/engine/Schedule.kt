@@ -38,4 +38,36 @@ data class Schedule(val allowedByDay: Map<DayOfWeek, List<TimeWindow>>) {
         val minuteOfDay = now.hour * 60 + now.minute
         return allowedByDay[now.dayOfWeek].orEmpty().any { it.contains(minuteOfDay) }
     }
+
+    /**
+     * When this schedule next opens, at the first window start strictly after [now] — the moment a
+     * schedule block counts down to ("reopens · 18:00 · in 3 h 12 m").
+     *
+     * **Null means never, and null is not a rounding of "not soon".** A schedule with no windows on
+     * any day blocks its target permanently, and the caller has to say so rather than print a
+     * countdown to a time that isn't coming. That state is reachable: the editor lets every day be
+     * cleared, and doing so is a *tightening*, so it saves for free.
+     *
+     * Only sensible when the schedule is currently closed — inside a window the answer is the *next*
+     * opening, not this one — which is the only way it is called. That falls out of the strict `>`:
+     * a window already running has a start in the past and is skipped.
+     *
+     * Eight days, not seven: today is scanned twice, once for whatever is left of it and once as the
+     * same weekday a week on. Seven would drop the case where the only window all week is earlier
+     * today — Sunday 09:00 asked at Sunday 22:00 — and return null, i.e. report "never" for a
+     * schedule that opens in eleven hours.
+     */
+    fun nextOpening(now: LocalDateTime): LocalDateTime? {
+        val midnight = now.toLocalDate().atStartOfDay()
+        val minuteOfDay = now.hour * 60 + now.minute
+        for (dayOffset in 0..7) {
+            val day = midnight.plusDays(dayOffset.toLong())
+            val start = allowedByDay[day.dayOfWeek].orEmpty()
+                .map { it.startMinuteOfDay }
+                .filter { dayOffset > 0 || it > minuteOfDay }
+                .minOrNull() ?: continue
+            return day.plusMinutes(start.toLong())
+        }
+        return null
+    }
 }
