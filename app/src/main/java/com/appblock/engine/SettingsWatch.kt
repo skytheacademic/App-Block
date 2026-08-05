@@ -3,29 +3,75 @@ package com.appblock.engine
 /**
  * Self-defense (CONSTRAINTS.md lever A): decides when the accessibility service should bounce the
  * user to Home because a system Settings screen *about App-Block itself* is on screen — the
- * Accessibility toggle, the "Turn off?" dialog, the App info page (force-stop / uninstall), the
- * overlay-permission page, Device care's sleeping-apps list. Without this, switching the service
- * off in Settings is a zero-friction bypass.
+ * Accessibility toggle, the "Turn off?" dialog, the App info page (force-stop / uninstall). Without
+ * this, switching the service off in Settings is a zero-friction bypass.
  *
- * Matching is deliberately broad: any visible text in a watched settings package that mentions the
- * app's label. Both labels the OS shows ("App-Block" and "App-Block detection") contain the app
- * label, so one case-insensitive substring check covers the toggle list, the detail page, and the
- * confirmation dialog.
+ * **The discriminator is what the screen *is*, not what text happens to be on it (audit finding
+ * C-4).** This used to be one case-insensitive substring test over every visible string in a watched
+ * package, on the theory that Settings only ever shows the app's label on a screen about the app.
+ * The Gate F string capture killed that theory: "Appear on top" is *a list of every app on the
+ * phone*, and App-Block appears in it for no reason but sorting third alphabetically. So are the
+ * Apps list, App notifications, Permission manager → Camera, and Accessibility → Installed apps.
+ * The bare match bounced the user off all of them, and — because the overlay-permission page is one
+ * of those lists — guarded the app out of its own repair (C-2, which cost one adb session).
+ *
+ * Two screens from that capture prove no word list can separate them, because both contain the
+ * string "App-Block" and only one is about App-Block:
+ *
+ * ```
+ * Appear on top          |  App info
+ * This permission …      |  App-Block · Installed
+ * AlwaysOnDisplay        |  Privacy · Notifications · Permissions
+ * Android Auto           |  …
+ * App-Block         <--- |  Open · Uninstall · Force stop
+ * Authentication Fram…   |
+ * ```
+ *
+ * What separates them is **position**: on the left the label is one row in the body, on the right
+ * the page is *about* one app and carries controls that only exist on such a page. Hence a [Screen]
+ * rather than a bag of strings, and hence two ways in:
+ *
+ *  1. the label is in the screen's **title** — the page's identity is us; or
+ *  2. the label is anywhere on the screen **and** a [settingsControls] word is present — the page
+ *     offers a control that can only mean one app.
+ *
+ * A list of every app satisfies neither: its title is a category ("Apps", "Appear on top"), and it
+ * offers no per-app control. The Accessibility toggle page satisfies both.
  *
  * The sanctioned way past it is the same gate as every other loosening (CONSTRAINTS.md §6): open the
  * durable-change window (stashed key → wait → 15-min window) and the watch stands down — turning the
  * service off becomes a gated loosening instead of a free escape. The caller passes that (plus
- * "setup not finished yet", so first-time permission granting isn't bounced) as [standDown].
+ * "setup not finished yet", so first-time permission granting isn't bounced) as the stand-down flags
+ * on [shouldBounce].
  *
- * Pure Kotlin so the decision is JVM-testable; the service supplies the visible texts.
+ * Pure Kotlin so the decision is JVM-testable; the service supplies the screen.
  */
 object SettingsWatch {
 
     /**
+     * One rendering of a watched Settings screen: everything visible on it ([texts]), with the part
+     * that says what the screen *is* pulled out separately ([titles]).
+     *
+     * [titles] is a small set of *candidates*, not one authoritative string, because no single source
+     * is reliable on One UI: the framework's window title is often just the activity label
+     * ("Settings"), a collapsing toolbar's heading disappears from the expanded position when you
+     * scroll, and a dialog has neither. The service offers what it can find — window title, first
+     * heading node, and (only when both are missing) the first text in reading order — and any one
+     * of them naming the app is enough. Over-supplying costs a false bounce on a screen whose first
+     * row happens to be us; under-supplying costs nothing, because rule 2 still stands.
+     *
+     * [texts] is the whole screen including the title, so a body match never has to reason about
+     * which strings were promoted.
+     */
+    data class Screen(
+        val titles: List<CharSequence> = emptyList(),
+        val texts: List<CharSequence> = emptyList(),
+    )
+
+    /**
      * Settings-family packages: system Settings (toggle / App info / overlay / battery), Samsung's
      * split-out accessibility settings, and Device care (its sleeping-apps list can put the service
-     * to sleep). These never show the app's label except on a screen that is *about* the app, so the
-     * bare label match is right here and is the version proven on hardware at Gate A.
+     * to sleep).
      */
     val settingsPackages: Set<String> = setOf(
         "com.android.settings",
@@ -47,8 +93,8 @@ object SettingsWatch {
 
     /**
      * Words that only appear on a screen that can actually *remove* the blocker, required alongside
-     * the label before an installer screen bounces. Two reasons this tier can't use the bare label
-     * match that the Settings tier uses:
+     * the label before an installer screen bounces. Two reasons this tier can't use a bare label
+     * match:
      *
      *  - **The installer also shows the label when it is installing.** Bouncing that would make
      *    sideloading a newer App-Block impossible from the phone — the self-defense would guard the
@@ -70,6 +116,30 @@ object SettingsWatch {
     )
 
     /**
+     * The Settings tier's equivalent: text that can only be on a page about **one** app, so finding
+     * the label beside it means the page is about *this* app. Every word here was read off the S25 at
+     * Gate F — `Uninstall` and `Force stop` from App info, `App info` from the Accessibility toggle
+     * page (which links to it), `Turn off` from the confirmation dialog.
+     *
+     * Deliberately a different list from [killControls], which guards a different question. The
+     * installer tier asks "is this removal?", so it must exclude installs and stays armed through an
+     * open window. This tier asks "is this page about us?", so it includes navigation like `App info`
+     * that removes nothing — and it can afford to, because the whole tier stands down for a window or
+     * a repair.
+     *
+     * `disable` is *not* here even though it is in [killControls]: One UI's Apps list has a
+     * "Disabled apps" filter, and a list of every app is precisely what this rule exists to ignore.
+     */
+    val settingsControls: List<String> = listOf(
+        "uninstall",
+        "force stop",
+        "clear data",
+        "clear storage",
+        "app info",
+        "turn off",
+    )
+
+    /**
      * Text identifying Android's **wireless debugging** screen, which is watched with no reference to
      * the app's label at all (B-10). Pairing adb to the phone *from* the phone is what lets Shizuku
      * hand adb-level power to an ordinary app — an escape that needs no computer and, once paired, is
@@ -88,21 +158,33 @@ object SettingsWatch {
      * Developer options must stay reachable: USB debugging lives there, and adb from the computer is
      * one of only two ways back in if this app ever needs repairing (the other is safe mode). Walling
      * that off would be the overlay-permission trap again, one level up.
+     *
+     * **`developer options` is the load-bearing one; `usb debugging` is the one that failed.** The
+     * exclusion was originally the USB-debugging *row*, which made the guard a co-visibility bet: at
+     * Gate F, scrolling until `Wireless debugging` was visible and every row containing "usb
+     * debugging" had left the top bounced Developer options, 2/2 (the only thing holding it open one
+     * scroll earlier was the unrelated `Revoke USB debugging authorizations`). The screen's own name
+     * cannot scroll away — a collapsing toolbar shrinks its title into the app bar rather than
+     * dropping it — so it anchors the exclusion at every scroll position. The row is kept beside it
+     * because this is the one guard where a false *negative* is cheap (one bypass screen is friction
+     * on a setup step) and a false positive is expensive (it walls off an escape valve).
      */
-    val bypassExclusions: List<String> = listOf("usb debugging")
+    val bypassExclusions: List<String> = listOf("developer options", "usb debugging")
 
     val watchedPackages: Set<String> = settingsPackages + installerPackages
 
     fun isWatched(packageName: String?): Boolean = packageName in watchedPackages
 
+    private fun Iterable<CharSequence>.anyContains(needles: List<String>): Boolean =
+        any { text -> needles.any { text.contains(it, ignoreCase = true) } }
+
     /** True when these texts are the wireless-debugging screen and not the Developer options list. */
     private fun isBypassScreen(texts: List<CharSequence>): Boolean =
-        texts.any { text -> bypassMarkers.any { text.contains(it, ignoreCase = true) } } &&
-            texts.none { text -> bypassExclusions.any { text.contains(it, ignoreCase = true) } }
+        texts.anyContains(bypassMarkers) && !texts.anyContains(bypassExclusions)
 
     /**
-     * True when the screen described by ([packageName], [visibleTexts]) is about App-Block and the
-     * watch is armed — i.e. the service should bounce Home right now.
+     * True when the screen described by ([packageName], [screen]) is about App-Block and the watch is
+     * armed — i.e. the service should bounce Home right now.
      *
      * Three stand-downs, and which tiers each one reaches is the whole design:
      *
@@ -122,10 +204,10 @@ object SettingsWatch {
      * 2-hour apps gate.
      *
      * [repairMode] also stands the Settings tier down only, while the blocker is missing a permission
-     * it cannot grant itself. Without it the self-defense guards the app against its own repair: the
-     * "Appear on top" page names App-Block, so losing that permission means every attempt to restore
-     * it — including the one MainActivity's own button opens — gets bounced, and the blocker is stuck
-     * degraded until adb.
+     * it cannot grant itself. Narrowing the match (C-4) took most of the weight off this: the
+     * "Appear on top" *list* is no longer a screen about us, so the route back is open on its own
+     * merits. It stays because the per-app permission page one tap further in still names us in its
+     * header, and being bounced off *that* is the same lockout one step later.
      *
      * The trade is real and deliberate: while either of those two stands, turning the service off in
      * Settings is unguarded. It's the right side to fail on — the app can still not be *removed*, the
@@ -134,7 +216,7 @@ object SettingsWatch {
      */
     fun shouldBounce(
         packageName: String?,
-        visibleTexts: Iterable<CharSequence?>,
+        screen: Screen,
         selfLabel: String,
         setupIncomplete: Boolean,
         windowOpen: Boolean = false,
@@ -144,19 +226,22 @@ object SettingsWatch {
         val pkg = packageName ?: return false
         if (!isWatched(pkg)) return false
 
-        val texts = visibleTexts.filterNotNull()
         // A blank label would make the substring test match every screen, so it disables the label
-        // rule — but not the label-independent bypass rule, which never consults it.
-        val namesUs = selfLabel.isNotBlank() &&
-            texts.any { it.contains(selfLabel, ignoreCase = true) }
+        // rules — but not the label-independent bypass rule, which never consults it.
+        val readable = selfLabel.isNotBlank()
+        val titleNamesUs = readable && screen.titles.any { it.contains(selfLabel, ignoreCase = true) }
+        val namesUs = readable && screen.texts.any { it.contains(selfLabel, ignoreCase = true) }
 
         if (pkg in settingsPackages) {
             if (windowOpen || repairMode) return false
-            return namesUs || isBypassScreen(texts)
+            if (titleNamesUs) return true
+            if (namesUs && screen.texts.anyContains(settingsControls)) return true
+            return isBypassScreen(screen.texts)
         }
         // Installer tier — armed through an open window, which is what makes uninstall cost more than
-        // the shortest wait in the system.
+        // the shortest wait in the system. Title position is no help here: the uninstall and update
+        // dialogs are the same screen with one word changed, so the control words are the whole rule.
         if (!namesUs) return false
-        return texts.any { text -> killControls.any { text.contains(it, ignoreCase = true) } }
+        return screen.texts.anyContains(killControls)
     }
 }
