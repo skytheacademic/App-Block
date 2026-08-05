@@ -27,7 +27,12 @@ jobs:
       # runtime an old major is pinned to, and when it does these start failing on a day nothing in
       # the project changed. A green CI that goes red for a reason outside the repo is the worst kind
       # of red — so the bump happens while the run is passing, never as an emergency.
-      - uses: actions/checkout@v5
+      #
+      # Check the majors against the registry rather than incrementing by one and assuming: the first
+      # pass here went v4->v5 across the board, and CI came back green while *still* warning that
+      # upload-artifact and setup-gradle were on Node 20 — because those two were already at v7 and
+      # v6. A green run does not mean the pins are current, only that they resolve.
+      - uses: actions/checkout@v7
 
       # JDK 17, matching compileOptions/jvmTarget and the README's stated requirement. Robolectric
       # pins its SDK per-test for JDK-17 compatibility (see app/build.gradle.kts), so this is the
@@ -45,7 +50,7 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # testDebugUnitTest, not `test`: ui-test-manifest is a debugImplementation, so the Compose
       # screen tests can only resolve their host activity in the debug variant.
@@ -55,7 +60,7 @@ jobs:
       # always(), because a red run is exactly when the report is worth reading.
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ github.sha }}
           path: |
@@ -71,7 +76,7 @@ jobs:
       # candidate behind, so trying a change out never depends on having a laptop nearby. Debug only:
       # release signing needs the keystore, which is gitignored and stays off CI.
       - name: Upload debug APK
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
