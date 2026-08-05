@@ -78,10 +78,19 @@ class AppRootScreenTest {
     /** Tabs are found by their icon's description — "Apps" is also the screen's own title. */
     private fun goTo(tab: String) = compose.onNodeWithContentDescription(tab).performClick()
 
-    /** Open TikTok's limits: the card's name area is the tap target, not a separate Edit button. */
-    private fun openTikTokLimits() {
+    /**
+     * Open X's limits: the card's name area is the tap target, not a separate Edit button.
+     *
+     * **Why X and not TikTok**, which every scenario below used until 2026-08-05: TikTok now seeds
+     * *disabled* ([com.appblock.engine.DefaultRules.seededOff]), and `DurableChangeGate` treats a
+     * target that is off before and after as contributing nothing whatever its numbers say. Stepping
+     * its caps became a no-op, so five gate tests failed while the gate itself was fine — the fixture
+     * had gone inert, not the behaviour. X keeps the shape these tests need: enforced, with distinct
+     * weekday (15) and weekend (20) caps, so the two-loosenings case still has two fields to move.
+     */
+    private fun openXLimits() {
         goTo("Apps")
-        compose.onNodeWithText("TikTok").performClick()
+        compose.onNodeWithText("X (Twitter)").performClick()
     }
 
     /**
@@ -105,30 +114,30 @@ class AppRootScreenTest {
     private fun scheduleToggle() =
         compose.onNode(isToggleable() and hasAnySibling(hasText("Limit to certain hours")))
 
-    private fun tiktokWeekday() = ruleStore.load().targets[Target.TIKTOK]!!.weekdayMinutes
+    private fun xWeekday() = ruleStore.load().targets[Target.X]!!.weekdayMinutes
 
     @Test
     fun `tightening saves without the change window`() {
         show()
-        openTikTokLimits()
-        stepper("minus", "Weekday cap").tapInSheet()   // TikTok weekday cap 30 → 25: stricter
+        openXLimits()
+        stepper("minus", "Weekday cap").tapInSheet()   // X weekday cap 15 → 10: stricter
         closeSheet()
         goTo("Lock")
         compose.onNodeWithText("Save").assertIsEnabled().performClick()
-        assertEquals(25, tiktokWeekday())
+        assertEquals(10, xWeekday())
         compose.onNodeWithText("Saved.").assertExists()
     }
 
     @Test
     fun `loosening is blocked while locked`() {
         show()
-        openTikTokLimits()
-        stepper("plus", "Weekday cap").tapInSheet()    // TikTok weekday cap 30 → 35: looser
+        openXLimits()
+        stepper("plus", "Weekday cap").tapInSheet()    // X weekday cap 15 → 20: looser
         closeSheet()
         goTo("Lock")
         compose.onNodeWithText("Accept one change").assertIsNotEnabled()
         compose.onNodeWithText("gates the whole save", substring = true).assertExists()
-        assertEquals(30, tiktokWeekday())
+        assertEquals(15, xWeekday())
     }
 
     @Test
@@ -140,12 +149,12 @@ class AppRootScreenTest {
             ),
         )
         show()
-        openTikTokLimits()
+        openXLimits()
         stepper("plus", "Weekday cap").tapInSheet()
         closeSheet()
         goTo("Lock")
         compose.onNodeWithText("Accept one change").assertIsEnabled().performClick()
-        assertEquals(35, tiktokWeekday())
+        assertEquals(20, xWeekday())
         compose.onNodeWithText("Saved — that was your one change").assertExists()
     }
 
@@ -166,20 +175,20 @@ class AppRootScreenTest {
             ),
         )
         show()
-        openTikTokLimits()
-        stepper("plus", "Weekday cap").tapInSheet()    // loosening #1: 30 → 35
-        stepper("plus", "Weekend cap").tapInSheet()    // loosening #2 — one too many
+        openXLimits()
+        stepper("plus", "Weekday cap").tapInSheet()    // loosening #1: 15 → 20
+        stepper("plus", "Weekend cap").tapInSheet()    // loosening #2 (20 → 25) — one too many
         closeSheet()
         goTo("Lock")
         compose.onNodeWithText("Accept one change").assertIsNotEnabled()
         compose.onNodeWithText("this edit loosens 2", substring = true).assertExists()
-        assertEquals(30, tiktokWeekday())              // nothing landed
+        assertEquals(15, xWeekday())              // nothing landed
     }
 
     @Test
     fun `schedule toggle authors a default window and counts as tightening`() {
         show()
-        openTikTokLimits()
+        openXLimits()
         scheduleToggle().tapInSheet()
         compose.onNodeWithText("From").assertExists()
         compose.onNodeWithText("18:00").assertExists()
@@ -191,7 +200,7 @@ class AppRootScreenTest {
     @Test
     fun `stepping To past From authors an overnight window`() {
         show()
-        openTikTokLimits()
+        openXLimits()
         scheduleToggle().tapInSheet()
         // To: 20:00 → 19:30 → 19:00 → 18:30 → (skips 18:00 = From) → 17:30, i.e. wraps past midnight.
         repeat(4) { stepper("minus", "To").tapInSheet() }
