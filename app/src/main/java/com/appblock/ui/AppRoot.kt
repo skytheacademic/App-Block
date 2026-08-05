@@ -161,14 +161,22 @@ fun AppRoot(
     val logicalDay = DayBoundary.logicalDay(now)
     val countdown = formatHmsFromMs(unlockRemainingMs)
 
-    val lockLine = when (unlockState) {
-        is DurableUnlockState.Pending -> stringResource(R.string.lock_line_pending, countdown)
-        is DurableUnlockState.Open -> stringResource(R.string.lock_line_open, countdown)
+    // No key means no window can ever open — `LockStore.verify` refuses everything while nothing is
+    // stored — so a keyless phone is *stricter* than a locked one, not looser. Quoting the 2 h price
+    // here would name a cost that cannot be paid; the resting line says what is actually true.
+    val lockLine = when {
+        !keyConfigured -> stringResource(R.string.lock_line_nokey)
+        unlockState is DurableUnlockState.Pending -> stringResource(R.string.lock_line_pending, countdown)
+        unlockState is DurableUnlockState.Open -> stringResource(R.string.lock_line_open, countdown)
         else -> stringResource(R.string.lock_line_locked)
     }
 
     val savedMessage = stringResource(R.string.lock_saved)
-    val blockedSaveMessage = stringResource(R.string.lock_blocked_save)
+    val blockedSaveMessage = if (keyConfigured) {
+        stringResource(R.string.lock_blocked_save)
+    } else {
+        stringResource(R.string.lock_blocked_save_nokey)
+    }
     val savedOneChangeTitle = stringResource(R.string.lock_saved_one_change)
     val windowCancelledMessage = stringResource(R.string.lock_window_cancelled)
     val waitStartedMessage = stringResource(R.string.lock_wait_started)
