@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -265,6 +266,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * overlay-permission page — gets bounced to Home, so disabling the blocker isn't a zero-friction
      * escape. It also covers the wireless-debugging screen, which names nothing of ours (B-10).
      *
+     * What counts as "about App-Block" is [SettingsWatch]'s call, and it is narrower than it looks:
+     * a screen merely *containing* our label is a list of every app on the phone as often as it is a
+     * page about us (C-4). The service's job is only to hand over the screen's identity along with
+     * its words — see [visibleWatchedScreen].
+     *
      * An open durable-change window makes "switch the service off" a gated loosening like any other
      * (CONSTRAINTS §6) — but only that. It no longer stands down the *installer* tier, so it can't
      * also buy an uninstall; see [SettingsWatch.shouldBounce] for why that mattered. Setup being
@@ -282,7 +288,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // open in Settings, which is bounded and rare.
         val bounce = SettingsWatch.shouldBounce(
             packageName = pkg,
-            visibleTexts = visibleWatchedTexts(),
+            screen = visibleWatchedScreen(),
             selfLabel = getString(R.string.app_name),
             setupIncomplete = !Watchdog.setupCompleted(this),
             windowOpen = unlockController.isOpen(),
@@ -312,35 +318,78 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return overlayGranted
     }
 
-    /** All visible text (text + contentDescription) of windows owned by watched settings packages. */
-    private fun visibleWatchedTexts(): List<CharSequence> {
+    /**
+     * All visible text (text + contentDescription) of windows owned by watched settings packages,
+     * with each window's *identity* offered separately — see [SettingsWatch.Screen] for why a flat bag
+     * of strings was audit finding C-4.
+     *
+     * Two title candidates are taken per window and **both** kept rather than the first that answers:
+     * the framework's window title is often just the activity label ("Settings"), and letting that
+     * mask the collapsing-toolbar heading would quietly disarm the title rule on the one screen that
+     * matters most, the Accessibility toggle page.
+     *
+     * The first text in reading order is a candidate only when a window offers neither, and that
+     * restraint is the point. It is right on every Settings screen captured at Gate F — the toolbar
+     * comes first in the tree, giving "Apps", "Appear on top", "Installed apps", "Developer options" —
+     * but a list scrolled so that App-Block's own row is at the top would read as a screen about
+     * App-Block, which is the exact false positive this whole change exists to remove.
+     */
+    private fun visibleWatchedScreen(): SettingsWatch.Screen {
+        val titles = ArrayList<CharSequence>(6)
         val texts = ArrayList<CharSequence>(64)
         var budget = NODE_BUDGET
         for (window in visibleWindows()) {
             runCatching {
                 val root = window.root ?: return@runCatching
                 if (!SettingsWatch.isWatched(root.packageName?.toString())) return@runCatching
-                budget = collectTexts(root, texts, budget)
+                val firstIndex = texts.size
+                val heading = ArrayList<CharSequence>(1)
+                budget = collectTexts(root, texts, heading, budget)
+                val found = titles.size
+                window.title?.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                titles.addAll(heading)
+                if (titles.size == found) texts.getOrNull(firstIndex)?.let { titles.add(it) }
             }
             if (budget <= 0) break
         }
-        return texts
+        return SettingsWatch.Screen(titles, texts)
     }
 
-    /** Depth-first text collection, capped at [budget] nodes so a huge tree can't stall the service. */
-    private fun collectTexts(node: AccessibilityNodeInfo, out: MutableList<CharSequence>, budget: Int): Int {
+    /**
+     * Depth-first text collection, capped at [budget] nodes so a huge tree can't stall the service.
+     * The first node marked as a heading also lands in [heading] — that is a screen title on every
+     * layout that bothers to declare one, and it survives scrolling, which the position of the text
+     * itself does not.
+     */
+    private fun collectTexts(
+        node: AccessibilityNodeInfo,
+        out: MutableList<CharSequence>,
+        heading: MutableList<CharSequence>,
+        budget: Int,
+    ): Int {
         if (budget <= 0) return 0
         var remaining = budget - 1
         runCatching {
-            node.text?.let { out.add(it) }
+            node.text?.let {
+                out.add(it)
+                if (heading.isEmpty() && isHeading(node)) heading.add(it)
+            }
             node.contentDescription?.let { out.add(it) }
         }
         for (child in childrenOf(node)) {
             if (remaining <= 0) break
-            remaining = collectTexts(child, out, remaining)
+            remaining = collectTexts(child, out, heading, remaining)
         }
         return remaining
     }
+
+    /**
+     * Android's own "this node is a heading" flag, added in API 28 — below that it simply never fires
+     * and the window title / first-text candidates carry the rule. Read through a version check rather
+     * than a min-SDK bump because 26 costs nothing to keep and this is one of three sources.
+     */
+    private fun isHeading(node: AccessibilityNodeInfo): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && node.isHeading
 
     /**
      * Resolve what's foreground and inform the coordinator if the *target* changed. Tracking by target —
