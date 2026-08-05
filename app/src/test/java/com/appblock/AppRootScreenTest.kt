@@ -22,6 +22,8 @@ import com.appblock.engine.DurableUnlockState
 import com.appblock.engine.RuleStore
 import com.appblock.engine.Target
 import com.appblock.security.DurableUnlockStore
+import com.appblock.security.LockKeys
+import com.appblock.security.LockStore
 import com.appblock.ui.AppRoot
 import com.appblock.ui.theme.AppBlockTheme
 import org.junit.Assert.assertEquals
@@ -119,16 +121,48 @@ class AppRootScreenTest {
         compose.onNodeWithText("Saved.").assertExists()
     }
 
+    /**
+     * Loosening with **no key stored** — which is what `setUp` leaves behind, since it clears the
+     * lock prefs along with the rules.
+     *
+     * This test used to assert the *gated* hint ("gates the whole save: key → 2 h → 15 min") and
+     * passed, which meant it was quietly certifying the wrong copy: that sentence quotes a price
+     * that cannot be paid, because [com.appblock.security.LockStore.verify] refuses every code while
+     * nothing is stored, so no window can ever open and the Save stays dead forever rather than for
+     * two hours. Keyless is *stricter* than locked, not looser.
+     */
     @Test
-    fun `loosening is blocked while locked`() {
+    fun `loosening with no key says so, rather than quoting the 2 h price`() {
         show()
         openTikTokLimits()
         stepper("plus", "Weekday cap").tapInSheet()    // TikTok weekday cap 30 → 35: looser
         closeSheet()
         goTo("Lock")
         compose.onNodeWithText("Accept one change").assertIsNotEnabled()
+        compose.onNodeWithText("no key to open a window with", substring = true).assertExists()
+        assertEquals(30, tiktokWeekday())
+    }
+
+    /** The same refusal *with* a key: still blocked, but now the quoted cost is one you can pay. */
+    @Test
+    fun `loosening is blocked while locked, and names the cost once a key exists`() {
+        LockStore(app).setKey(LockKeys.generate())
+        show()
+        openTikTokLimits()
+        stepper("plus", "Weekday cap").tapInSheet()
+        closeSheet()
+        goTo("Lock")
+        compose.onNodeWithText("Accept one change").assertIsNotEnabled()
         compose.onNodeWithText("gates the whole save", substring = true).assertExists()
         assertEquals(30, tiktokWeekday())
+    }
+
+    /** Apps' foot line is the other place the keyless state was overstating what a loosening costs. */
+    @Test
+    fun `the Apps lock line does not promise a window when there is no key`() {
+        show()
+        goTo("Apps")
+        compose.onNodeWithText("loosening needs a key", substring = true).assertExists()
     }
 
     @Test

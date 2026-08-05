@@ -162,7 +162,12 @@
     <string name="lock_locked">Locked</string>
     <string name="lock_locked_sub">Tightening a limit saves immediately, no key.</string>
     <string name="lock_nokey_title">No key set</string>
-    <string name="lock_nokey_body">Anything can be loosened until you create one. Then stash its QR off this phone.</string>
+    <!-- Said "Anything can be loosened until you create one" until 2026-08-05, which was exactly
+         backwards: a window can only be opened by verifying a key, so with none stored there is no
+         way to loosen anything at all. It survived because every keyless session so far only ever
+         tightened, and the true half of the sentence ("tightening is free") kept the false half
+         company. -->
+    <string name="lock_nokey_body">Nothing can be loosened until you create one — a window has no key to open with. Tightening still saves freely. Stash the QR off this phone.</string>
     <string name="lock_create_key">Create lock key</string>
     <string name="lock_costs">loosening costs</string>
     <string name="lock_cost_apps">Raise a cap, turn an app off, remove an app</string>
@@ -187,6 +192,10 @@
     <string name="lock_more_changes">…and %1$d more</string>
     <string name="lock_hint_open">The window is open — accepting applies the whole set and relocks.</string>
     <string name="lock_hint_gated">One loosening in the set gates the whole save: key → 2 h → 15 min.</string>
+    <!-- The keyless twin of lock_hint_gated. Naming the cost ("key → 2 h → 15 min") is honest only
+         once a key exists; with none, that sentence sits under a permanently dead Save button and
+         reads as a wait that will end. -->
+    <string name="lock_hint_nokey">This loosens your limits, and there\'s no key to open a window with.</string>
     <string name="lock_hint_free">All tightening — saves immediately, no key.</string>
     <string name="lock_discard">Discard</string>
     <string name="lock_save">Save</string>
@@ -199,6 +208,9 @@
     <string name="lock_saved_one_change">Saved — that was your one change</string>
     <string name="lock_saved_one_change_body">%1$s. Locked again at %2$s.</string>
     <string name="lock_blocked_save">That loosens your limits — start the change window first (key → 2 h → 15 min).</string>
+    <!-- "Start the change window first" is an instruction you cannot follow with no key: the button
+         it points at doesn't exist yet (Lock shows the create-key block instead). -->
+    <string name="lock_blocked_save_nokey">That loosens your limits, and there\'s no key yet — no window can open. Create the lock key first.</string>
     <!-- A window buys one change (CONSTRAINTS §6). Shown when the window is open and the edit still
          can't land, which is the confusing case — so name the count and say what to do about it. -->
     <string name="lock_too_many_loosenings">A window covers one change; this edit loosens %1$d. Undo all but one.</string>
@@ -254,6 +266,9 @@
     <string name="window_action_apps">Start 2-hour wait</string>
     <string name="window_action_websites">Start 72-hour wait</string>
     <string name="lock_line_locked">Locked. Tightening saves now; loosening needs the 2 h window.</string>
+    <!-- Apps' foot line when no key is stored. The "2 h window" phrasing above quotes a price that
+         cannot be paid yet, which reads as "wait two hours" rather than "this is not available". -->
+    <string name="lock_line_nokey">Locked. Tightening saves now; loosening needs a key, and there is none yet.</string>
     <string name="lock_line_pending">Window opens in %1$s.</string>
     <string name="lock_line_open">Window open — %1$s left.</string>
 </resources>

@@ -23,13 +23,17 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      # Action majors are kept current deliberately, not opportunistically: GitHub retires the Node
+      # runtime an old major is pinned to, and when it does these start failing on a day nothing in
+      # the project changed. A green CI that goes red for a reason outside the repo is the worst kind
+      # of red — so the bump happens while the run is passing, never as an emergency.
+      - uses: actions/checkout@v5
 
       # JDK 17, matching compileOptions/jvmTarget and the README's stated requirement. Robolectric
       # pins its SDK per-test for JDK-17 compatibility (see app/build.gradle.kts), so this is the
       # version the test suite is actually written against.
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -38,7 +42,7 @@ jobs:
       # AGP downloads whatever `compileSdk` asks for, so this one workflow serves branches on 35 and
       # 36 alike without needing an edit each time the project moves.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -51,7 +55,7 @@ jobs:
       # always(), because a red run is exactly when the report is worth reading.
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-results-${{ github.sha }}
           path: |
@@ -67,7 +71,7 @@ jobs:
       # candidate behind, so trying a change out never depends on having a laptop nearby. Debug only:
       # release signing needs the keystore, which is gitignored and stays off CI.
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk

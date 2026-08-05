@@ -142,6 +142,7 @@ fun LockScreen(
                 direction = direction,
                 appsWindowOpen = appsWindowOpen,
                 looseningCount = looseningCount,
+                keyConfigured = keyConfigured,
                 onDiscard = onDiscard,
                 onSave = onSave,
                 labelFor = labelFor,
@@ -257,6 +258,14 @@ private fun NoKeyBlock(onCreateKey: () -> Unit) {
     }
 }
 
+/**
+ * The resting locked state: what a loosening costs, and the button that starts paying it.
+ *
+ * [keyConfigured] is defensive only — it is always true here, because `lockStateFor` returns
+ * [LockState.NoKey] before it can ever return [LockState.Locked], so a keyless phone gets
+ * [NoKeyBlock] and never this screen with a greyed-out button. Kept so the control cannot outlive
+ * that ordering, but do not reason about the keyless UI from it: this block is not what you see.
+ */
 @Composable
 private fun RestingBlock(onStartWindow: () -> Unit, keyConfigured: Boolean) {
     val lamp = LocalLamp.current
@@ -468,6 +477,8 @@ private fun DiffSection(
     direction: ChangeDirection,
     appsWindowOpen: Boolean,
     looseningCount: Int,
+    /** No key stored = no window can ever open, so a loosening here is refused permanently. */
+    keyConfigured: Boolean,
     onDiscard: () -> Unit,
     onSave: () -> Unit,
     labelFor: @Composable (Target) -> String,
@@ -520,6 +531,10 @@ private fun DiffSection(
             Text(
                 text = when {
                     loosens && appsWindowOpen -> stringResource(R.string.lock_hint_open)
+                    // Before the gated hint, not after: with no key the "key → 2 h → 15 min" price
+                    // is unpayable, and quoting it under a Save that will never enable describes a
+                    // wait rather than a wall.
+                    loosens && !keyConfigured -> stringResource(R.string.lock_hint_nokey)
                     loosens -> stringResource(R.string.lock_hint_gated)
                     else -> stringResource(R.string.lock_hint_free)
                 },
