@@ -63,7 +63,16 @@
       becomes a block. Keep this in step with protection_omnibox_stale_body.
     -->
     <string name="omnibox_text">Your browser updated a week ago and App-Block hasn\'t managed to read its address bar since. Blocked sites may have been slipping through, and from now on pages it can\'t read get blocked instead. Open the browser on any page with the address bar showing — that re-checks it, and this will go away.</string>
+    <!--
+      Two twins, because the price differs and quoting the wrong one is a loosening. The keyed
+      version names a route the user has; the keyless one must not, because no key exists yet ⇒
+      LockStore.verify() fails for every code ⇒ no window can ever open ⇒ this bounce cannot be paid
+      off from the phone at all. Same defect PR #9 fixed in the Lock and Apps copy, found one layer
+      down in this toast on 2026-08-06. As there: honesty about the state, silence about the desk
+      workaround — naming it here advertises the bypass on the exact screen the user is trying it.
+    -->
     <string name="self_defense_bounce">App-Block is locked. Changing its system access needs the stashed key and the change window.</string>
+    <string name="self_defense_bounce_nokey">App-Block is locked. Its system access can\'t be changed from this phone.</string>
     <string name="unlock_channel_name">Change window</string>
     <string name="unlock_title">Your settings window is open</string>
     <string name="unlock_text">You have 15 minutes to make one change to your limits, then it locks again.</string>
