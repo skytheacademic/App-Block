@@ -59,9 +59,15 @@ object TargetSummaries {
         exceptionCeilingMinutes = settings.exceptionMaxMinutes,
     )
 
-    /** One line when both caps agree, two when they don't — no point printing 30/30 twice. */
+    /**
+     * One line when both caps agree, two when they don't — no point printing 30/30 twice. **None at
+     * all for a schedule-only target**, whose cap fields are 0 placeholders: printing them would
+     * advertise a "0 min every day" limit that neither exists nor blocks.
+     */
     private fun limitsOf(settings: TargetSettings): List<LimitLine> =
-        if (settings.weekdayMinutes == settings.weekendMinutes) {
+        if (settings.scheduleOnly) {
+            emptyList()
+        } else if (settings.weekdayMinutes == settings.weekendMinutes) {
             listOf(LimitLine(ALL_DAYS, settings.weekdayMinutes))
         } else {
             listOf(

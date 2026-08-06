@@ -207,6 +207,9 @@ private fun TargetCard(
 @Composable
 private fun ruleSummary(settings: TargetSettings): String {
     val summary = TargetSummaries.of(settings)
+    // No cap lines at all = a schedule-only target. Its hours are already drawn by the card's day
+    // strip, so the subtitle only has to say that there is no cap behind them.
+    if (summary.limits.isEmpty()) return stringResource(R.string.apps_rule_hours_only)
     val ceiling = formatWindow(summary.exceptionCeilingMinutes)
     return if (summary.limits.size == 1) {
         stringResource(R.string.apps_rule_every_day, formatWindow(summary.limits[0].minutes), ceiling)

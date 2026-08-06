@@ -104,6 +104,12 @@
     <string name="chip_off">off</string>
     <string name="chip_raised">+%1$d min</string>
     <string name="scope_note_instagram">Counts Reels and Explore only. Feed, Stories and DMs stay free.</string>
+    <!--
+      Says "DMs and Stories included" out loud because the Reels note directly above promises they
+      "stay free", and that promise is about the *cap*, not the hours. Two rows for one app is only
+      readable if each says exactly what it covers.
+    -->
+    <string name="scope_note_instagram_app">Closing hours for all of Instagram — DMs and Stories included. No daily limit.</string>
     <string name="tamper_banner_title">The clock was changed by hand</string>
     <!-- Recovery needs BOTH One UI toggles — date &amp; time *and* time zone (see
          BudgetCoordinator.trustedClock). Naming only the first sends you to Settings to do something
@@ -139,6 +145,12 @@
     <string name="action_done">Done</string>
     <string name="apps_sub">Adding is instant. Removing, or raising a cap, needs the 2 h window.</string>
     <string name="apps_rule_every_day">%1$s every day · raise to %2$s</string>
+    <!--
+      A schedule-only target: closing hours and no cap at all. It deliberately does not say
+      "raise to …" — no exception can lift a schedule (the schedule gate runs before the budget),
+      so offering a ceiling here would quote a price that cannot be paid.
+    -->
+    <string name="apps_rule_hours_only">Open hours only · no daily limit</string>
     <string name="apps_rule_split">%1$s %2$s · %3$s %4$s</string>
     <string name="apps_note_closed">Closed now — opens in its next window.</string>
     <string name="apps_note_spent">Spent — reopens %1$s.</string>

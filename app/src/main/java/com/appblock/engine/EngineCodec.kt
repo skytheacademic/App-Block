@@ -124,7 +124,9 @@ object EngineCodec {
     // where each `<t>` is `key,enabled(0|1),weekday,weekend,exceptionMax,schedule`. The schedule field
     // (added v2) is empty for no schedule; otherwise `@<day>~<day>...` with each day
     // `<dow(1..7)>:<win>/<win>` and each win `<startMin>-<endMin>` — no commas/pipes, so it rides
-    // safely inside the comma/pipe delimiters. A 5-field entry (no schedule column) is still accepted.
+    // safely inside the comma/pipe delimiters. A 7th field (added v5) is `scheduleOnly` as 0|1 — the
+    // target carries closing hours and no cap, so its three cap columns are 0 and unread. Shorter
+    // entries are still accepted: 6 fields = no scheduleOnly column, 5 = no schedule column either.
     // Any malformed value decodes to null so the store re-seeds from source (strict — a lost config
     // falls back to defaults, not to "no rules"). Since Batch 4 the target set is open, so any
     // non-blank key names a real target — a stored `pkg:` entry is a user-added app, not an unknown.
@@ -136,7 +138,7 @@ object EngineCodec {
         val targets = settings.targets.entries.mapNotNull { (target, s) ->
             if (!Target.isEncodableKey(target.key)) return@mapNotNull null
             "${target.key},${if (s.enabled) 1 else 0},${s.weekdayMinutes},${s.weekendMinutes}," +
-                "${s.exceptionMaxMinutes},${encodeSchedule(s.schedule)}"
+                "${s.exceptionMaxMinutes},${encodeSchedule(s.schedule)},${if (s.scheduleOnly) 1 else 0}"
         }
         return (listOf(head) + targets).joinToString("|")
     }
@@ -150,20 +152,28 @@ object EngineCodec {
         val targets = mutableMapOf<Target, TargetSettings>()
         for (i in 3 until parts.size) {
             val f = parts[i].split(',')
-            if (f.size != 5 && f.size != 6) return null
+            if (f.size !in 5..7) return null
             val target = targetForKey(f[0]) ?: continue           // unknown key: skip, don't fail
             val enabled = when (f[1]) { "1" -> true; "0" -> false; else -> return null }
             val wd = f[2].toIntOrNull() ?: return null
             val we = f[3].toIntOrNull() ?: return null
             val max = f[4].toIntOrNull() ?: return null
-            val schedule = if (f.size == 6) {
+            val schedule = if (f.size >= 6) {
                 val res = decodeScheduleField(f[5])
                 if (res.isFailure) return null
                 res.getOrNull()
             } else {
                 null
             }
-            targets[target] = TargetSettings(enabled, wd, we, max, schedule)
+            // Absent (a pre-v5 string) = false = a budgeted target, which is what every entry
+            // written before this field existed was. Fails toward *more* limiting: a schedule-only
+            // entry misread as budgeted would keep its schedule and gain caps of 0 — blocked, not open.
+            val scheduleOnly = when (f.getOrNull(6)) {
+                null, "0" -> false
+                "1" -> true
+                else -> return null
+            }
+            targets[target] = TargetSettings(enabled, wd, we, max, schedule, scheduleOnly)
         }
         return DurableSettings(version, targets, window)
     }

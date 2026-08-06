@@ -285,7 +285,10 @@ private fun TodayTableRow(row: TodayRow, now: LocalDateTime) {
             // push its number down out of line with the rows above it.
             UsedCapCell(
                 used = formatHms(row.usedSeconds),
-                cap = formatHms(row.capSeconds),
+                // An en dash, not "0:00:00", when there is no cap to spend against. A schedule-only
+                // row is limited by the clock, and a zero in the cap column reads as "nothing left"
+                // — the opposite of true for an app that is wide open inside its hours.
+                cap = if (row.capSeconds <= 0L && row.state != TargetState.OFF) "–" else formatHms(row.capSeconds),
                 width = LampDimens.numberColumn,
                 modifier = Modifier.alignByBaseline(),
             )
@@ -574,6 +577,10 @@ fun todayRows(
         val exception = status.exception
         val state = when {
             status.blockedBySchedule -> TargetState.CLOSED
+            // A schedule-only target has no budget, so it can never be SPENT — and its zero cap
+            // would otherwise satisfy `remainingSeconds <= 0` at every moment of the day, labelling
+            // a wide-open app as used up. Inside its hours it is simply open.
+            status.scheduleOnly -> TargetState.OPEN
             status.remainingSeconds <= 0L || status.access == Access.BLOCK -> TargetState.SPENT
             else -> TargetState.OPEN
         }

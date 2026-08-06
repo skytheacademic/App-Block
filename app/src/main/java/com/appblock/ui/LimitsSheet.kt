@@ -72,27 +72,33 @@ fun LimitsSheet(
             )
         }
 
-        LampStepperRow(
-            label = stringResource(R.string.limits_weekday),
-            display = formatWindow(settings.weekdayMinutes),
-            onMinus = { onWeekday((settings.weekdayMinutes - CAP_STEP).coerceAtLeast(0)) },
-            onPlus = { onWeekday((settings.weekdayMinutes + CAP_STEP).coerceAtMost(MINUTES_PER_DAY)) },
-            modifier = Modifier.padding(top = 16.dp),
-        )
-        LampStepperRow(
-            label = stringResource(R.string.limits_weekend),
-            display = formatWindow(settings.weekendMinutes),
-            onMinus = { onWeekend((settings.weekendMinutes - CAP_STEP).coerceAtLeast(0)) },
-            onPlus = { onWeekend((settings.weekendMinutes + CAP_STEP).coerceAtMost(MINUTES_PER_DAY)) },
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        LampStepperRow(
-            label = stringResource(R.string.limits_ceiling),
-            display = formatWindow(settings.exceptionMaxMinutes),
-            onMinus = { onCeiling((settings.exceptionMaxMinutes - CAP_STEP).coerceAtLeast(0)) },
-            onPlus = { onCeiling((settings.exceptionMaxMinutes + CAP_STEP).coerceAtMost(MINUTES_PER_DAY)) },
-            modifier = Modifier.padding(top = 8.dp),
-        )
+        // A schedule-only target has no caps, so it gets no cap steppers. Rendering them against its
+        // 0-placeholders would put three controls on screen that change a number nothing reads —
+        // and worse, the ceiling stepper would imply an exception can buy time here. It can't: the
+        // schedule gate runs before the budget, so no exception ever reaches a schedule block.
+        if (!settings.scheduleOnly) {
+            LampStepperRow(
+                label = stringResource(R.string.limits_weekday),
+                display = formatWindow(settings.weekdayMinutes),
+                onMinus = { onWeekday((settings.weekdayMinutes - CAP_STEP).coerceAtLeast(0)) },
+                onPlus = { onWeekday((settings.weekdayMinutes + CAP_STEP).coerceAtMost(MINUTES_PER_DAY)) },
+                modifier = Modifier.padding(top = 16.dp),
+            )
+            LampStepperRow(
+                label = stringResource(R.string.limits_weekend),
+                display = formatWindow(settings.weekendMinutes),
+                onMinus = { onWeekend((settings.weekendMinutes - CAP_STEP).coerceAtLeast(0)) },
+                onPlus = { onWeekend((settings.weekendMinutes + CAP_STEP).coerceAtMost(MINUTES_PER_DAY)) },
+                modifier = Modifier.padding(top = 8.dp),
+            )
+            LampStepperRow(
+                label = stringResource(R.string.limits_ceiling),
+                display = formatWindow(settings.exceptionMaxMinutes),
+                onMinus = { onCeiling((settings.exceptionMaxMinutes - CAP_STEP).coerceAtLeast(0)) },
+                onPlus = { onCeiling((settings.exceptionMaxMinutes + CAP_STEP).coerceAtMost(MINUTES_PER_DAY)) },
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
 
         ScheduleEditor(
             schedule = settings.schedule,

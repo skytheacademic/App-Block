@@ -6,8 +6,29 @@ package com.appblock.engine
  */
 object DefaultRules {
 
+    /**
+     * Instagram's closing hours (user's call, 2026-08-06): **shut 06:00–11:00 on weekdays and
+     * 06:00–10:00 at weekends**, open the rest of the day.
+     *
+     * Authored as *allowed* windows because that is what [Schedule] stores, so a closed span becomes
+     * the two open spans either side of it. Windows never wrap midnight by construction
+     * ([TimeWindow]), and 00:00–06:00 / 11:00–24:00 already respect that, so no day needs splitting.
+     *
+     * ⚠️ **This deliberately closes DMs, feed and stories too**, which CONSTRAINTS §1 otherwise keeps
+     * always-free. That exemption is about the *cap* — pricing feed time against the reels budget —
+     * and it still holds: nothing here counts a minute. Closing hours are a different axis, and the
+     * user asked for them app-wide precisely so the morning can't be spent in DMs instead.
+     */
+    val MORNINGS_CLOSED: Schedule = Schedule(
+        java.time.DayOfWeek.entries.associateWith { day ->
+            val reopen = if (day == java.time.DayOfWeek.SATURDAY || day == java.time.DayOfWeek.SUNDAY) 10 * 60 else 11 * 60
+            listOf(TimeWindow(0, 6 * 60), TimeWindow(reopen, TimeWindow.DAY_MINUTES))
+        },
+    )
+
     val rules: List<Rule> = listOf(
         Rule(Target.TIKTOK, RuleMode.DailyBudget(weekdayMinutes = 30, weekendMinutes = 30, exceptionMaxMinutes = 60)),
+        Rule(Target.INSTAGRAM_APP, RuleMode.ScheduleOnly, MORNINGS_CLOSED),
         Rule(Target.INSTAGRAM_REELS_EXPLORE, RuleMode.DailyBudget(weekdayMinutes = 10, weekendMinutes = 10, exceptionMaxMinutes = 30)),
         Rule(Target.X, RuleMode.DailyBudget(weekdayMinutes = 15, weekendMinutes = 20, exceptionMaxMinutes = 40)),
     )

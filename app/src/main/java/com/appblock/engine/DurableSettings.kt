@@ -17,6 +17,16 @@ data class TargetSettings(
     val exceptionMaxMinutes: Int,
     /** Optional time-of-day allow-schedule. Null = allowed any time (budget-only). Composes with the caps. */
     val schedule: Schedule? = null,
+    /**
+     * True when this target carries **only** closing hours — [RuleMode.ScheduleOnly]. The three cap
+     * fields are then meaningless and stored as 0; nothing reads them, and the UI must not offer
+     * steppers for them.
+     *
+     * A boolean rather than a persisted mode name because that is the whole of the variation: every
+     * other target is a [RuleMode.DailyBudget], and [RuleMode.HardBlock] is never persisted (it is
+     * injected from [AppTargets.alwaysBlockedRules], deliberately out of reach of the settings).
+     */
+    val scheduleOnly: Boolean = false,
 )
 
 /**
@@ -42,15 +52,16 @@ data class DurableSettings(
     fun toRules(): List<Rule> =
         targets.entries.mapNotNull { (target, entry) ->
             entry.takeIf { it.enabled }?.let { s ->
-                Rule(
-                    target,
+                val mode = if (s.scheduleOnly) {
+                    RuleMode.ScheduleOnly
+                } else {
                     RuleMode.DailyBudget(
                         weekdayMinutes = s.weekdayMinutes,
                         weekendMinutes = s.weekendMinutes,
                         exceptionMaxMinutes = s.exceptionMaxMinutes,
-                    ),
-                    s.schedule,
-                )
+                    )
+                }
+                Rule(target, mode, s.schedule)
             }
         }
 
@@ -70,8 +81,14 @@ data class DurableSettings(
          * and usage counters live in a different store, so nothing else moves — verified against the
          * phone before bumping, precisely so the re-seed could not silently *loosen* a hand-tightened
          * cap.)
+         * (v5: 2026-08-06 — [Target.INSTAGRAM_APP] added, a schedule-only whole-app target seeded
+         * closed 06:00–11:00 weekdays / 06:00–10:00 weekends. A new built-in cannot arrive without a
+         * re-seed, and this is the cheap moment to take one: the stored config is exactly the v4
+         * defaults, so nothing hand-made is lost. Two fixes ride along, both of which would have made
+         * the re-seed itself *loosen* things: [from] was dropping `rule.schedule`, and a package match
+         * used to shadow the surface target instead of composing with it.)
          */
-        const val RULES_VERSION: Int = 4
+        const val RULES_VERSION: Int = 5
 
         /** Default temporary-exception window (minutes) — a durable pre-set, editable behind the gate. */
         const val DEFAULT_EXCEPTION_WINDOW_MINUTES: Int = 60
@@ -100,13 +117,28 @@ data class DurableSettings(
             disabled: Set<Target> = emptySet(),
         ): DurableSettings {
             val targets = rules.mapNotNull { rule ->
-                (rule.mode as? RuleMode.DailyBudget)?.let { mode ->
-                    rule.target to TargetSettings(
+                // `schedule = rule.schedule` is not cosmetic: this dropped the seed's schedule on the
+                // floor until 2026-08-06, and it never showed because no default rule had one. The
+                // Instagram closing hours are the first, so a re-seed that lost them would have
+                // silently reopened the mornings — a loosening produced by the re-seed path itself.
+                when (val mode = rule.mode) {
+                    is RuleMode.DailyBudget -> rule.target to TargetSettings(
                         enabled = rule.target !in disabled,
                         weekdayMinutes = mode.weekdayMinutes,
                         weekendMinutes = mode.weekendMinutes,
                         exceptionMaxMinutes = mode.exceptionMaxMinutes,
+                        schedule = rule.schedule,
                     )
+                    is RuleMode.ScheduleOnly -> rule.target to TargetSettings(
+                        enabled = rule.target !in disabled,
+                        weekdayMinutes = 0,
+                        weekendMinutes = 0,
+                        exceptionMaxMinutes = 0,
+                        schedule = rule.schedule,
+                        scheduleOnly = true,
+                    )
+                    // Never persisted — see TargetSettings.scheduleOnly.
+                    is RuleMode.HardBlock -> null
                 }
             }.toMap()
             return DurableSettings(version, targets, exceptionWindowMinutes)

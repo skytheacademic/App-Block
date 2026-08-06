@@ -1,6 +1,7 @@
 package com.appblock.engine
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -99,11 +100,26 @@ class UserTargetGateTest {
      * ids read from that app's tree, so Lite has no surface detection and would otherwise be a free
      * reel firehose. Instagram proper must stay unmapped, or feed/DMs/stories stop being free.
      */
-    @Test fun `instagram lite is capped wholesale while instagram proper stays surface-enforced`() {
+    @Test fun `instagram lite is capped wholesale while instagram proper carries only its hours`() {
         assertEquals(
             Target.INSTAGRAM_REELS_EXPLORE,
             AppTargets.targetFor("com.instagram.lite", emptySet()),
         )
-        assertNull(AppTargets.targetFor(InstagramSurface.PACKAGE, emptySet()))
+        // Changed 2026-08-06, and the old assertion (`null`) was right for its time: nothing mapped
+        // Instagram proper, because being in the package said nothing about the *budget*. It still
+        // says nothing about the budget — that arrives from InstagramSurface — but it now says
+        // everything about the *hours*, which are app-wide. So the package resolves, and it resolves
+        // to the schedule-only target rather than to anything that could meter feed or DMs.
+        assertEquals(
+            Target.INSTAGRAM_APP,
+            AppTargets.targetFor(InstagramSurface.PACKAGE, emptySet()),
+        )
+    }
+
+    /** The guarantee the rename above is really protecting: the package can never buy a cap. */
+    @Test fun `the instagram package resolves to a schedule-only rule, never to a budget`() {
+        val rule = DefaultRules.ruleFor(Target.INSTAGRAM_APP)
+        assertEquals(RuleMode.ScheduleOnly, rule?.mode)
+        assertNotNull(rule?.schedule)
     }
 }
