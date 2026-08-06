@@ -257,20 +257,49 @@ class SettingsWatchTest {
     // ---- repair mode: don't guard the app out of its own repair (audit finding C-2) ----
 
     /**
-     * The per-app permission page, one tap in from [appearOnTopList]. Its identity *is* App-Block, so
-     * the title rule is what catches it — and ⚠️ **that the app header reads as a title candidate on
-     * One UI 8 is an assumption, not a captured fact.** If it doesn't, the page below stops being
-     * guarded and revoking "Appear on top" becomes free from the special-access route. That is a
-     * phone check, and the next test is what it would look like if the assumption failed.
+     * The per-app permission page, one tap in from [appearOnTopList]. ✅ **Captured on the S25
+     * 2026-08-06** (`am start -a android.settings.MANAGE_APP_OVERLAY_PERMISSION -d package:com.appblock`,
+     * then a dump to read it) — these four strings are verbatim, including the title.
+     *
+     * ⚠️ **The capture disproved the assumption C-4 left this page resting on.** C-4 expected the app
+     * header to read as a *title* candidate, so that rule 1 would catch it. It does not: the title is
+     * `Appear on top`, exactly the list's, and "App-Block" is a body row on both. The page went
+     * unguarded on hardware for a day — verified by walking it: no bounce, with a live
+     * `Allow permission` toggle. Rule 2 catches it now.
      */
-    private val overlayPerAppPage = titled("Appear on top", "Appear on top", "App-Block", "Allow permission")
+    private val overlayPerAppPage =
+        titled("Appear on top", "Appear on top", "App-Block", "Version 0.1.0", "Allow permission")
 
     @Test fun `bounces the per-app permission page whose identity is us`() {
         assertTrue(bounce(screen = SettingsWatch.Screen(listOf("App-Block"), overlayPerAppPage.texts)))
     }
 
-    @Test fun `but not when nothing on it reads as a title naming us`() {
-        assertFalse(bounce(screen = overlayPerAppPage))
+    /**
+     * The real page, with the real title — the case that was silently open. It must bounce on the
+     * control alone, with no title naming us anywhere.
+     */
+    @Test fun `bounces the per-app permission page on its control when no title names us`() {
+        assertTrue(bounce(screen = overlayPerAppPage))
+        assertFalse(overlayPerAppPage.titles.any { it.contains(label, ignoreCase = true) })
+    }
+
+    /**
+     * And the discriminator has to keep working in the direction C-4 bought: the list shares that
+     * title and also names us, so the *only* thing separating them is the control. `Allow permission`
+     * is absent from all 21 strings the list actually renders.
+     */
+    @Test fun `the list one tap out still does not bounce`() {
+        assertFalse(bounce(screen = appearOnTopList))
+        assertFalse(appearOnTopList.texts.any { it.contains("Allow permission", ignoreCase = true) })
+    }
+
+    /**
+     * The neighbouring per-app page that must NOT be swept in: Permission manager → Camera → App-Block
+     * reads `Allowed` / `Not allowed`, not `Allow permission`. Guarding it would wall off an ordinary
+     * permission screen for no gain.
+     */
+    @Test fun `does not fire on allowed-style permission wording`() {
+        assertFalse(bounce(screen = permissionManagerCamera))
     }
 
     /**

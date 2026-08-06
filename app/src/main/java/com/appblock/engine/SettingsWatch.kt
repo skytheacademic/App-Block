@@ -36,7 +36,9 @@ package com.appblock.engine
  *     offers a control that can only mean one app.
  *
  * A list of every app satisfies neither: its title is a category ("Apps", "Appear on top"), and it
- * offers no per-app control. The Accessibility toggle page satisfies both.
+ * offers no per-app control. The Accessibility toggle page satisfies both. The per-app permission
+ * page satisfies **only rule 2** — measured on hardware 2026-08-06, it shares the list's title and
+ * carries "Allow permission", which is the whole reason rule 2 exists.
  *
  * The sanctioned way past it is the same gate as every other loosening (CONSTRAINTS.md §6): open the
  * durable-change window (stashed key → wait → 15-min window) and the watch stands down — turning the
@@ -121,6 +123,22 @@ object SettingsWatch {
      * Gate F — `Uninstall` and `Force stop` from App info, `App info` from the Accessibility toggle
      * page (which links to it), `Turn off` from the confirmation dialog.
      *
+     * `allow permission` was added 2026-08-06 after the per-app permission page was finally captured
+     * on hardware and **the title theory it was resting on turned out to be false** — see the
+     * [shouldBounce] repair-mode note. The two captures, verbatim:
+     *
+     * ```
+     * per-app: "Appear on top" | "App-Block" | "Version 0.1.0" | "Allow permission" | "This permission…"
+     * list:    "Appear on top" | "This permission…" | "AlwaysOnDisplay" | … | "App-Block" | "13.48 MB" | …
+     * ```
+     *
+     * Same title on both, so rule 1 sees neither. `Allow permission` is on the per-app page and
+     * **absent from all 21 strings of the list**, which is what makes it a discriminator rather than
+     * another word that fires on a list of every app. It generalises the right way, too: every Samsung
+     * per-app special-access page (`Install unknown apps`, `Modify system settings`, …) carries it, and
+     * each of those is a page about one app. `Permission manager → Camera → App-Block` does not — its
+     * controls read `Allow only while using the app` / `Don't allow`, which this needle does not match.
+     *
      * Deliberately a different list from [killControls], which guards a different question. The
      * installer tier asks "is this removal?", so it must exclude installs and stays armed through an
      * open window. This tier asks "is this page about us?", so it includes navigation like `App info`
@@ -137,6 +155,7 @@ object SettingsWatch {
         "clear storage",
         "app info",
         "turn off",
+        "allow permission",
     )
 
     /**
@@ -206,8 +225,16 @@ object SettingsWatch {
      * [repairMode] also stands the Settings tier down only, while the blocker is missing a permission
      * it cannot grant itself. Narrowing the match (C-4) took most of the weight off this: the
      * "Appear on top" *list* is no longer a screen about us, so the route back is open on its own
-     * merits. It stays because the per-app permission page one tap further in still names us in its
-     * header, and being bounced off *that* is the same lockout one step later.
+     * merits. It stays because the per-app permission page one tap further in is still guarded, and
+     * being bounced off *that* is the same lockout one step later.
+     *
+     * ⚠️ **Corrected 2026-08-06, on hardware.** C-4 left that page guarded on an assumption — that its
+     * app header would read as a *title* on One UI 8. It does not. The page was captured over adb and
+     * its title is `Appear on top`, the same as the list's; "App-Block" is a body row on both. So for
+     * one day the page was **not guarded at all** and revoking the overlay permission was free from the
+     * special-access route. It is now caught by rule 2 instead, on the `Allow permission` control (see
+     * [settingsControls]) — which is a stronger anchor than the title would have been, because it is a
+     * control that cannot appear on a list.
      *
      * The trade is real and deliberate: while either of those two stands, turning the service off in
      * Settings is unguarded. It's the right side to fail on — the app can still not be *removed*, the

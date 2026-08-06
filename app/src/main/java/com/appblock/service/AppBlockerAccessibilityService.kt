@@ -46,6 +46,7 @@ import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
+import com.appblock.security.LockStore
 // The shared formatters, so the block screen's clock readings and durations are rendered by the same
 // rules as the Today hero and the limits table. See com.appblock.ui.Format's own doc — the fact row
 // is one of the three call sites it exists for.
@@ -299,7 +300,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastBounceToastElapsedMs > BOUNCE_TOAST_THROTTLE_MS) {
             lastBounceToastElapsedMs = now
-            Toast.makeText(this, getString(R.string.self_defense_bounce), Toast.LENGTH_SHORT).show()
+            // Which price this bounce actually carries. Read at toast time rather than cached: the
+            // key can be created while the service is alive, and the throttle makes this at most one
+            // prefs read per 3 s.
+            val message =
+                if (LockStore(this).isConfigured()) R.string.self_defense_bounce
+                else R.string.self_defense_bounce_nokey
+            Toast.makeText(this, getString(message), Toast.LENGTH_SHORT).show()
         }
         return true
     }
