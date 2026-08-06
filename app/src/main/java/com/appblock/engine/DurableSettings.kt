@@ -60,8 +60,18 @@ data class DurableSettings(
          * next launch — the "change durable rules from the computer" path (CONSTRAINTS.md §6).
          * (v2: target entries gained an optional schedule.)
          * (v3: TikTok seeds disabled — see [DefaultRules.seededOff]. 2026-08-05, user's call.)
+         * (v4: no defaults change — a re-seed *is* the change. 2026-08-06: a throwaway 18:00–20:00
+         * schedule was put on JBL Portable to make the block screen render its [BlockFacts] rows for
+         * the first time on hardware. It did, correctly. Removing that target is a **loosening**, and
+         * with no key stored `LockStore.verify()` is false ⇒ no change window can ever open ⇒ the
+         * phone cannot undo it at any price. This bump is the documented computer path (§6): the
+         * store re-seeds from [DefaultRules], which has never contained JBL, so the target and its
+         * schedule are gone on next launch. Every other rule is byte-identical to what was stored,
+         * and usage counters live in a different store, so nothing else moves — verified against the
+         * phone before bumping, precisely so the re-seed could not silently *loosen* a hand-tightened
+         * cap.)
          */
-        const val RULES_VERSION: Int = 3
+        const val RULES_VERSION: Int = 4
 
         /** Default temporary-exception window (minutes) — a durable pre-set, editable behind the gate. */
         const val DEFAULT_EXCEPTION_WINDOW_MINUTES: Int = 60
