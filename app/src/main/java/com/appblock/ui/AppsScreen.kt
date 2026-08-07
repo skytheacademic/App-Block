@@ -174,7 +174,10 @@ private fun TargetCard(
             )
             UsedCapCell(
                 used = formatHms(status?.usedSeconds ?: 0L),
-                cap = formatHms((status?.effectiveCapMinutes ?: 0) * 60L),
+                // An en dash where there is no cap, matching the Today table. "0:00 / 0:00" on a
+                // schedule-only card reads as a budget of nothing left, which is the opposite of
+                // what it means.
+                cap = if (status?.scheduleOnly == true) "–" else formatHms((status?.effectiveCapMinutes ?: 0) * 60L),
                 width = LampDimens.cardNumberColumn,
                 style = LampType.numberSmall,
                 modifier = Modifier.alignByBaseline(),
@@ -241,6 +244,11 @@ private fun cardNote(status: TargetStatus?, windowMinutes: Int): String? {
     }
     return when {
         status.blockedBySchedule -> stringResource(R.string.apps_note_closed)
+        // Before the remaining-seconds test, not after: a schedule-only target has a zero cap, so
+        // `remaining <= 0` holds at every instant and the card claimed "Spent — reopens 04:00" while
+        // the app was wide open. Seen on hardware 2026-08-06. There is no budget here to spend, and
+        // when the hours *do* shut it, the branch above says so with the truthful reopen time.
+        status.scheduleOnly -> null
         status.remainingSeconds <= 0L -> stringResource(R.string.apps_note_spent, formatResetHour())
         else -> null
     }
