@@ -377,10 +377,8 @@ fun AppRoot(
             // the real one — and offering Shizuku would be worse than that: adding it reads as a
             // tightening while actually handing a permanently blocked package an editable rule that a
             // 2-hour window could then switch off.
-            excludedPackages = AppTargets.packages.keys +
-                AppTargets.alwaysBlocked.keys +
-                rules.draft.targets.keys.mapNotNull { it.userPackage } +
-                InstagramSurface.PACKAGE,
+            excludedPackages = AppTargets.unofferablePackages +
+                rules.draft.targets.keys.mapNotNull { it.userPackage },
             onPick = { app ->
                 rules.add(Target.forPackage(app.packageName), NEW_APP_DEFAULTS)
                 pickingApp = false

@@ -27,6 +27,10 @@ import com.appblock.engine.Target
 @Composable
 fun labelFor(target: Target): String = when (target) {
     Target.TIKTOK -> "TikTok"
+    // Named for its scope, because it sits directly above the Reels row and the two limits are
+    // genuinely different animals: this one closes the whole app by the clock, that one meters a
+    // surface. A bare "Instagram" on both would read as one rule listed twice.
+    Target.INSTAGRAM_APP -> "Instagram (whole app)"
     Target.INSTAGRAM_REELS_EXPLORE -> "Instagram Reels & Explore"
     Target.X -> "X (Twitter)"
     else -> {
@@ -44,6 +48,9 @@ fun labelFor(target: Target): String = when (target) {
 @Composable
 fun shortLabelFor(target: Target): String = when (target) {
     Target.TIKTOK -> "TikTok"
+    // "Instagram hours", not "Instagram": the Today table lists both rows, and two cells reading
+    // "Instagram" would be indistinguishable in the one place they appear side by side.
+    Target.INSTAGRAM_APP -> "Instagram hours"
     Target.INSTAGRAM_REELS_EXPLORE -> "Instagram"
     Target.X -> "X"
     else -> labelFor(target)
@@ -60,6 +67,9 @@ fun iconFor(target: Target): Painter {
 
 private fun builtInIcon(target: Target): Int = when (target) {
     Target.TIKTOK -> R.drawable.ic_ph_music_notes
+    // A clock, not a film strip: this row is closing hours, and the glyph is the fastest way to see
+    // at a glance which of the two Instagram rows is which.
+    Target.INSTAGRAM_APP -> R.drawable.ic_ph_clock
     Target.INSTAGRAM_REELS_EXPLORE -> R.drawable.ic_ph_film_strip
     Target.X -> R.drawable.ic_ph_chat_circle
     else -> R.drawable.ic_ph_squares_four
@@ -84,6 +94,7 @@ private const val ICON_PX = 128
  * without this the card reads as though the whole app is capped (CONSTRAINTS.md §1).
  */
 fun scopeNoteRes(target: Target): Int? = when (target) {
+    Target.INSTAGRAM_APP -> R.string.scope_note_instagram_app
     Target.INSTAGRAM_REELS_EXPLORE -> R.string.scope_note_instagram
     else -> null
 }

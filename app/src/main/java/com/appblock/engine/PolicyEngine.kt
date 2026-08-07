@@ -32,6 +32,10 @@ object PolicyEngine {
     ): Access =
         when (val mode = rule.mode) {
             is RuleMode.HardBlock -> Access.BLOCK
+            // Its only gate is the schedule, which every caller applies before reaching here
+            // (see BudgetCoordinator.decideCurrent / snapshot). Inside the allowed hours it is
+            // unrestricted, so there is nothing left for this function to decide.
+            is RuleMode.ScheduleOnly -> Access.ALLOW
             is RuleMode.DailyBudget -> {
                 val dayType = DayBoundary.dayType(logicalDay)
                 val extra = ExceptionManager.activeExtraMinutes(exception, rule.target)

@@ -29,9 +29,13 @@ object AppTargets {
         "com.twitter.android" to Target.X,
         "com.x.android" to Target.X,
         "com.twitter.android.lite" to Target.X,
-        // Instagram proper (com.instagram.android) is NOT mapped — it's enforced by surface
-        // detection, because being in the package says nothing (feed / DMs / stories are free per
-        // CONSTRAINTS §1).
+        // Instagram proper maps to the *schedule-only* whole-app target, and to nothing else. Being
+        // in this package still says nothing about the budget — feed / DMs / stories remain free of
+        // the reels cap per CONSTRAINTS §1 — but it does say everything about the closing hours,
+        // which are app-wide by intent (user's call 2026-08-06: mornings are protected, DMs
+        // included). The reels budget continues to arrive from surface detection, and both targets
+        // apply at once; see targetsFor.
+        "com.instagram.android" to Target.INSTAGRAM_APP,
         //
         // Instagram *Lite* is mapped, and deliberately as a whole-app target: InstagramSurface keys
         // on com.instagram.android and on resource ids read from that app's tree, so Lite gets no
@@ -88,6 +92,41 @@ object AppTargets {
         packages[packageName]
             ?: alwaysBlocked[packageName]
             ?: Target.forPackage(packageName).takeIf { it in activeTargets }
+
+    /**
+     * Every target this package answers to, strictest-wins (the caller blocks if *any* of them does).
+     *
+     * **Why a list.** One package can carry more than one limit, and Instagram is the case that forced
+     * it: `com.instagram.android` has both an app-wide schedule ([Target.INSTAGRAM_APP]) and a
+     * surface-scoped budget ([Target.INSTAGRAM_REELS_EXPLORE], contributed separately by
+     * [InstagramSurface] since no package can imply it). While this returned a single target, the
+     * package match won unconditionally and **the surface target became dead code** — still listed on
+     * the Apps tab, never firing. That turned adding an app, a *tightening* gesture, into a net
+     * loosening of the reels cap, which is the one direction this project forbids.
+     *
+     * Built-ins still win over a picker-added whole-app target for the same package (a curated target
+     * keeps its special handling rather than degrading), and a user-added package contributes at most
+     * itself.
+     */
+    fun targetsFor(packageName: String, activeTargets: Set<Target>): List<Target> =
+        listOfNotNull(targetFor(packageName, activeTargets))
+
+    /**
+     * Packages the picker must never offer, because something already enforces them.
+     *
+     * Keyed on *being enforced*, which is the property that actually matters, rather than on
+     * membership in [packages] — those two came apart for exactly one package and it was the
+     * expensive one. Instagram is enforced by surface detection, so it was never in [packages], so
+     * the "don't let the picker shadow a built-in" rule did not cover it, and adding Instagram from
+     * the picker would have created a whole-app target that shadowed the reels budget. That was
+     * patched by naming `InstagramSurface.PACKAGE` in the caller — correct, but a special case that
+     * only holds while someone remembers it. Deriving the set here means the next surface-enforced
+     * target is covered on the day it is written.
+     *
+     * User-added packages are not included: the caller adds those from the live draft, which this
+     * object cannot see.
+     */
+    val unofferablePackages: Set<String> = packages.keys + alwaysBlocked.keys + InstagramSurface.PACKAGE
 
     /** True when [target] is actually being enforced today — package match, surface, or user-added. */
     fun isEnforced(target: Target): Boolean =

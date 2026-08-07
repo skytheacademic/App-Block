@@ -96,14 +96,46 @@ class BudgetCoordinatorTest {
         assertEquals(20, s.effectiveCapMinutes) // 15 weekday, 20 weekend
     }
 
-    @Test fun `instagram package alone is free - only the surface target is budgeted`() {
+    @Test fun `instagram package alone spends nothing - the whole-app rule has no budget`() {
         val clock = FakeClock()
         val c = coordinator(clock)
-        // Being in the Instagram package (feed / DMs / stories) is a no-op: it isn't package-mapped, so
-        // it counts as untargeted and free. Only the surface-resolved reel target is enforced.
+        // Being in the Instagram package (feed / DMs / stories) now resolves to the whole-app target,
+        // but that target is ScheduleOnly: inside its hours it neither blocks nor bills. The claim
+        // this test defends is unchanged from when it read `assertNull` — **feed and DM time must
+        // never cost reel minutes** — so it is asserted directly rather than via "nothing resolved".
+        // 14:00, deliberately: FakeClock's default 10:00 now sits *inside* Instagram's closed
+        // 06:00–11:00 span, so the default would have this test proving the schedule works rather
+        // than the thing it is here for.
+        clock.local = LocalDateTime.of(2026, 7, 24, 14, 0)
         c.onForeground("com.instagram.android")
-        assertNull(c.tick().target)
+        clock.advance(20 * minute)
+        assertEquals(Access.ALLOW, c.tick().access)
+        assertEquals(0L, c.snapshot().first { it.target == Target.INSTAGRAM_REELS_EXPLORE }.usedSeconds)
         assertTrue(c.snapshot().any { it.target == Target.INSTAGRAM_REELS_EXPLORE })
+    }
+
+    @Test fun `instagram hours block the whole app, and reels keep their own budget beside it`() {
+        val clock = FakeClock()
+        val c = coordinator(clock)
+        // 07:00 on a Monday — inside the closed 06:00–11:00 span.
+        clock.local = LocalDateTime.of(2026, 8, 10, 7, 0)
+        c.onForegroundTargets(listOf(Target.INSTAGRAM_APP, Target.INSTAGRAM_REELS_EXPLORE))
+        val closed = c.tick()
+        assertEquals(Access.BLOCK, closed.access)
+        // Attributed to the schedule, not the budget: it is the block the user cannot pay off, and
+        // the block screen quotes whichever target it is handed.
+        assertEquals(BlockReason.SCHEDULE, closed.reason)
+        assertEquals(Target.INSTAGRAM_APP, closed.target)
+
+        // 14:00 — open again, and the reels cap is doing its own job, undisturbed.
+        clock.local = LocalDateTime.of(2026, 8, 10, 14, 0)
+        c.onForegroundTargets(listOf(Target.INSTAGRAM_APP, Target.INSTAGRAM_REELS_EXPLORE))
+        assertEquals(Access.ALLOW, c.tick().access)
+        clock.advance(11 * minute)                       // past the 10-min reels pool
+        val spent = c.tick()
+        assertEquals(Access.BLOCK, spent.access)
+        assertEquals(BlockReason.BUDGET, spent.reason)
+        assertEquals(Target.INSTAGRAM_REELS_EXPLORE, spent.target)
     }
 
     @Test fun `instagram reels surface accrues and blocks at its cap`() {

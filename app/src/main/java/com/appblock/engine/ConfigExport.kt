@@ -74,10 +74,18 @@ object ConfigExport {
     private fun StringBuilder.appendTarget(entry: TargetSettings) {
         val summary = TargetSummaries.of(entry)
 
-        val limits = summary.limits.joinToString(" · ") {
-            "${duration(it.minutes)} ${DayLabels.of(it.days)}"
+        // A schedule-only target has no caps and no exception ceiling. Printing the empty joins would
+        // emit "Limit:" and "Exception ceiling: 0 min" — and this file's whole job is to be the thing
+        // the config is rebuilt from by hand, so a line that reads as a 0-minute cap is worse than no
+        // line at all. Say what it is instead.
+        if (entry.scheduleOnly) {
+            appendLine("  Limit: none — closing hours only, no daily cap")
+        } else {
+            val limits = summary.limits.joinToString(" · ") {
+                "${duration(it.minutes)} ${DayLabels.of(it.days)}"
+            }
+            appendLine("  Limit: $limits")
         }
-        appendLine("  Limit: $limits")
 
         summary.availability.forEach { availability ->
             when (availability) {
@@ -90,7 +98,11 @@ object ConfigExport {
             }
         }
 
-        appendLine("  Exception ceiling: ${duration(summary.exceptionCeilingMinutes)}")
+        // No ceiling line for a schedule-only target: no exception can lift a schedule, so quoting
+        // one would record a price that does not exist.
+        if (!entry.scheduleOnly) {
+            appendLine("  Exception ceiling: ${duration(summary.exceptionCeilingMinutes)}")
+        }
     }
 
     /** 24-hour, matching the settings screen. An end at or before the start crosses midnight. */

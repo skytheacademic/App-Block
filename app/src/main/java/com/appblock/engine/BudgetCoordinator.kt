@@ -26,6 +26,12 @@ data class TargetStatus(
     val exceptionEndsInMs: Long?,
     /** True when the block is because the current time is outside this target's allowed schedule. */
     val blockedBySchedule: Boolean = false,
+    /**
+     * True for a [RuleMode.ScheduleOnly] target: closing hours and nothing else. Every cap and usage
+     * field above is 0 and means nothing — the UI must render hours, not minutes-remaining, and must
+     * not offer an exception (no exception can lift a schedule).
+     */
+    val scheduleOnly: Boolean = false,
 )
 
 /**
@@ -58,7 +64,19 @@ class BudgetCoordinator(
     /** Wait before an exception activates — injected so `debugFast` can shrink it (ActiveRules). */
     private val exceptionWaitMs: Long = ExceptionManager.WAIT_MS,
 ) {
+    /** The target time accrues to — at most one, and never a [RuleMode.ScheduleOnly] one. */
     private var currentTarget: Target? = null
+
+    /**
+     * Every target the foreground answers to. Usually 0 or 1; two when Instagram is on screen (its
+     * app-wide closing hours plus, on a reel, the surface budget). **Strictest wins** — see
+     * [decideCurrent].
+     *
+     * Kept apart from [currentTarget] because the two questions genuinely differ: *what am I
+     * spending?* has one answer, *what could stop me?* has several. Conflating them is what let a
+     * package match shadow the surface target and silently retire the reels budget.
+     */
+    private var gateTargets: List<Target> = emptyList()
     private var lastAccrualElapsedMs: Long = clock.elapsedRealtimeMs()
 
     /** Sub-second accrual remainders per target, so switching apps never truncates time away. */
@@ -85,7 +103,23 @@ class BudgetCoordinator(
      * budgeted or free depending on the on-screen surface ([InstagramSurface]).
      */
     @Synchronized
-    fun onForegroundTarget(target: Target?) {
+    fun onForegroundTarget(target: Target?) = onForegroundTargets(listOfNotNull(target))
+
+    /**
+     * Switch to the full set of targets the foreground answers to (empty = nothing limited on screen).
+     *
+     * Which one *accrues* is decided here rather than by the caller, from the rules themselves: a
+     * [RuleMode.ScheduleOnly] target has no budget to spend, so it never accrues, and the remaining
+     * candidate (if any) takes the time. That keeps the accessibility layer free of policy — it
+     * reports what is on screen and the engine decides what that costs.
+     */
+    @Synchronized
+    fun onForegroundTargets(targets: List<Target>) {
+        gateTargets = targets
+        val rules = ruleSource.rules()
+        val target = targets.firstOrNull { t ->
+            rules.firstOrNull { it.target == t }?.mode !is RuleMode.ScheduleOnly
+        }
         if (store.loadTamper() != null) {
             lastAccrualElapsedMs = clock.elapsedRealtimeMs()  // latched: consume the gap, count nothing
         } else {
@@ -106,7 +140,9 @@ class BudgetCoordinator(
             // Latched: freeze accrual (the block screen is up; behind it isn't real usage) and block
             // every budgeted target until the wall clock is trustworthy again.
             lastAccrualElapsedMs = clock.elapsedRealtimeMs()
-            val t = currentTarget ?: return Decision(null, Access.ALLOW)
+            // A schedule-only target must latch too, and it has no accrual target to be found under:
+            // its gate is the wall clock, which is exactly what the latch says can't be trusted.
+            val t = currentTarget ?: gateTargets.firstOrNull() ?: return Decision(null, Access.ALLOW)
             blockedTarget = t
             return Decision(t, Access.BLOCK, BlockReason.TAMPER)
         }
@@ -161,6 +197,24 @@ class BudgetCoordinator(
             when (val mode = rule.mode) {
                 is RuleMode.HardBlock ->
                     TargetStatus(rule.target, 0, 0, 0, used, 0, Access.BLOCK, exc, null, null)
+
+                is RuleMode.ScheduleOnly -> TargetStatus(
+                    target = rule.target,
+                    normalCapMinutes = 0,
+                    effectiveCapMinutes = 0,
+                    exceptionMaxMinutes = 0,
+                    // Reported as 0 rather than from the store: this target never accrues, so any
+                    // stored figure would be a leftover from before it became schedule-only, and
+                    // showing it would imply a budget that isn't there.
+                    usedSeconds = 0,
+                    remainingSeconds = 0,
+                    access = if (latched || scheduleBlocks) Access.BLOCK else Access.ALLOW,
+                    exception = exc,
+                    exceptionActivatesInMs = null,
+                    exceptionEndsInMs = null,
+                    blockedBySchedule = scheduleBlocks,
+                    scheduleOnly = true,
+                )
 
                 is RuleMode.DailyBudget -> {
                     val extra = ExceptionManager.activeExtraMinutes(exc, rule.target)
@@ -244,6 +298,10 @@ class BudgetCoordinator(
                 val burnSeconds = when (val mode = rule.mode) {
                     is RuleMode.DailyBudget -> mode.exceptionMaxMinutes * 60L
                     is RuleMode.HardBlock -> 24L * 3600L
+                    // No budget to burn — its gate is the clock, not a counter, and the schedule
+                    // still holds whatever this row says. Burning a day here would write a figure
+                    // nothing reads and the UI reports as 0 anyway.
+                    is RuleMode.ScheduleOnly -> 0L
                 }
                 store.saveUsage(rule.target, BudgetUsage(burnSeconds, today))
                 continue
@@ -330,21 +388,38 @@ class BudgetCoordinator(
         store.saveUsage(t, UsageTracker.accrue(previous, seconds, today))
     }
 
+    /**
+     * The strictest answer across every target the foreground answers to: **any block is a block.**
+     *
+     * Ordering is not cosmetic. A schedule block is reported ahead of a budget block because it is the
+     * one the user cannot pay off — the schedule gate runs before the budget, so no exception reaches
+     * it — and the block screen quotes the reported target's price. Reporting "you're out of reel
+     * minutes" while the whole app is shut until 11:00 would name a smaller obstacle than the real
+     * one, and this project has already shipped that bug once ([BlockFacts]).
+     *
+     * The decision is attributed to the target that actually blocked, so the countdown and the route
+     * come from the rule doing the blocking rather than from whatever happened to be accruing.
+     */
     private fun decideCurrent(rules: List<Rule>): Decision {
-        val t = currentTarget ?: return Decision(null, Access.ALLOW)
-        val rule = rules.firstOrNull { it.target == t } ?: return Decision(t, Access.ALLOW)
+        val gates = gateTargets.ifEmpty { listOfNotNull(currentTarget) }
+        if (gates.isEmpty()) return Decision(null, Access.ALLOW)
         val now = clock.nowLocal()
-        // Schedule gate first: outside its allowed hours, the app is blocked regardless of budget.
-        if (!PolicyEngine.scheduleAllows(rule.schedule, now)) {
-            return Decision(t, Access.BLOCK, BlockReason.SCHEDULE)
+        val logicalDay = DayBoundary.logicalDay(now)
+        val fallback = currentTarget ?: gates.first()
+
+        var budgetBlock: Decision? = null
+        for (t in gates) {
+            val rule = rules.firstOrNull { it.target == t } ?: continue
+            if (!PolicyEngine.scheduleAllows(rule.schedule, now)) {
+                return Decision(t, Access.BLOCK, BlockReason.SCHEDULE)
+            }
+            val access = PolicyEngine.decide(rule, store.loadUsage(t), store.loadException(t), logicalDay)
+            if (access == Access.BLOCK && budgetBlock == null) {
+                val reason = if (rule.mode is RuleMode.HardBlock) BlockReason.HARD_BLOCK else BlockReason.BUDGET
+                budgetBlock = Decision(t, Access.BLOCK, reason)
+            }
         }
-        val access = PolicyEngine.decide(rule, store.loadUsage(t), store.loadException(t), DayBoundary.logicalDay(now))
-        val reason = when {
-            access != Access.BLOCK -> null
-            rule.mode is RuleMode.HardBlock -> BlockReason.HARD_BLOCK
-            else -> BlockReason.BUDGET
-        }
-        return Decision(t, access, reason)
+        return budgetBlock ?: Decision(fallback, Access.ALLOW)
     }
 
     private companion object {

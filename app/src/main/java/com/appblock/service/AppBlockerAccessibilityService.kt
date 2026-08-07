@@ -101,7 +101,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var ticking = false
-    private var lastForegroundTarget: Target? = null
+    private var lastForegroundTargets: List<Target> = emptyList()
     /** True while an Instagram window is visible — keeps the tick alive so a reel open is caught even
      *  when the current surface (e.g. the feed) isn't itself budgeted. */
     private var surfaceAppVisible = false
@@ -407,22 +407,34 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val fg = resolveForeground()
         surfaceAppVisible = fg.instagramVisible
         browserVisible = fg.browserVisible
-        if (fg.target != lastForegroundTarget) {
-            lastForegroundTarget = fg.target
-            coordinator.onForegroundTarget(fg.target)
+        if (fg.targets != lastForegroundTargets) {
+            lastForegroundTargets = fg.targets
+            coordinator.onForegroundTargets(fg.targets)
         }
         return fg
     }
 
     private data class Foreground(
-        val target: Target?,
+        /**
+         * Every target on screen, strictest-wins, in precedence order: the package match first, then
+         * any surface-detected one. Usually 0 or 1 — two only for Instagram, which carries app-wide
+         * closing hours *and* a reels budget.
+         */
+        val targets: List<Target>,
         val instagramVisible: Boolean,
         val browserVisible: Boolean = false,
         val webBlock: BrowserPolicy.WebBlock? = null,
         val webHost: String? = null,
         /** Which browser produced [webBlock] — the overlay's exit needs to steer that same browser. */
         val webPkg: String? = null,
-    )
+    ) {
+        /**
+         * "Is anything limited on screen?" — the question every existing caller was really asking of
+         * the old single-target field. Kept as a derived property so those readers stay correct while
+         * the resolution underneath became plural.
+         */
+        val target: Target? get() = targets.firstOrNull()
+    }
 
     /**
      * Scan the visible windows once, resolving three things: the budgeted [Target] (a whole-app TikTok/X
@@ -481,8 +493,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         addressWatch.retain(visibleBrowsers)
         val signals = instagramRoot?.let { collectInstagramSignals(it) }
         if (signals != null && InstagramSurface.REEL_PAGER in signals) noteReelSignal()
-        val target = packageTarget ?: signals?.let { InstagramSurface.targetFor(it) }
-        val read = Foreground(target, instagramRoot != null, browserVisible, webBlock, webHost, browserPkg)
+        // Both, not either. `packageTarget` used to win outright, which made the surface target
+        // unreachable whenever a package also matched — and for Instagram a package now always
+        // matches (its whole-app closing hours), so the reels budget would have gone dark.
+        val surfaceTarget = signals?.let { InstagramSurface.targetFor(it) }
+        val targets = listOfNotNull(packageTarget, surfaceTarget).distinct()
+        val target = targets.firstOrNull()
+        val read = Foreground(targets, instagramRoot != null, browserVisible, webBlock, webHost, browserPkg)
         val effective = holdThroughOcclusion(read)
         diagnose(
             windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target,
@@ -997,6 +1014,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** Built-in names are curated; a user-added app borrows its own launcher label. */
     private fun labelFor(target: Target): String = when (target) {
         Target.TIKTOK -> "TikTok"
+        // Plain "Instagram" on the block screen: the overlay is covering the whole app, so naming a
+        // scope there would be noise. The Apps tab is where the two rows need telling apart.
+        Target.INSTAGRAM_APP -> "Instagram"
         Target.INSTAGRAM_REELS_EXPLORE -> "Instagram Reels & Explore"
         Target.X -> "X"
         else -> target.userPackage?.let { InstalledApps.labelFor(this, it) } ?: target.key
