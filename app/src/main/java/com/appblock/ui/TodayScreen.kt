@@ -617,6 +617,12 @@ fun weekRows(
     var anyHistory = false
     val rows = settings.targets.entries
         .filter { it.value.enabled }
+        // A schedule-only target never accrues, so its row in a "minutes used" chart is seven empty
+        // bars for ever. Caught on hardware 2026-08-06: it rendered as a second row labelled
+        // "Instagram" — the strip's 74 dp label column clips with maxLines=1 and no ellipsis, so
+        // "Instagram hours" arrived looking identical to the reels row above its own empty week.
+        // Ellipsis would only have made the duplicate legible; the row itself is what doesn't belong.
+        .filter { !it.value.scheduleOnly }
         .map { (target, targetSettings) ->
             val archived = historyFor(target).associateBy { it.day }
             if (archived.isNotEmpty()) anyHistory = true
