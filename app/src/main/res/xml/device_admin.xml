@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  No policies are requested, deliberately.
+
+  Being an *active device admin* is the whole point: PackageManager refuses to suspend a package
+  that answers true to isPackageDeviceAdmin(), and that is what One UI's Modes "Restrict app usage"
+  uses to disarm the blocker. The exemption comes from the admin being active, not from any policy
+  it holds — so asking for powers we do not use would only make the activation screen scarier and
+  widen what a compromised build could do.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies />
+</device-admin>

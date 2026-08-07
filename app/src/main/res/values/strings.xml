@@ -1,6 +1,9 @@
 <resources>
     <string name="app_name">App-Block</string>
     <string name="accessibility_label">App-Block detection</string>
+    <string name="device_admin_label">App-Block protection</string>
+    <string name="device_admin_description">Requests no powers over your phone. Being listed here is what stops Android from suspending App-Block, which is how Modes and other apps can otherwise switch the blocking off.</string>
+    <string name="device_admin_disable_warning">Turning this off lets Modes and other apps suspend App-Block, which switches blocking off completely.</string>
     <string name="accessibility_description">Detects which apps are on screen (including split-screen panes) so App-Block can show the block screen when a budgeted app is visible. Reads which app owns each window, the text of system Settings screens so it can guard its own toggle, and — in your chosen web browsers — the address bar, so blocked websites can be caught. It does not read page content or other apps.</string>
     <string name="block_title">Blocked</string>
     <string name="block_message">You chose to block this app. Take a breath and go back.</string>
