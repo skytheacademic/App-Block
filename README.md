@@ -8,7 +8,7 @@ Kotlin + Jetpack Compose · compileSdk/targetSdk 36, minSdk 26 · daily driver i
 - **Detection:** `AccessibilityService` + a `getWindows()` scan catch a budgeted app in *any* visible pane (split-screen / App Pairs). Instagram is split by surface — Reels & Explore are metered via the reel pager's view ids, the app as a whole only carries closing hours. Lite clients count against the same target as the full app. Any installed app can be added from an on-device picker.
 - **Engine (pure Kotlin, JVM-tested):** daily per-app caps (weekday/weekend), 4 am logical-day reset, bounded "exception" raises behind a monotonic wait, per-app time-of-day schedules, schedule-only rules.
 - **Website blocking:** a domain blocklist read from the address bar of allowlisted browsers (Chrome, Brave); every other browser is blocked as an app; WebAPKs are caught by package prefix. A version-keyed "vouch" keeps an unreadable address bar from blocking ordinary browsing, and a drift canary says when a browser update has made it unreadable for a week.
-- **Clock tamper guard:** with automatic date/time or time zone off, any manual change, zone hop or reboot latches a block-everything state until both are back on; date rollbacks can't re-grant a spent day.
+- **Clock tamper guard:** turning automatic date/time or time zone off latches a block-everything state the moment it happens (a ContentObserver, not the next tick), and it clears only once both are back on *and* the clock agrees with where the OS last had it — so toggle-off / change / toggle-on between two passes gains nothing. Within a boot the logical day can't advance faster than uptime, whatever the wall clock says; a date rollback re-keys onto the larger of the two days' counts.
 - **Durable-change lock:** rules are editable but asymmetric — tightening is always free; loosening needs the stashed QR key → a wait (2 h for apps, 72 h for websites) → a 15-minute single-use window that buys exactly **one** change. A target's caps and hours are guarded whether or not its switch is on. Only a salted hash of the key is stored.
 - **Self-defense:** Settings screens *about* App-Block (its Accessibility toggle, App info, the per-app overlay page, the device-admin page, the uninstall dialog, wireless-debugging pairing) bounce to Home unless the change window is open; lists that merely contain the app's name are left alone. The service requests the accessibility button so no accessibility shortcut can toggle it off.
 - **Device admin with zero policies:** being an active admin is what stops One UI Modes suspending the package. Activation is offered in-app; deactivation is bounced and, if it happens anyway, nagged about.
@@ -20,15 +20,17 @@ Still the software-friction tier: safe mode, a factory reset and adb from a comp
 
 ## Build
 - Requirements: JDK 17 + Android SDK (platform 36). Android Studio (Meerkat Feature Drop or newer, for AGP 8.10) optional.
-- CI: every push runs `testDebugUnitTest` and builds the debug APK
-  ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). A green run attaches `app-debug.apk` as a
-  workflow artifact — downloadable and sideloadable straight from the GitHub mobile app, no laptop.
+- CI: every push runs `testDebugUnitTest`, `lintRelease` (errors fail the job; the report is uploaded) and
+  builds both APKs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)); a green run attaches `app-debug.apk`
+  as a workflow artifact — downloadable and sideloadable straight from the GitHub mobile app, no laptop. The
+  release build on CI is unsigned and not uploaded; it exists to prove R8 from a clean clone. Actions are
+  SHA-pinned, with Dependabot (monthly, grouped) keeping the pins current.
 - CLI: `./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk`. The Gradle wrapper is committed (checksum-pinned, with dependency verification metadata), so no separate Gradle install is needed.
   - Create a `local.properties` with `sdk.dir` pointing at your Android SDK (gitignored; per machine).
 - Variants: `debug` (`com.appblock.debug`, debuggable, what CI publishes) · `debugFast` (`com.appblock.fast`, 1-minute caps for QA, non-debuggable) · `release` (`com.appblock`, R8-minified, the daily driver).
 - Release: `./gradlew assembleRelease` signs only if `keystore.properties` + the `.jks` are present at
   the repo root (both gitignored — private keystore, deliberately with no synced copy); without them the release APK builds unsigned.
-- Tests: `./gradlew testDebugUnitTest --rerun` — pass `--rerun`, because an up-to-date run reports success without executing anything. 449 JVM tests (engine + Robolectric screens/workers) at the time of writing.
+- Tests: `./gradlew testDebugUnitTest --rerun` — pass `--rerun`, because an up-to-date run reports success without executing anything. 508 JVM tests (engine + Robolectric screens/stores/workers) at the time of writing.
 
 ## Install (sideload)
 1. Install the APK (`adb install -r`, or Android Studio Run).
