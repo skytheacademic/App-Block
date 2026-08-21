@@ -72,6 +72,33 @@ class DurableCodecTest {
         assertEquals(scheduled, EngineCodec.decodeDurable(EngineCodec.encodeDurable(scheduled)))
     }
 
+    /**
+     * The v5 column. The `schedule` column before it shipped without a round-trip test and was
+     * silently dropped on decode for months; this one gets the test the other one should have had.
+     */
+    @Test fun `the scheduleOnly column round-trips`() {
+        val hours = Schedule(mapOf(java.time.DayOfWeek.MONDAY to listOf(TimeWindow(11 * 60, 22 * 60))))
+        val scheduleOnly = sample.copy(
+            targets = sample.targets + (Target.INSTAGRAM_APP to TargetSettings(
+                enabled = true, weekdayMinutes = 0, weekendMinutes = 0, exceptionMaxMinutes = 0,
+                schedule = hours, scheduleOnly = true,
+            )),
+        )
+        val decoded = EngineCodec.decodeDurable(EngineCodec.encodeDurable(scheduleOnly))!!
+        assertEquals(scheduleOnly, decoded)
+        assertEquals(true, decoded.targets[Target.INSTAGRAM_APP]!!.scheduleOnly)
+        assertEquals(false, decoded.targets[Target.TIKTOK]!!.scheduleOnly)
+    }
+
+    @Test fun `a 6-field entry from before the column decodes as budgeted`() {
+        val decoded = EngineCodec.decodeDurable("durable1|4|60|tiktok,1,30,30,60,")!!
+        assertEquals(false, decoded.targets[Target.TIKTOK]!!.scheduleOnly)
+    }
+
+    @Test fun `a scheduleOnly value that is neither 0 nor 1 fails the whole record`() {
+        assertNull(EngineCodec.decodeDurable("durable1|5|60|tiktok,1,30,30,60,,yes"))
+    }
+
     @Test fun `a fully-blocked schedule is distinct from null`() {
         val blocked = sample.copy(
             targets = sample.targets + (Target.X to sample.targets[Target.X]!!.copy(schedule = Schedule(emptyMap()))),

@@ -65,11 +65,25 @@ class PrefsRuleStoreTest {
         assertEquals(configured, store().load())
     }
 
-    @Test fun `a version bump re-seeds from source`() {
-        writeRaw(EngineCodec.encodeDurable(configured.copy(version = 99)))
+    @Test fun `a version bump re-seeds the built-ins from source`() {
+        writeRaw(EngineCodec.encodeDurable(seed.copy(version = 99, targets = mapOf(Target.TIKTOK to TargetSettings(true, 90, 90, 120)))))
         assertEquals(seed, store().load())
         // ...and that is authorized, not corruption, so nothing is quarantined.
         assertNull(store().corruptBlob())
+    }
+
+    /**
+     * The seed can never contain a `pkg:` target — those only exist because the user added them on
+     * the phone — so a re-seed has nothing to say about them and used to delete them anyway. Two
+     * config reconstructions before this carried them across by hand.
+     */
+    @Test fun `a version bump keeps the apps added from the picker, with their settings`() {
+        writeRaw(EngineCodec.encodeDurable(configured.copy(version = 99)))
+        val loaded = store().load()
+        assertEquals(seed.version, loaded.version)
+        assertEquals(seed.targets[Target.TIKTOK], loaded.targets[Target.TIKTOK])
+        assertEquals(TargetSettings(true, 15, 15, 30), loaded.targets[reddit])
+        assertTrue("the carried config is what gets persisted", store().load() == loaded)
     }
 
     // ---- corruption (audit finding C-3) ----

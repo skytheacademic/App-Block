@@ -21,7 +21,10 @@ package com.appblock.engine
  *
  * Two honest limits, neither of which the version anchor can cover:
  *  - Meta rolls layouts out server-side, so ids can in principle change with no version bump. The
- *    canary would stay [Health.CONFIRMED] through that.
+ *    canary would stay [Health.CONFIRMED] through that. [assess] takes an optional ceiling on how
+ *    old a confirmation may be before it stops counting; the reel canary deliberately passes none
+ *    (an expiry there would fire at the user who stopped watching reels — the trap above), the
+ *    omnibox canary passes one, because any page load re-confirms it for free.
  *  - The timestamps are wall-clock, so a clock change skews the grace period — forward trips it early
  *    (a spurious prompt, the harmless direction), backward delays it. Not worth hardening: the
  *    tamper guard already latches everything blocked when the clock isn't trusted.
@@ -61,9 +64,20 @@ object SignalCanary {
         val installedSeenAtMs: Long = 0L,
     )
 
-    fun assess(witness: Witness, nowMs: Long, graceMs: Long = DEFAULT_GRACE_MS): Health = when {
+    /**
+     * [maxConfirmedAgeMs]: a confirmation older than this no longer vouches, and the verdict falls
+     * through to the grace arithmetic exactly as if the version had never been confirmed. Default
+     * is no ceiling. Measured from [Witness.confirmedAtMs], which was dead state until this.
+     */
+    fun assess(
+        witness: Witness,
+        nowMs: Long,
+        graceMs: Long = DEFAULT_GRACE_MS,
+        maxConfirmedAgeMs: Long = Long.MAX_VALUE,
+    ): Health = when {
         witness.installedVersion == null -> Health.NO_APP
-        witness.confirmedVersion == witness.installedVersion -> Health.CONFIRMED
+        witness.confirmedVersion == witness.installedVersion &&
+            nowMs - witness.confirmedAtMs < maxConfirmedAgeMs -> Health.CONFIRMED
         nowMs - witness.installedSeenAtMs < graceMs -> Health.PENDING
         else -> Health.STALE
     }
