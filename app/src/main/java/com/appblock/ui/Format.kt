@@ -59,7 +59,8 @@ fun formatClock(time: LocalDateTime): String = "%02d:%02d".format(time.hour, tim
 fun formatClockIn(now: LocalDateTime, ms: Long): String = formatClock(now.plusNanos(ms * 1_000_000L))
 
 /** The logical day, as the header states it: `Wed 29 Jul`. */
-fun formatLogicalDay(day: LocalDate): String = DAY_FORMAT.format(day)
+fun formatLogicalDay(day: LocalDate): String =
+    DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault()).format(day)
 
 /** When today's budgets come back: the 4am reset, as a clock reading. */
 fun formatResetHour(): String = formatHm(DayBoundary.DEFAULT_RESET_HOUR * 60)
@@ -80,4 +81,3 @@ fun formatCoarse(totalSeconds: Long): String {
 
 const val MINUTES_PER_DAY = 24 * 60
 
-private val DAY_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault())

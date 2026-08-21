@@ -1,6 +1,7 @@
 package com.appblock.data
 
 import android.content.Context
+import androidx.core.content.pm.PackageInfoCompat
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.SignalCanary
 
@@ -24,7 +25,8 @@ class SignalWitnessStore(context: Context) {
      */
     fun installedVersion(): Long? = runCatching {
         val info = app.packageManager.getPackageInfo(InstagramSurface.PACKAGE, 0)
-        info.longVersionCode
+        // PackageInfoCompat: `longVersionCode` itself is API 28 and minSdk is 26 (lint NewApi).
+        PackageInfoCompat.getLongVersionCode(info)
     }.getOrNull()
 
     fun load(): SignalCanary.Witness = SignalCanary.Witness(

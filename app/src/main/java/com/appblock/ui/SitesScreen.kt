@@ -318,10 +318,8 @@ private fun browserLabel(packageName: String): String = when (packageName) {
 
 /** `12 Jul` — the same shape as the Today header's date, minus the weekday. */
 private fun formatAddedDate(millis: Long): String =
-    ADDED_FORMAT.format(java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault()))
-
-private val ADDED_FORMAT: java.time.format.DateTimeFormatter =
     java.time.format.DateTimeFormatter.ofPattern("d MMM", java.util.Locale.getDefault())
+        .format(java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneId.systemDefault()))
 
 private val ADDED_COLUMN = 78.dp
 private val REMOVAL_COLUMN = 74.dp
