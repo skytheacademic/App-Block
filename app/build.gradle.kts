@@ -35,8 +35,11 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // 2 / 0.2.0: the 2026-08-21 audit batch (N-1, N-2, N-3, G-1). Bumped so App info on the
+        // phone can tell this build from the 08-06 one — the install is `adb install -r` over the
+        // same signature either way.
+        versionCode = 2
+        versionName = "0.2.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
