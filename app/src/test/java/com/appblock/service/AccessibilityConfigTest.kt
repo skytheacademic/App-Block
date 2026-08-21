@@ -98,6 +98,24 @@ class AccessibilityConfigTest {
         )
     }
 
+    /**
+     * Fourth member, and the one about the off switch rather than the tree (audit 2026-08-21, N-1).
+     * Without `flagRequestAccessibilityButton`, AccessibilityManagerService treats every accessibility
+     * shortcut — volume-key chord, floating button, Quick Settings tile — as a *toggle* for a service
+     * targeting above Q, so one list-page tick in Settings (which the settings-watch rightly never
+     * bounces) turns the chord into a two-second, keyless, repeatable off switch. With the flag the
+     * hardware chord can only turn the service on, and the rest become a no-op button callback.
+     */
+    @Test
+    fun cannotBeToggledOffByAnAccessibilityShortcut() {
+        val flags = configAttrs().getAttributeIntValue(ANDROID_NS, "accessibilityFlags", 0)
+        assertTrue(
+            "flagRequestAccessibilityButton missing: any accessibility shortcut (volume chord, " +
+                "floating button, QS tile) switches the service OFF with no key and no wait",
+            flags and AccessibilityServiceInfo.FLAG_REQUEST_ACCESSIBILITY_BUTTON != 0,
+        )
+    }
+
     private companion object {
         const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
     }

@@ -38,11 +38,28 @@
      older devices and costs nothing there.
      One UI 9 / Android 17 reached stable 2026-07-22 and the S25 FE is in beta, so this is live.
      NOT independently verified: whether the manifest flag alone satisfies AAPM, or Google also
-     consults a server-side list. Every published source names only the attribute. -->
+     consults a server-side list. Every published source names only the attribute.
+
+     flagRequestAccessibilityButton closes the fourth silent door (audit 2026-08-21, N-1), and unlike
+     the three above it is not about what the service *sees* but about who can switch it OFF. In
+     AccessibilityManagerService.performAccessibilityShortcutTargetService (AOSP, read at the line),
+     a service whose targetSdk is above Q and which does NOT request the accessibility button is
+     TOGGLED by every accessibility shortcut: connected -> disableAccessibilityServiceLocked. That
+     covers the volume-key chord, the floating accessibility button, the Quick Settings tile and
+     the key gesture alike. Entry on One UI is Settings > Accessibility > Advanced settings > pick a
+     shortcut > Select actions > tick "App-Block detection" - a list page, which the settings-watch
+     correctly leaves alone - and from then on the chord turns the blocker off in under two seconds
+     with no key, no computer, no reboot, and the same chord turns it back on before the watchdog's
+     15-minute nag. With this flag the same method takes the other branch: the HARDWARE shortcut
+     can only ENABLE a disabled service, and every other shortcut type becomes an
+     onAccessibilityButtonClicked callback, which this service leaves as the no-op default. Added in
+     API 26, so it is live on every supported device. No floating button appears because of this
+     line - the system shows one only if the user enables that shortcut, and then it does nothing.
+     NOT yet verified on the S25 itself (no cable that day); the AOSP mechanism is the evidence. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds|flagRequestAccessibilityButton"
     android:canRetrieveWindowContent="true"
     android:isAccessibilityTool="true"
     android:notificationTimeout="100"
