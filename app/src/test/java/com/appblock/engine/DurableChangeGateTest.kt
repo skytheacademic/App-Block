@@ -40,11 +40,111 @@ class DurableChangeGateTest {
         assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(settings(enabled = false), settings(enabled = true)))
     }
 
-    @Test fun `caps changing while a target stays off has no enforcement effect`() {
+    // ---- G-1 (audit 2026-08-21): a target's numbers are guarded whatever its switch is doing ----
+
+    /**
+     * The test this replaces asserted the opposite — `caps changing while a target stays off has no
+     * enforcement effect` — and was right about enforcement and wrong about the lock. A dormant
+     * target's caps are what it will run at when its free turn-on lands, so editing them is editing
+     * the rules, in whichever direction.
+     */
+    @Test fun `raising a cap on a switched-off target is still a loosening`() {
         assertEquals(
-            ChangeDirection.NEUTRAL,
+            ChangeDirection.LOOSEN,
             DurableChangeGate.classify(settings(enabled = false, wd = 5), settings(enabled = false, wd = 500)),
         )
+        assertTrue(
+            DurableChangeGate.applyChange(
+                settings(enabled = false, wd = 5),
+                settings(enabled = false, wd = 500),
+                unlocked = false,
+            ) is ChangeResult.Blocked,
+        )
+    }
+
+    @Test fun `lowering a cap on a switched-off target is free, like every tightening`() {
+        assertEquals(
+            ChangeDirection.TIGHTEN,
+            DurableChangeGate.classify(settings(enabled = false, wd = 500), settings(enabled = false, wd = 5)),
+        )
+    }
+
+    /**
+     * The keyless route the finding describes, leg by leg, against the state each leg would have
+     * persisted. TikTok seeds off; before this, leg 1 was "no enforcement effect" and leg 2 was a
+     * bare tightening, so a 30-minute seed became a 24-hour cap without a window ever opening.
+     */
+    @Test fun `edit-while-off then turn-on is not a free route to a higher cap`() {
+        val seeded = settings(enabled = false, wd = 30, we = 30)
+        val inflated = settings(enabled = false, wd = 1440, we = 30)
+        val leg1 = DurableChangeGate.applyChange(seeded, inflated, unlocked = false)
+        assertTrue("the dormant edit must be gated", leg1 is ChangeResult.Blocked)
+
+        // And had it somehow landed, the turn-on alone is still free — the numbers were the change.
+        val armed = settings(enabled = true, wd = 1440, we = 30)
+        assertTrue(DurableChangeGate.applyChange(inflated, armed, unlocked = false) is ChangeResult.Applied)
+    }
+
+    /** Turning on and raising the caps in one save: the turn-on is free, the raise is not. */
+    @Test fun `a cap raised in the same save as a turn-on is gated`() {
+        val off = settings(enabled = false, wd = 30)
+        val onAndRaised = settings(enabled = true, wd = 1440)
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(off, onAndRaised))
+        assertTrue(DurableChangeGate.applyChange(off, onAndRaised, unlocked = false) is ChangeResult.Blocked)
+        // The plain turn-on, by contrast, stays the one-tap tightening the seeded-off row relies on.
+        assertTrue(DurableChangeGate.applyChange(off, settings(enabled = true, wd = 30), unlocked = false) is ChangeResult.Applied)
+    }
+
+    /**
+     * The rider: inside an open window, turn a target off *and* raise its caps. Before this the two
+     * collapsed into one "turned off", so a single window bought both, and the raised caps sat
+     * waiting for the free turn-on. Now they are two loosenings, which one window does not cover.
+     */
+    @Test fun `turning off with a raised cap riding along is two loosenings`() {
+        val on = settings(enabled = true, wd = 30)
+        val offAndRaised = settings(enabled = false, wd = 1440)
+        val reasons = DurableChangeGate.looseningReasons(on, offAndRaised)
+        assertEquals(2, reasons.size)
+        assertTrue(DurableChangeGate.applyChange(on, offAndRaised, unlocked = true) is ChangeResult.TooManyLoosenings)
+        // Turning off alone is still exactly one.
+        assertTrue(DurableChangeGate.applyChange(on, settings(enabled = false, wd = 30), unlocked = true) is ChangeResult.Applied)
+    }
+
+    /** A dormant target's schedule is guarded the same way as its caps. */
+    @Test fun `widening a switched-off target's hours is a loosening`() {
+        val narrow = DurableSettings(1, mapOf(Target.TIKTOK to TargetSettings(false, 30, 30, 60, sched(TimeWindow(18 * 60, 20 * 60)))), 60)
+        val wide = DurableSettings(1, mapOf(Target.TIKTOK to TargetSettings(false, 30, 30, 60, sched(TimeWindow(12 * 60, 20 * 60)))), 60)
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(narrow, wide))
+    }
+
+    /**
+     * Membership is still judged on enforcement. Adding an app is free whatever caps it arrives with
+     * — anything is tighter than unblocked, and there is nothing to compare them against — and
+     * removing or adding one that is *off* is neutral: its numbers were no more reachable than an
+     * absent target's, and the turn-on that would make them matter is classified on its own.
+     */
+    @Test fun `membership of a switched-off target is neutral, of a running one is not`() {
+        val none = DurableSettings(1, emptyMap(), 60)
+        val off = settings(enabled = false, wd = 1440)
+        val on = settings(enabled = true, wd = 1440)
+        assertEquals(ChangeDirection.NEUTRAL, DurableChangeGate.classify(none, off))
+        assertEquals(ChangeDirection.NEUTRAL, DurableChangeGate.classify(off, none))
+        assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(none, on))
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(on, none))
+    }
+
+    /**
+     * The mode flip is reported as itself, not as its side effects: schedule-only stores zero caps
+     * that nothing reads, and diffing those across the flip would invent a "weekday cap 30 → 0 min"
+     * tightening beside the real loosening.
+     */
+    @Test fun `dropping to schedule-only is one loosening, not a phantom cap change`() {
+        val budget = DurableSettings(1, mapOf(Target.TIKTOK to TargetSettings(true, 30, 30, 60, sched(TimeWindow.ALL_DAY))), 60)
+        val hoursOnly = DurableSettings(1, mapOf(Target.TIKTOK to TargetSettings(true, 0, 0, 0, sched(TimeWindow.ALL_DAY), scheduleOnly = true)), 60)
+        val changes = DurableChangeGate.changes(budget, hoursOnly)
+        assertEquals(1, changes.size)
+        assertEquals(ChangeDirection.LOOSEN, changes[0].direction)
+        assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(hoursOnly, budget))
     }
 
     @Test fun `a longer exception window is loosening, shorter is tightening`() {

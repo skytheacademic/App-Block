@@ -82,9 +82,30 @@ object DurableChangeGate {
      * nothing, because the two walks disagreed. Deriving both makes "gated but nothing to show"
      * unrepresentable — the warning fires precisely when this list has a LOOSEN entry in it.
      *
-     * Enabled transitions dominate the caps deliberately, matching the original semantics: a target
-     * that is off before and after contributes nothing whatever its numbers say (it is unenforced
-     * either way), off → on is a tightening whatever the caps, and on → off is a loosening.
+     * **A target's numbers are judged whatever its switch is doing** (audit 2026-08-21, G-1). The
+     * original rule let the enabled transition *dominate*: off-before-and-after contributed nothing
+     * "because it is unenforced either way", off → on was a bare tightening, on → off a bare
+     * loosening, and the caps were only compared when the target was on both sides. Each of those
+     * was a door, and together they were a free route around the whole gate, reachable with no key
+     * the day TikTok started seeding *off*:
+     *
+     *  1. **off → off:** set the dormant row's caps to 1440 — "no enforcement effect", saved free;
+     *  2. **off → on:** turn it on — a tightening, saved free. Net: a target the seed capped at 30
+     *     minutes is now enforced at 24 hours, and nothing was ever gated.
+     *  3. **on → off with riders:** inside one open window, turn a target off *and* raise its caps in
+     *     the same save — one loosening, one window, and the raised caps wait for the free turn-on.
+     *
+     * The fix is to stop pretending the switch and the numbers are one field. Every target present
+     * on both sides has its caps, ceiling, schedule and mode diffed regardless of `enabled`, *and* a
+     * flipped switch reports as its own change. A stored number is the number the target will run
+     * at the moment its free turn-on lands, so it must be guarded as if it were running now. Lowering
+     * a dormant cap stays free, as every tightening does.
+     *
+     * Membership is still judged on enforcement: a target *added* is a tightening whatever its caps
+     * (there is nothing to compare them with, and anything is tighter than unblocked), a target
+     * *removed* while on is a loosening, and adding or removing one that is off is neutral — the
+     * numbers of an absent target are no more reachable than a present-but-off one's, and the
+     * turn-on that would make them matter is itself classified.
      */
     fun changes(old: DurableSettings, new: DurableSettings): List<FieldChange> {
         val out = mutableListOf<FieldChange>()
@@ -100,36 +121,52 @@ object DurableChangeGate {
         }
 
         for (target in old.targets.keys + new.targets.keys) {
-            val o = old.targets[target] ?: DISABLED
-            val n = new.targets[target] ?: DISABLED
+            val o = old.targets[target]
+            val n = new.targets[target]
             when {
-                !o.enabled && !n.enabled -> Unit
-                !o.enabled && n.enabled -> out += FieldChange(
-                    target,
-                    if (target in old.targets) "turned on" else "added to the blocked list",
-                    ChangeDirection.TIGHTEN,
-                )
-                !n.enabled -> out += FieldChange(
-                    target,
-                    if (target in new.targets) "turned off" else "removed from the blocked list",
-                    ChangeDirection.LOOSEN,
-                )
+                o == null && n == null -> Unit
+                o == null -> if (n!!.enabled) {
+                    out += FieldChange(target, "added to the blocked list", ChangeDirection.TIGHTEN)
+                }
+                n == null -> if (o.enabled) {
+                    out += FieldChange(target, "removed from the blocked list", ChangeDirection.LOOSEN)
+                }
                 else -> {
-                    cap(out, target, "weekday cap", o.weekdayMinutes, n.weekdayMinutes)
-                    cap(out, target, "weekend cap", o.weekendMinutes, n.weekendMinutes)
-                    cap(out, target, "exception ceiling", o.exceptionMaxMinutes, n.exceptionMaxMinutes)
-                    val sd = scheduleDirection(o.schedule, n.schedule)
-                    if (sd != ChangeDirection.NEUTRAL) {
-                        out += FieldChange(
-                            target,
-                            if (sd == ChangeDirection.LOOSEN) "allowed hours widened" else "allowed hours narrowed",
-                            sd,
-                        )
-                    }
+                    if (!o.enabled && n.enabled) out += FieldChange(target, "turned on", ChangeDirection.TIGHTEN)
+                    if (o.enabled && !n.enabled) out += FieldChange(target, "turned off", ChangeDirection.LOOSEN)
+                    fields(out, target, o, n)
                 }
             }
         }
         return out
+    }
+
+    /** Every field of a target present on both sides, compared without regard to its switch. */
+    private fun fields(out: MutableList<FieldChange>, target: Target, o: TargetSettings, n: TargetSettings) {
+        when {
+            // The mode flip *is* the change on the caps side. Schedule-only stores its three cap
+            // columns as zeros that nothing reads, so diffing them across the flip would report a
+            // phantom "weekday cap 30 → 0 min" — a tightening that isn't one — beside the real
+            // loosening of the caps ceasing to exist.
+            o.scheduleOnly != n.scheduleOnly -> out += FieldChange(
+                target,
+                if (n.scheduleOnly) "daily caps removed (closing hours only)" else "daily caps added",
+                if (n.scheduleOnly) ChangeDirection.LOOSEN else ChangeDirection.TIGHTEN,
+            )
+            !n.scheduleOnly -> {
+                cap(out, target, "weekday cap", o.weekdayMinutes, n.weekdayMinutes)
+                cap(out, target, "weekend cap", o.weekendMinutes, n.weekendMinutes)
+                cap(out, target, "exception ceiling", o.exceptionMaxMinutes, n.exceptionMaxMinutes)
+            }
+        }
+        val sd = scheduleDirection(o.schedule, n.schedule)
+        if (sd != ChangeDirection.NEUTRAL) {
+            out += FieldChange(
+                target,
+                if (sd == ChangeDirection.LOOSEN) "allowed hours widened" else "allowed hours narrowed",
+                sd,
+            )
+        }
     }
 
     private fun cap(out: MutableList<FieldChange>, target: Target, name: String, from: Int, to: Int) {
@@ -147,8 +184,8 @@ object DurableChangeGate {
 
     // targetDirection() lived here and duplicated the per-target case analysis that `changes()` now
     // owns. Keeping both is what let the gate and its explanation disagree, so it is deliberately
-    // gone rather than left as a second opinion. The rules it encoded are preserved verbatim in
-    // `changes()`: both-off is neutral, off→on tightens whatever the caps say, on→off loosens.
+    // gone rather than left as a second opinion. (Its rules — both-off is neutral, off→on tightens
+    // whatever the caps say — were carried into `changes()` verbatim, and turned out to be G-1.)
 
     /**
      * Direction for a schedule change, by allowed time-of-day: any newly-allowed minute is looser
@@ -206,5 +243,4 @@ object DurableChangeGate {
         else -> ChangeDirection.NEUTRAL
     }
 
-    private val DISABLED = TargetSettings(enabled = false, weekdayMinutes = 0, weekendMinutes = 0, exceptionMaxMinutes = 0)
 }

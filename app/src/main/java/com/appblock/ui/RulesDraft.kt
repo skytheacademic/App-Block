@@ -39,8 +39,18 @@ class RulesDraft(private val store: RuleStore) {
 
     val dirty: Boolean get() = draft != saved
 
-    /** Every field-level difference, in the gate's own words — the Lock tab's diff. */
-    val changes: List<FieldChange> get() = DurableChangeGate.changes(saved, draft)
+    /**
+     * Every field-level difference, in the gate's own words — the Lock tab's diff.
+     *
+     * Loosenings first (stable, so the rest keep the gate's order). Two readers depend on it: the
+     * Lock tab lists at most six changes, and the save receipt quotes the *first* one as what the
+     * window was spent on. Since the gate began reporting a flipped switch and its riders separately
+     * (G-1), a draft can carry a free "turned on" beside the loosening that actually gated it, and
+     * the loosening is the line both readers must not lose.
+     */
+    val changes: List<FieldChange>
+        get() = DurableChangeGate.changes(saved, draft)
+            .sortedByDescending { it.direction == ChangeDirection.LOOSEN }
 
     val direction: ChangeDirection get() = DurableChangeGate.classify(saved, draft)
 
