@@ -368,6 +368,69 @@ class SettingsWatchTest {
         assertFalse(bounce(pkg = installer, screen = uninstallDialog, setupIncomplete = true))
     }
 
+    // ---- N-2 (audit 2026-08-21): the device-admin page, the cheapest full bypass on the phone ----
+
+    /**
+     * ⚠️ Written from AOSP's `DeviceAdminAdd` strings, not a capture — the S25 wording is on the phone
+     * checklist. Security and privacy → Other security settings → Device admin apps → App-Block
+     * protection. The title is the framework's, not ours, so rule 1 never saw it; "Deactivate" is
+     * the only control on it, and it was not a control word. Ten taps, no key, and One UI Modes
+     * could suspend the blocker again.
+     */
+    private val deviceAdminDetail = titled(
+        "Device admin app",
+        "Device admin app", "App-Block protection",
+        "Requests no powers over your phone. Being listed here is what stops Android from " +
+            "suspending App-Block, which is how Modes and other apps can otherwise switch the blocking off.",
+        "This admin app is active and allows the app App-Block to perform the following operations:",
+        "Deactivate",
+    )
+
+    /** The list one tap out: one row per admin, each with a switch. Nothing on it deactivates. */
+    private val deviceAdminList = titled(
+        "Device admin apps",
+        "Device admin apps", "App-Block protection", "On", "Find My Mobile", "On",
+        "Google Pay", "Off",
+    )
+
+    /** Our own `onDisableRequested` text, shown by the framework before it deactivates. */
+    private val deactivateDialog = screen(
+        "Deactivate device admin app?",
+        "Turning this off lets Modes and other apps suspend App-Block, which switches blocking off completely.",
+        "Cancel", "Deactivate",
+    )
+
+    @Test fun `bounces the device-admin page on its control, not its title`() {
+        assertTrue(bounce(screen = deviceAdminDetail))
+        assertFalse(deviceAdminDetail.titles.any { it.contains(label, ignoreCase = true) })
+    }
+
+    @Test fun `bounces the deactivation confirmation`() {
+        assertTrue(bounce(screen = deactivateDialog))
+    }
+
+    /** A list of every admin is a list, and lists are what rule 2 exists to leave alone. */
+    @Test fun `the device-admin list one tap out does not bounce`() {
+        assertFalse(bounce(screen = deviceAdminList))
+        assertFalse(deviceAdminList.texts.any { it.contains("deactivate", ignoreCase = true) })
+    }
+
+    /**
+     * Deactivating the admin is a loosening like turning the service off, and it takes the same
+     * sanctioned route: the Settings tier stands down for an open window. The watchdog now reports
+     * the admin as inactive and the Lock tab can re-activate it, so a window spent this way is at
+     * least visible and reversible from the phone.
+     */
+    @Test fun `an open window stands the device-admin guard down like the rest of the settings tier`() {
+        assertFalse(bounce(screen = deviceAdminDetail, windowOpen = true))
+        assertFalse(bounce(screen = deviceAdminDetail, repairMode = true))
+    }
+
+    /** The word needs our label beside it — "deactivate" on a page about something else is nothing. */
+    @Test fun `deactivate alone, without the label, is not a screen about us`() {
+        assertFalse(bounce(screen = titled("SIM manager", "SIM manager", "Deactivate eSIM", "Add eSIM")))
+    }
+
     // ---- B-10: the wireless-debugging screen, which never names us ----
 
     private val wirelessDebugging = titled(

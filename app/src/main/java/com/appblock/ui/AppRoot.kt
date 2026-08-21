@@ -57,9 +57,15 @@ import kotlinx.coroutines.delay
 fun AppRoot(
     accessibilityEnabled: Boolean,
     overlayGranted: Boolean,
+    adminActive: Boolean,
+    batteryExempt: Boolean,
+    notificationsEnabled: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit,
     onOpenDateSettings: () -> Unit,
+    onActivateAdmin: () -> Unit,
+    onRequestExemption: () -> Unit,
+    onAllowNotifications: () -> Unit,
 ) {
     val context = LocalContext.current
     val clock = remember { AndroidEngineClock() }
@@ -285,9 +291,15 @@ fun AppRoot(
                     signalStale = signalHealth == SignalCanary.Health.STALE,
                     omniboxStale = omniboxHealth == SignalCanary.Health.STALE,
                     debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+                    adminActive = adminActive,
+                    batteryExempt = batteryExempt,
+                    notificationsEnabled = notificationsEnabled,
                     onOpenAccessibility = onOpenAccessibility,
                     onOpenOverlay = onOpenOverlay,
                     onOpenDateSettings = onOpenDateSettings,
+                    onActivateAdmin = onActivateAdmin,
+                    onRequestExemption = onRequestExemption,
+                    onAllowNotifications = onAllowNotifications,
                 ),
                 keyConfigured = keyConfigured,
                 onCreateKey = { showKeySetup = true },

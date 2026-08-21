@@ -4,6 +4,11 @@
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets the app open the system's "always run in background?" dialog for itself — the one-tap
+         repair for a battery exemption that was switched off (audit 2026-08-21, N-3). The exemption
+         is the single line of Samsung sleep hardening; without it Deep sleeping apps can stop the
+         blocking service and the watchdog with it. Normal-tier permission, granted at install. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Scanning the stashed key QR at unlock time. Runtime permission — the scan screen asks on
          first use; typing the code stays as the no-camera fallback. -->
     <uses-permission android:name="android.permission.CAMERA" />

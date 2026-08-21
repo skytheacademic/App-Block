@@ -147,6 +147,17 @@ object SettingsWatch {
      *
      * `disable` is *not* here even though it is in [killControls]: One UI's Apps list has a
      * "Disabled apps" filter, and a list of every app is precisely what this rule exists to ignore.
+     *
+     * `deactivate` was added 2026-08-21 (audit N-2) for the **device-admin page** — Security and
+     * privacy → Other security settings → Device admin apps → App-Block protection — whose one button
+     * deactivates the admin that keeps App-Block un-suspendable by One UI Modes. Its title is the
+     * framework's ("Device admin app"), not ours, so rule 1 never saw it, and none of the words above
+     * are on it; it was ten unguarded taps to the cheapest full bypass on the phone. The list one tap
+     * out ("Device admin apps") is rows with switches and carries no such word, so it stays free, as
+     * a list should. ⚠️ Both pages are written from AOSP's `DeviceAdminAdd` / `DeviceAdminSettings`
+     * strings, not a capture — the S25 wording is on the phone checklist. The word is safe even if
+     * Samsung phrases the button differently: rule 2 still needs our label beside it, and nothing
+     * else in Settings says "deactivate" next to "App-Block".
      */
     val settingsControls: List<String> = listOf(
         "uninstall",
@@ -156,6 +167,7 @@ object SettingsWatch {
         "app info",
         "turn off",
         "allow permission",
+        "deactivate",
     )
 
     /**

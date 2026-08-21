@@ -128,6 +128,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** Cached `canDrawOverlays` — see [canDrawOverlay]. */
     private var overlayGranted = true
     private var overlayGrantedAtMs = 0L
+    /** Last Settings-side watchdog check — see [checkHealthWhileInSettings]. */
+    private var lastHealthCheckElapsedMs = 0L
     /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
      *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
     private var lastSignalConfirmElapsedMs: Long? = null
@@ -283,6 +285,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun selfDefense(event: AccessibilityEvent): Boolean {
         val pkg = event.packageName?.toString()
         if (!SettingsWatch.isWatched(pkg)) return false
+        checkHealthWhileInSettings()
         // The stand-downs are passed through rather than short-circuited here, because they no longer
         // agree: an open window stands down the Settings tier but leaves the installer tier armed
         // (B-8). Only setup-incomplete disarms everything. Cost is one text walk while a window is
@@ -309,6 +312,26 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             Toast.makeText(this, getString(message), Toast.LENGTH_SHORT).show()
         }
         return true
+    }
+
+    /**
+     * The watchdog's check, run from here as well as from its 15-minute worker, throttled to once per
+     * [HEALTH_CHECK_THROTTLE_MS] and only while a watched Settings package is on screen.
+     *
+     * Two of the doors the 2026-08-21 audit found — the device-admin entry (N-2) and the battery
+     * exemption (N-3) — are switched off on *list* pages, which the settings-watch rightly never
+     * bounces; detection plus self-repair is the answer for those, not a bounce. The worker alone
+     * would notice up to fifteen minutes later, by which time the user has moved on and the nag reads
+     * as noise. Checked here, the toggle flips and the notification lands while the page is still on
+     * screen, which is the moment it reads as a consequence. Settings is the only place any of these
+     * can change from, so this is also the only place worth paying for the check.
+     */
+    private fun checkHealthWhileInSettings() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastHealthCheckElapsedMs < HEALTH_CHECK_THROTTLE_MS) return
+        lastHealthCheckElapsedMs = now
+        if (!Watchdog.setupCompleted(this)) return
+        Watchdog.report(this, Watchdog.currentHealth(this))
     }
 
     /**
@@ -1057,6 +1080,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** How long `canDrawOverlays` is cached before re-checking — see [canDrawOverlay]. Short,
          *  because it decides when the self-defense stands down to let the user re-grant it. */
         private const val OVERLAY_CHECK_TTL_MS = 5_000L
+        /** Min gap between Settings-side watchdog checks — see [checkHealthWhileInSettings]. Five
+         *  binder reads per interval, only while Settings is up; short enough that a flipped toggle
+         *  is nagged about before the user leaves the page. */
+        private const val HEALTH_CHECK_THROTTLE_MS = 15_000L
         /** Min gap between reel-pager confirmations — see [noteReelSignal]. */
         private const val SIGNAL_CONFIRM_THROTTLE_MS = 60L * 60 * 1_000
         /** Min gap between omnibox confirmations, per browser — see [noteOmniboxRead]. Shorter than the
