@@ -10,6 +10,7 @@ import com.appblock.engine.EngineStore
 import com.appblock.engine.ExceptionState
 import com.appblock.engine.Target
 import com.appblock.engine.UsageTracker
+import java.time.LocalDate
 
 /**
  * SharedPreferences-backed [EngineStore]. The service and the UI both run in this app's single
@@ -70,8 +71,22 @@ class PrefsEngineStore(
             .apply()
     }
 
+    override fun clearExceptions() {
+        val editor = prefs.edit()
+        prefs.all.keys
+            .filter { it.startsWith(EXC_PREFIX) || it.startsWith(EXC_ELAPSED_PREFIX) }
+            .forEach { editor.remove(it) }
+        editor.apply()
+    }
+
     override fun loadClockAnchor(): ClockAnchor? {
         if (!prefs.contains(KEY_ANCHOR_BOOT)) return null
+        // The day model is read as a pair: a day without its end (or an unparseable day) is no model
+        // at all, and the coordinator then starts one from the wall clock — the same rule as the
+        // zone below, for the same reason: a half-invented value would be acted on.
+        val day = prefs.getString(KEY_ANCHOR_DAY, null)
+            ?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+            ?.takeIf { prefs.contains(KEY_ANCHOR_DAY_ENDS) }
         return ClockAnchor(
             wallMs = prefs.getLong(KEY_ANCHOR_WALL, 0L),
             elapsedMs = prefs.getLong(KEY_ANCHOR_ELAPSED, 0L),
@@ -80,6 +95,8 @@ class PrefsEngineStore(
             // a fabricated 0 would look like a whole-offset jump and latch the tamper flag on the
             // first pass after the update for anyone not on UTC.
             zoneOffsetSeconds = if (prefs.contains(KEY_ANCHOR_ZONE)) prefs.getInt(KEY_ANCHOR_ZONE, 0) else null,
+            dayKey = day,
+            dayEndsElapsedMs = if (day != null) prefs.getLong(KEY_ANCHOR_DAY_ENDS, 0L) else null,
         )
     }
 
@@ -91,6 +108,15 @@ class PrefsEngineStore(
             .apply {
                 val zone = anchor.zoneOffsetSeconds
                 if (zone == null) remove(KEY_ANCHOR_ZONE) else putInt(KEY_ANCHOR_ZONE, zone)
+                val day = anchor.dayKey
+                val ends = anchor.dayEndsElapsedMs
+                if (day == null || ends == null) {
+                    remove(KEY_ANCHOR_DAY)
+                    remove(KEY_ANCHOR_DAY_ENDS)
+                } else {
+                    putString(KEY_ANCHOR_DAY, day.toString())
+                    putLong(KEY_ANCHOR_DAY_ENDS, ends)
+                }
             }
             .apply()
     }
@@ -120,8 +146,8 @@ class PrefsEngineStore(
     }
 
     private fun usageKey(target: Target) = "usage_${target.key}"
-    private fun excKey(target: Target) = "exc_${target.key}"
-    private fun excElapsedKey(target: Target) = "exc_elapsed_${target.key}"
+    private fun excKey(target: Target) = "$EXC_PREFIX${target.key}"
+    private fun excElapsedKey(target: Target) = "$EXC_ELAPSED_PREFIX${target.key}"
     private fun historyKey(target: Target) = "history_${target.key}"
 
     companion object {
@@ -130,6 +156,12 @@ class PrefsEngineStore(
         private const val KEY_ANCHOR_ELAPSED = "anchor_elapsed"
         private const val KEY_ANCHOR_BOOT = "anchor_boot"
         private const val KEY_ANCHOR_ZONE = "anchor_zone_offset"
+        private const val KEY_ANCHOR_DAY = "anchor_day"
+        private const val KEY_ANCHOR_DAY_ENDS = "anchor_day_ends_elapsed"
         private const val KEY_TAMPER = "tamper_reason"
+        // `exc_elapsed_` starts with `exc_` too, so the first prefix alone would already catch both
+        // on clear; both are named so a future key can't be caught by accident.
+        private const val EXC_PREFIX = "exc_"
+        private const val EXC_ELAPSED_PREFIX = "exc_elapsed_"
     }
 }

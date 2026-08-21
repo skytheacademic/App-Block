@@ -89,6 +89,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var overlayExitBrowserPkg: String? = null
     private lateinit var clock: AndroidEngineClock
     private lateinit var coordinator: BudgetCoordinator
+
+    /** Latches the tamper guard the moment automatic date/time or time zone is switched off. */
+    private var clockSettingsWatch: ClockSettingsWatch? = null
     private lateinit var ruleSource: RuleSource
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
@@ -166,6 +169,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         blocklistStore = BlocklistStore(this)
         witnessStore = SignalWitnessStore(this)
         omniboxWitnessStore = OmniboxWitnessStore(this)
+        clockSettingsWatch?.stop()
+        clockSettingsWatch = ClockSettingsWatch(this) {
+            runCatching { coordinator.onClockSettingChanged() }
+        }.also { it.start() }
     }
 
     /**
@@ -1053,6 +1060,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // Identity-checked: if a replacement has already connected, this instance is a corpse and must
         // not retract its claim. See ServiceLiveness.
         liveness.destroyed(this)
+        clockSettingsWatch?.stop()
+        clockSettingsWatch = null
         stopTicking()
         hideOverlay()
         super.onDestroy()

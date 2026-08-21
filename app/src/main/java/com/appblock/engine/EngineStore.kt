@@ -1,9 +1,23 @@
 package com.appblock.engine
 
+import java.time.LocalDate
+
 /**
- * Persisted snapshot of both clocks (plus the boot count) at the last engine pass — the tamper
- * guard's baseline. Lives in the store so it survives process restarts: without that, killing the
- * service process between "set the date forward" and "open TikTok" would blind the guard.
+ * The tamper guard's persisted baseline. Lives in the store so it survives process restarts: without
+ * that, killing the service process between "set the date forward" and "open TikTok" would blind
+ * the guard.
+ *
+ * Two things live here, with different update rules (see BudgetCoordinator.guardClocks):
+ *  - **The trusted baseline** — [wallMs], [elapsedMs], [zoneOffsetSeconds]: the clocks as they stood
+ *    at the last pass where the OS owned them *and* nothing was latched. It is frozen while either
+ *    is false, so a change made with automatic time off is still visible after automatic time is
+ *    turned back on: the latch only clears once the clocks agree with this baseline again.
+ *  - **The day model** — [dayKey], [dayEndsElapsedMs]: the logical day the last pass charged and the
+ *    uptime reading at which it ends, so the day can never advance faster than uptime within a boot
+ *    ([DayCorroboration]). Updated on every pass.
+ *
+ * [bootCount] decides whether any of it still applies: a different boot means fresh clocks and a
+ * fresh model from the wall.
  *
  * [zoneOffsetSeconds] is **nullable on purpose**: anchors written before the timezone guard existed
  * carry no offset, and there is no safe value to invent for them. Defaulting to 0 would read as a
@@ -16,6 +30,10 @@ data class ClockAnchor(
     val elapsedMs: Long,
     val bootCount: Int,
     val zoneOffsetSeconds: Int? = null,
+    /** The day model's day — null on anchors written before the model existed (same rule as the zone). */
+    val dayKey: LocalDate? = null,
+    /** Monotonic ms at which [dayKey] ends; null exactly when [dayKey] is. */
+    val dayEndsElapsedMs: Long? = null,
 )
 
 /**
@@ -41,6 +59,14 @@ interface EngineStore {
 
     fun saveException(target: Target, state: ExceptionState)
 
+    /**
+     * Drop every stored exception, whoever it belongs to — the reboot path. Per-target clearing
+     * over the *enabled* rules left an exception on a since-disabled target alive across a reboot
+     * with monotonic anchors from the old boot; the store knows every key it holds, the rule list
+     * doesn't.
+     */
+    fun clearExceptions()
+
     fun loadClockAnchor(): ClockAnchor?
 
     fun saveClockAnchor(anchor: ClockAnchor)
@@ -58,6 +84,11 @@ interface EngineStore {
      * no policy decision ever reads history, so a lost or unreadable entry costs one bar on a chart
      * and nothing else. It must therefore fail quietly — unreadable reads as "no history", never as
      * a reason to block.
+     *
+     * The one exception is the day-regression re-key in BudgetCoordinator.guardClocks, which takes
+     * the archived count for the day the clock fell back onto and keeps the *larger* of it and the
+     * count being re-keyed. That read can only ever raise a count, never lower one, so a missing or
+     * damaged history still fails toward the stricter answer.
      */
     fun loadHistory(target: Target): List<DayUsage>
 
@@ -91,6 +122,10 @@ class InMemoryEngineStore : EngineStore {
 
     override fun saveException(target: Target, state: ExceptionState) {
         exceptions[target] = state
+    }
+
+    override fun clearExceptions() {
+        exceptions.clear()
     }
 
     override fun loadClockAnchor(): ClockAnchor? = anchor

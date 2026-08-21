@@ -43,9 +43,11 @@ data class TargetStatus(
  *
  * Timekeeping split (see Clock.kt): foreground time accrues off the **monotonic** clock so rewinding
  * the phone clock can't erase used minutes, while the day boundary and weekday/weekend read the
- * **wall** clock. The wall clock is only trusted while the OS syncs it ([ClockIntegrity]); with
- * automatic time off, any divergence between the clocks latches the tamper flag and every budgeted
- * target hard-blocks until automatic time is back on ([guardClocks]).
+ * **wall** clock — corroborated by uptime, so the day can't be advanced faster than the monotonic
+ * clock within a boot ([DayCorroboration]). The wall clock is only trusted while the OS syncs it
+ * ([ClockIntegrity]); turning automatic time off, or any divergence between the clocks while it is
+ * off, latches the tamper flag and every budgeted target hard-blocks until automatic time is back
+ * on *and* the clocks agree with the last trusted baseline again ([guardClocks]).
  *
  * Public methods are @Synchronized: today everything runs on the main looper, but nothing should
  * silently lose accrual writes if a caller ever moves off it. (Two coordinator *instances* over the
@@ -162,7 +164,7 @@ class BudgetCoordinator(
                 extraMinutes,
                 windowMinutes,
                 clock.elapsedRealtimeMs(),
-                DayBoundary.logicalDay(clock.nowLocal()),
+                today(),
                 waitMs = exceptionWaitMs,
             ),
         )
@@ -187,7 +189,7 @@ class BudgetCoordinator(
             bankTime()
         }
         val nowLocal = clock.nowLocal()
-        val today = DayBoundary.logicalDay(nowLocal)
+        val today = today()
         val dayType = DayBoundary.dayType(today)
         val now = clock.elapsedRealtimeMs()
         return rules.map { rule ->
@@ -246,53 +248,110 @@ class BudgetCoordinator(
         }
     }
 
+    /**
+     * The service's ContentObserver calls this the instant AUTO_TIME or AUTO_TIME_ZONE changes.
+     *
+     * Turning either **off** latches on the spot. Before this, the guard only ever looked at the
+     * clocks on a tick, and nothing ticks while the user is in Settings — the toggle, the date
+     * change and the re-enable could all happen between two passes, and the pass that finally ran
+     * saw a trusted clock and nothing to compare it to. Now the off-toggle is the event, and
+     * turning it back on clears nothing by itself: [guardClocks] first checks the clocks against the
+     * baseline it froze at the last trusted pass.
+     *
+     * Which also settles a semantic the old guard left open — automatic time being *off* is now a
+     * blocked state, not merely a watched one. The only reason to turn it off is to set the clock.
+     */
+    @Synchronized
+    fun onClockSettingChanged() {
+        if (!trustedClock()) store.saveTamper("Automatic date & time or time zone was turned off")
+    }
+
     // ---- internals ----
 
     /**
+     * The logical day to charge — the wall clock's, capped by uptime. Read off the persisted anchor
+     * so the service's coordinator and the UI's agree pass for pass; [guardClocks] is what moves it.
+     */
+    private fun today(): LocalDate = DayCorroboration.resolve(
+        store.loadClockAnchor(),
+        integrity.bootCount(),
+        clock.elapsedRealtimeMs(),
+        clock.nowLocal(),
+        DRIFT_TOLERANCE_MS,
+    ).today
+
+    /**
      * The tamper guard. Runs before every decision/snapshot:
-     *  1. Reboot (boot count changed): monotonic anchors from the old boot are meaningless → drop all
-     *     in-flight exceptions (stricter cap). Rebooting with the clock untrusted also latches — a
-     *     reboot is how you'd launder a manual date change past the drift check below.
-     *  2. Drift (same boot, clock untrusted): between passes the wall clock must advance by about
-     *     the same amount as monotonic uptime; divergence beyond [DRIFT_TOLERANCE_MS] in either
-     *     direction means the date/time was changed by hand → latch.
-     *  3. Zone shift (same boot, clock untrusted): the UTC offset moved. This is the case the drift
-     *     check structurally cannot see — see [trustedClock].
-     *  4. Clock trusted again: the OS owns both date and zone → the latch clears.
-     *  5. Corrupt stored usage: burn that target's day (usage := its exception ceiling) — a decode
+     *  1. Reboot (boot count changed): monotonic anchors from the old boot are meaningless → drop
+     *     every in-flight exception (stricter cap), and start a fresh baseline and day model from
+     *     the wall clock. Rebooting with the clock untrusted also latches — a reboot is how you'd
+     *     launder a manual date change past the drift check below.
+     *  2. Drift (same boot): the wall clock must have advanced by about the same amount as
+     *     monotonic uptime since the **trusted baseline** — the last pass where the OS owned the
+     *     clock and nothing was latched. Divergence beyond [DRIFT_TOLERANCE_MS] in either direction
+     *     means the date/time was set by hand: with the clock untrusted it latches; with the clock
+     *     trusted again but a latch still set (the observer latched when the toggle went off), it
+     *     keeps the latch. The baseline is frozen until both are true, which is what makes a change
+     *     made *between* two passes visible at all.
+     *  3. Zone shift (same boot): the UTC offset moved against the baseline. Same rules as drift —
+     *     this is the case the drift check structurally cannot see ([trustedClock]). With the clock
+     *     trusted and nothing latched the OS owns the zone and a move is travel, not tampering.
+     *  4. Clock trusted again *and* in step with the baseline → the latch clears and the baseline
+     *     moves up to now. In practice the OS snaps the clock back the moment automatic time is
+     *     re-enabled, so an honest toggle off/on clears on the next pass; a clock left where it was
+     *     set stays latched until it is put back or the phone reboots.
+     *  5. The day model ([DayCorroboration]) decides which logical day is charged: the wall clock's
+     *     day, capped at what uptime corroborates. Persisted on every pass.
+     *  6. Corrupt stored usage: burn that target's day (usage := its exception ceiling) — a decode
      *     failure must never become a fresh budget.
-     *  6. Day regression (stored dayKey ahead of today): the wall date was rolled back. Re-key the
-     *     stored count onto today so the earlier "future day" usage still counts, and latch if the
-     *     clock is untrusted.
+     *  7. Day regression (stored dayKey ahead of today): the wall date fell back. Re-key the stored
+     *     count onto today, keeping the **larger** of it and today's archived count — the re-key
+     *     used to *replace* today's count with the future day's smaller one, which made a round
+     *     trip through tomorrow a way to shrink today. Latch if the clock is untrusted.
      * The anchor is persisted so none of this goes blind across process restarts.
      */
     private fun guardClocks(rules: List<Rule>) {
         val nowWall = clock.wallClockMs()
         val nowElapsed = clock.elapsedRealtimeMs()
         val nowZone = clock.zoneOffsetSeconds()
+        val nowLocal = clock.nowLocal()
         val boot = integrity.bootCount()
         val auto = trustedClock()
         val anchor = store.loadClockAnchor()
+        val rebooted = anchor == null || anchor.bootCount != boot
 
         // These reasons are shown to the user verbatim, so none of them names a single toggle: the
-        // latch now depends on both, and "turn automatic date & time back on" would send someone to
+        // latch depends on both, and "turn automatic date & time back on" would send someone to
         // Settings to perform a fix that doesn't clear it. The reason says what happened; the overlay
         // and the warning card name both toggles to turn on.
-        if (anchor != null && anchor.bootCount != boot) {
-            rules.forEach { store.saveException(it.target, ExceptionState.None) }
+        var inStep = true
+        if (anchor != null && rebooted) {
+            store.clearExceptions()
             if (!auto) store.saveTamper("Rebooted while the clock was not fully automatic")
-        } else if (anchor != null && !auto) {
+        } else if (anchor != null) {
             val drift = (nowWall - anchor.wallMs) - (nowElapsed - anchor.elapsedMs)
+            val zoneMoved = anchor.zoneOffsetSeconds != null && anchor.zoneOffsetSeconds != nowZone
+            val drifted = abs(drift) > DRIFT_TOLERANCE_MS
+            val latched = store.loadTamper() != null
             // Order matters for the message only — either signal alone is enough to latch.
-            if (anchor.zoneOffsetSeconds != null && anchor.zoneOffsetSeconds != nowZone) {
-                store.saveTamper("Time zone changed while the clock was not fully automatic")
-            } else if (abs(drift) > DRIFT_TOLERANCE_MS) {
-                store.saveTamper("Date or time changed while the clock was not fully automatic")
+            if (!auto) {
+                if (zoneMoved) {
+                    store.saveTamper("Time zone changed while the clock was not fully automatic")
+                } else if (drifted) {
+                    store.saveTamper("Date or time changed while the clock was not fully automatic")
+                }
+            } else if (latched && zoneMoved) {
+                inStep = false
+                store.saveTamper("Time zone was changed while it was not automatic and has not come back")
+            } else if (latched && drifted) {
+                inStep = false
+                store.saveTamper("Date or time was changed while it was not automatic and has not come back")
             }
         }
-        if (auto && store.loadTamper() != null) store.saveTamper(null)
+        if (auto && inStep && store.loadTamper() != null) store.saveTamper(null)
 
-        val today = DayBoundary.logicalDay(clock.nowLocal())
+        val resolved = DayCorroboration.resolve(anchor, boot, nowElapsed, nowLocal, DRIFT_TOLERANCE_MS)
+        val today = resolved.today
         for (rule in rules) {
             if (store.usageCorrupt(rule.target)) {
                 val burnSeconds = when (val mode = rule.mode) {
@@ -309,11 +368,26 @@ class BudgetCoordinator(
             val usage = store.loadUsage(rule.target) ?: continue
             if (usage.dayKey > today) {
                 if (!auto) store.saveTamper("Stored usage is dated ahead of today's date")
-                store.saveUsage(rule.target, BudgetUsage(usage.secondsUsed, today))
+                val archived = store.loadHistory(rule.target).firstOrNull { it.day == today }?.secondsUsed ?: 0L
+                store.saveUsage(rule.target, BudgetUsage(maxOf(usage.secondsUsed, archived), today))
             }
         }
 
-        store.saveClockAnchor(ClockAnchor(nowWall, nowElapsed, boot, nowZone))
+        // The baseline moves only on a trusted, unlatched pass (or a reboot, which starts over); a
+        // legacy anchor with no zone records one, so the zone guard is armed from the next pass.
+        val trustedNow = auto && store.loadTamper() == null
+        val baseline = if (anchor == null || rebooted || trustedNow) {
+            ClockAnchor(nowWall, nowElapsed, boot, nowZone)
+        } else {
+            anchor.copy(zoneOffsetSeconds = anchor.zoneOffsetSeconds ?: nowZone)
+        }
+        store.saveClockAnchor(
+            baseline.copy(
+                bootCount = boot,
+                dayKey = resolved.modelDay,
+                dayEndsElapsedMs = resolved.modelEndsElapsedMs,
+            ),
+        )
     }
 
     /**
@@ -349,7 +423,7 @@ class BudgetCoordinator(
 
     private fun advanceExceptions(rules: List<Rule>) {
         val now = clock.elapsedRealtimeMs()
-        val today = DayBoundary.logicalDay(clock.nowLocal())
+        val today = today()
         for (rule in rules) {
             val st = store.loadException(rule.target)
             val next = ExceptionManager.tick(st, now, today)
@@ -376,7 +450,7 @@ class BudgetCoordinator(
         val seconds = totalMs / 1000L
         carryMs[t] = totalMs % 1000L
         if (seconds <= 0L) return
-        val today = DayBoundary.logicalDay(clock.nowLocal())
+        val today = today()
         val previous = store.loadUsage(t)
         // The 4am rollover, caught at the one moment it is visible: the stored row is from an
         // earlier logical day and is about to be reset to zero by `accrue`. Archive it first, so the
@@ -404,7 +478,7 @@ class BudgetCoordinator(
         val gates = gateTargets.ifEmpty { listOfNotNull(currentTarget) }
         if (gates.isEmpty()) return Decision(null, Access.ALLOW)
         val now = clock.nowLocal()
-        val logicalDay = DayBoundary.logicalDay(now)
+        val logicalDay = today()
         val fallback = currentTarget ?: gates.first()
 
         var budgetBlock: Decision? = null
