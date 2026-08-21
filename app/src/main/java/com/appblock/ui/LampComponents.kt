@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -363,6 +364,7 @@ fun LampTextField(
     placeholder: String,
     modifier: Modifier = Modifier,
     textStyle: TextStyle = LampType.rowTitle,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
 ) {
     val lamp = LocalLamp.current
     Box(
@@ -382,6 +384,7 @@ fun LampTextField(
             singleLine = true,
             textStyle = textStyle.copy(color = lamp.text),
             cursorBrush = SolidColor(lamp.accent),
+            keyboardOptions = keyboardOptions,
             modifier = Modifier.fillMaxWidth(),
         )
     }

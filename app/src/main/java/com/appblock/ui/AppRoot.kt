@@ -189,6 +189,7 @@ fun AppRoot(
     val windowCancelledMessage = stringResource(R.string.lock_window_cancelled)
     val waitStartedMessage = stringResource(R.string.lock_wait_started)
     val keyCreatedMessage = stringResource(R.string.lock_key_created)
+    val keyAlreadySetMessage = stringResource(R.string.lock_key_already_set)
     val exceptionCancelledMessage = stringResource(R.string.exception_cancelled)
     val removeNeedsWindowMessage = stringResource(R.string.sites_remove_needs_window)
     val exportDoneMessage = stringResource(R.string.lock_export_done)
@@ -263,8 +264,13 @@ fun AppRoot(
                     }
                 },
                 onRemove = { domain ->
-                    if (blocklistStore.removeIfAuthorized(domain, websitesWindowOpen)) {
+                    // The window is re-read at the tap rather than taken from the last recomposition
+                    // — it closes on its own clock — and spent *before* the domain goes, so a
+                    // process death in between costs the window, never a second free removal.
+                    val open = unlockController.isOpenFor(UnlockCategory.WEBSITES)
+                    if (open && blocklistStore.contains(domain)) {
                         unlockController.consume()   // single-use: one site per website window
+                        blocklistStore.removeIfAuthorized(domain, true)
                         blocklistRefresh++
                         message = context.getString(R.string.sites_removed_toast, domain)
                     } else {
@@ -309,13 +315,16 @@ fun AppRoot(
                 onSave = {
                     val loosening = rules.loosens
                     val summary = rules.changes.firstOrNull()
-                    when (val result = rules.commit(appsWindowOpen)) {
+                    // Re-read at the tap: `appsWindowOpen` is as old as the last recomposition, and
+                    // the window closes on its own clock. The window is spent inside commit(), before
+                    // the rules are written — see RulesDraft.commit for why that order.
+                    val open = unlockController.isOpenFor(UnlockCategory.APPS)
+                    when (val result = rules.commit(open, onLooseningAccepted = { unlockController.consume() })) {
                         is ChangeResult.Applied -> {
                         // commit() acknowledged the quarantined copy, so the row must go now rather
                         // than lingering until the next cold start.
                         rulesWereCorrupt = false
                         if (loosening) {
-                            unlockController.consume()   // single-use: this was your one change
                             receipt = LockReceipt(
                                 title = savedOneChangeTitle,
                                 body = context.getString(
@@ -428,10 +437,10 @@ fun AppRoot(
     if (showKeySetup) {
         KeySetupSheet(
             onConfirm = { generated ->
-                lockStore.setKey(generated)
+                val stored = lockStore.setKey(generated)
                 keyConfigured = true
                 showKeySetup = false
-                message = keyCreatedMessage
+                message = if (stored) keyCreatedMessage else keyAlreadySetMessage
             },
             onDismiss = { showKeySetup = false },
         )

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -23,6 +24,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.appblock.R
@@ -191,11 +193,20 @@ fun StartWindowSheet(
             Box(Modifier.weight(1f).height(1.dp).background(lamp.divider))
         }
 
+        // Password type + no auto-correct: together they set IME_FLAG_NO_PERSONALIZED_LEARNING, so
+        // Samsung Keyboard's personalised learning never picks up the 24-character code typed at
+        // every unlock — which would have been a second on-phone copy of the one secret the lock
+        // has. The text stays visible (no VisualTransformation): the user is reading a code off a
+        // piece of paper, and A-2 decided against FLAG_SECURE on this screen.
         LampTextField(
             value = code,
             onValueChange = { code = it; mismatch = false },
             placeholder = stringResource(R.string.key_code_placeholder),
             textStyle = LampType.mono.copy(letterSpacing = LampType.monoCode.letterSpacing),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                autoCorrectEnabled = false,
+            ),
             modifier = Modifier.fillMaxWidth(),
         )
         // Mismatch and the format hint share one slot, so a wrong code replaces the instruction

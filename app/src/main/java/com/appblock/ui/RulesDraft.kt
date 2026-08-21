@@ -110,10 +110,17 @@ class RulesDraft(private val store: RuleStore) {
     /**
      * The one commit point. Returns [ChangeResult.Blocked] when the edit loosens and no window is
      * open — the caller says why and routes to Lock; it never quietly writes a partial set.
+     *
+     * [onLooseningAccepted] runs when the gate has accepted a loosening, **before** the rules are
+     * written: it is where the caller spends the window. The order is the fail-safe one. A process
+     * death between the two steps then costs the user the window (a fresh wait for the same edit),
+     * never the gate a second free loosening with the first one already on disk — which is what
+     * consuming *after* the save left open.
      */
-    fun commit(unlocked: Boolean): ChangeResult {
+    fun commit(unlocked: Boolean, onLooseningAccepted: () -> Unit = {}): ChangeResult {
         val result = DurableChangeGate.applyChange(saved, draft, unlocked)
         if (result is ChangeResult.Applied) {
+            if (loosens) onLooseningAccepted()
             store.save(result.settings)
             saved = result.settings
             draft = result.settings

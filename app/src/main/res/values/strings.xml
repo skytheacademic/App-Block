@@ -277,6 +277,7 @@
     <string name="lock_loosening_count_hint">Your window covers one change, and this edit loosens %1$d. Undo all but the one you want — the others each need their own window.</string>
     <string name="lock_window_cancelled">Change window cancelled.</string>
     <string name="lock_wait_started">Wait started. You\'ll get a notification when the window opens.</string>
+    <string name="lock_key_already_set">A lock key already exists — nothing was changed.</string>
     <string name="lock_key_created">Lock key set. Stash the QR somewhere you can\'t reach on impulse.</string>
 
     <!-- Protection list -->
