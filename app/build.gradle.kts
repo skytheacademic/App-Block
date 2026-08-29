@@ -36,11 +36,14 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
-        // 3 / 0.3.0: audit Batch B (N-4 day model + observer latch, the robustness items). 2 / 0.2.0
-        // was Batch A (N-1, N-2, N-3, G-1). Bumped per batch so App info on the phone says which build
-        // is installed; installs go in ascending order because a release build can't be downgraded.
-        versionCode = 4
-        versionName = "0.4.0"
+        // 5 / 0.5.0: the two P0s from the third cable session — the accessibility-button picker (rule 3,
+        // a control that names us) and repair mode disarming the Settings tier on one bad
+        // canDrawOverlays reading. 4 / 0.4.0 was the N-2 second channel. 3 / 0.3.0 was audit Batch B
+        // (N-4 day model + observer latch, the robustness items). 2 / 0.2.0 was Batch A (N-1, N-2, N-3,
+        // G-1). Bumped per batch so App info on the phone says which build is installed; installs go in
+        // ascending order because a release build can't be downgraded.
+        versionCode = 5
+        versionName = "0.5.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
