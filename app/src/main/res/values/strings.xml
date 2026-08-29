@@ -307,6 +307,8 @@
     <string name="action_allow">Allow</string>
     <string name="protection_debug_build">Debug build</string>
     <string name="protection_debug_build_body">This build is debuggable — its data can be edited over ADB. Install a release build for real use.</string>
+    <string name="protection_shortcut">Accessibility shortcut</string>
+    <string name="protection_shortcut_body">Android has pointed an accessibility shortcut at App-Block — that\'s the floating button, and installing the app is enough to create it. Its Edit list used to switch detection off in four taps; App-Block now bounces that screen, so the door is shut. Clearing the shortcut itself needs a computer:\n\nadb shell settings put secure accessibility_button_targets \"\"</string>
     <string name="lock_export">Keep a copy of your rules</string>
     <string name="lock_export_body">Copies your caps, schedules, blocked apps and blocked sites as plain text. If this phone is ever wiped, that text is the only record — App-Block can\'t read it back in, so you\'d re-enter it by hand. Your lock key is never included.</string>
     <string name="lock_export_copy">Copy rules</string>

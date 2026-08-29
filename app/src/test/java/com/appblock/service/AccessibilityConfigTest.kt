@@ -105,6 +105,13 @@ class AccessibilityConfigTest {
      * targeting above Q, so one list-page tick in Settings (which the settings-watch rightly never
      * bounces) turns the chord into a two-second, keyless, repeatable off switch. With the flag the
      * hardware chord can only turn the service on, and the rest become a no-op button callback.
+     *
+     * Verified on the S25 2026-08-29 — and the same session found what the flag *costs*, which is why
+     * this test asserts the flag is present and nothing asserts the absence of a floating button: One
+     * UI claims the service as an `accessibility_button_targets` entry on install and draws a pill,
+     * whose Edit list unticks the service out of existence in four taps. That door is closed by
+     * [com.appblock.engine.SettingsWatch]'s checkable rule, not by dropping this flag, which would
+     * simply hand the chord back.
      */
     @Test
     fun cannotBeToggledOffByAnAccessibilityShortcut() {

@@ -73,7 +73,11 @@ class AppRootScreenTest {
         ruleStore.load()   // seed
     }
 
-    private fun show(adminActive: Boolean = true, batteryExempt: Boolean = true) {
+    private fun show(
+        adminActive: Boolean = true,
+        batteryExempt: Boolean = true,
+        shortcutClaimed: Boolean = false,
+    ) {
         compose.setContent {
             AppBlockTheme {
                 AppRoot(
@@ -82,6 +86,7 @@ class AppRootScreenTest {
                     adminActive = adminActive,
                     batteryExempt = batteryExempt,
                     notificationsEnabled = true,
+                    shortcutClaimed = shortcutClaimed,
                     onOpenAccessibility = {},
                     onOpenOverlay = {},
                     onOpenDateSettings = {},
@@ -113,6 +118,27 @@ class AppRootScreenTest {
         compose.onNodeWithText("Protection admin").assertExists()
         compose.onNodeWithText("Activate").assertDoesNotExist()
         compose.onNodeWithText("Exempt").assertDoesNotExist()
+    }
+
+    /**
+     * The accessibility-shortcut claim (2026-08-29). Android points a shortcut at the service on
+     * install, which draws the floating pill whose Edit list unticked detection in four taps. That
+     * screen is bounced now, so this row is not a warning to act on — it is the pill being *named*,
+     * because it is otherwise invisible until an audit finds it. No action button: clearing a Secure
+     * setting needs the computer.
+     */
+    @Test
+    fun `a claimed accessibility shortcut is named on the Lock tab`() {
+        show(shortcutClaimed = true)
+        goTo("Lock")
+        compose.onNodeWithText("Accessibility shortcut").assertExists()
+    }
+
+    @Test
+    fun `an unclaimed shortcut says nothing`() {
+        show()
+        goTo("Lock")
+        compose.onNodeWithText("Accessibility shortcut").assertDoesNotExist()
     }
 
     /** Tabs are found by their icon's description — "Apps" is also the screen's own title. */

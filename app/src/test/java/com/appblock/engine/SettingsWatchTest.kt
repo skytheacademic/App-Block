@@ -162,6 +162,109 @@ class SettingsWatchTest {
         assertFalse(bounce(screen = titled("Display", "Display", "Brightness", "Dark mode")))
     }
 
+    // ---- rule 3: the accessibility-button picker (2026-08-29) ----
+
+    /**
+     * ✅ **Captured on the S25 2026-08-29**, and it is the screen that made rule 3 necessary: long-press
+     * the floating accessibility pill → Edit → untick "App-Block detection", and
+     * `enabled_accessibility_services` is empty. Four taps, no key, no computer, confirmed twice, and
+     * nothing notices — the watchdog runs inside the service that has just been switched off.
+     *
+     * The rows are verbatim and in order. Every one is a `CheckBox` carrying its label as **both** text
+     * and contentDescription, followed by a `TextView` repeating it; that duplication is what the
+     * service's own walk produces, so it is reproduced here rather than tidied away.
+     */
+    private val shortcutPickerRows = listOf(
+        "Extra dim", "Speak keyboard input aloud", "Hearing aid support", "Amplify ambient sound",
+        "Mute all sounds", "Sound Notifications", "Live Transcribe", "Universal switch",
+        "Assistant menu", "Dwell action", "Voice Access", "Link to Windows", "App-Block detection",
+    )
+
+    /** No titles: the dump caught it scrolled, with nothing in the tree naming the screen. */
+    private val shortcutPicker = SettingsWatch.Screen(
+        texts = shortcutPickerRows.flatMap { listOf(it, it, it) },
+        checkables = shortcutPickerRows.flatMap { listOf(it, it) },
+    )
+
+    @Test fun `bounces the accessibility-button picker`() {
+        assertTrue(bounce(screen = shortcutPicker))
+    }
+
+    /**
+     * Why it needed a third rule at all: the picker walks straight through the other two. Its title is
+     * the shortcut's and not ours (rule 1), and not one [SettingsWatch.settingsControls] word appears
+     * anywhere on it (rule 2) — it is twenty-two feature names and nothing else. By vocabulary alone it
+     * is indistinguishable from a list, which is exactly what C-4 says must not bounce.
+     */
+    @Test fun `the picker defeats the title and control rules`() {
+        assertFalse(shortcutPicker.titles.any { it.contains(label, ignoreCase = true) })
+        assertFalse(
+            shortcutPicker.texts.any { text ->
+                SettingsWatch.settingsControls.any { text.contains(it, ignoreCase = true) }
+            },
+        )
+        assertTrue(shortcutPicker.texts.any { it.contains(label, ignoreCase = true) })
+    }
+
+    /**
+     * The comparison that makes rule 3 a discriminator rather than another bare label match. The
+     * device-admin list was captured minutes from the picker on the same phone: six admins, six
+     * switches, and every one of those switches **bare** — `text=""`, `contentDescription=""` — with our
+     * name on a separate, non-checkable `TextView` beside it. See [deviceAdminList] for the capture.
+     *
+     * So the two screens differ in structure exactly where they agree in vocabulary. A list associates
+     * a control with a name by *position*, which a text walk cannot see and must not guess at; the
+     * picker puts the name **on** the control. That, and not the words, is what rule 3 reads.
+     */
+    @Test fun `a bare switch beside our name is still a list`() {
+        assertFalse(bounce(screen = deviceAdminList))
+        assertTrue(deviceAdminList.texts.any { it.contains(label, ignoreCase = true) })
+        assertTrue(deviceAdminList.checkables.isNotEmpty())
+    }
+
+    /**
+     * The other list that names us next to a state, and the nearest miss of all: Accessibility →
+     * Installed apps renders "App-Block detection" beside the *word* "On". Same string as the picker's
+     * row, no checkbox — so it keeps not bouncing, and the toggle page one tap further in keeps
+     * bouncing on its title.
+     */
+    @Test fun `the installed-services list has the same words and no checkbox`() {
+        assertTrue(installedServices.checkables.isEmpty())
+        assertFalse(bounce(screen = installedServices))
+    }
+
+    /**
+     * Rule 3 lives inside the Settings tier, so it stands down with the rest of it. Switching the
+     * service off through the picker is a loosening like any other: pay for a window and it is yours.
+     */
+    @Test fun `the picker stands down with the rest of the settings tier`() {
+        assertFalse(bounce(screen = shortcutPicker, windowOpen = true))
+        assertFalse(bounce(screen = shortcutPicker, repairMode = true))
+        assertFalse(bounce(screen = shortcutPicker, setupIncomplete = true))
+    }
+
+    /**
+     * And it reaches no further than the Settings tier. A checkable control naming us in the *installer*
+     * is not an off switch — and treating it as one would be the update trap again.
+     */
+    @Test fun `a checkable label does not arm the installer tier`() {
+        assertFalse(
+            bounce(
+                pkg = "com.google.android.packageinstaller",
+                screen = SettingsWatch.Screen(
+                    texts = listOf("Do you want to install an update to this app?", "App-Block"),
+                    checkables = listOf("App-Block"),
+                ),
+            ),
+        )
+    }
+
+    @Test fun `a blank label never matches a checkable control either`() {
+        assertFalse(
+            SettingsWatch.shouldBounce("com.android.settings", shortcutPicker, "", false),
+        )
+    }
+
     @Test fun `ignores other apps entirely, even ones showing the label`() {
         assertFalse(bounce(pkg = "com.zhiliaoapp.musically", screen = appInfo))
         assertFalse(bounce(pkg = null, screen = appInfo))
@@ -389,11 +492,28 @@ class SettingsWatchTest {
         "Deactivate",
     )
 
-    /** The list one tap out: one row per admin, each with a switch. Nothing on it deactivates. */
-    private val deviceAdminList = titled(
-        "Device admin apps",
-        "Device admin apps", "App-Block protection", "On", "Find My Mobile", "On",
-        "Google Pay", "Off",
+    /**
+     * The list one tap out: one row per admin, each with a switch. Nothing on it deactivates.
+     *
+     * ✅ **Captured on the S25 2026-08-29** (replacing a guess that gave each row an "On"/"Off" state
+     * word, which One UI does not render). Two things the real tree says that the guess did not:
+     *
+     *  - the six `Switch` nodes are **bare** — `text=""`, `contentDescription=""` — which is what makes
+     *    rule 3 safe here and is asserted by `a bare switch beside our name is still a list`;
+     *  - the blurb contains "disable", live proof of why that word is in [SettingsWatch.killControls]
+     *    and deliberately not in [SettingsWatch.settingsControls].
+     */
+    private val deviceAdminList = SettingsWatch.Screen(
+        titles = listOf("Device admin apps"),
+        texts = listOf(
+            "Device admin apps",
+            "Device admin apps can enforce password requirements and other security policies on your " +
+                "phone. They can disable the camera and other features, and they can lock or reset " +
+                "your phone remotely.",
+            "App-Block protection", "Find Hub", "Find Hub", "Link to Windows",
+            "Outlook Device Policy", "Secure Folder",
+        ),
+        checkables = List(6) { "" },
     )
 
     /** Our own `onDisableRequested` text, shown by the framework before it deactivates. */
