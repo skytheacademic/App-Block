@@ -53,9 +53,23 @@
      15-minute nag. With this flag the same method takes the other branch: the HARDWARE shortcut
      can only ENABLE a disabled service, and every other shortcut type becomes an
      onAccessibilityButtonClicked callback, which this service leaves as the no-op default. Added in
-     API 26, so it is live on every supported device. No floating button appears because of this
-     line - the system shows one only if the user enables that shortcut, and then it does nothing.
-     NOT yet verified on the S25 itself (no cable that day); the AOSP mechanism is the evidence. -->
+     API 26, so it is live on every supported device.
+
+     VERIFIED on the S25 2026-08-29, and the verification corrected this comment. The mechanism holds -
+     `dumpsys accessibility` shows requestAccessibilityButton=true and no shortcut toggles the service
+     off - but the sentence that used to stand here, "no floating button appears because of this line",
+     was wrong, and wrong in the direction that matters. One UI adds the service to
+     `accessibility_button_targets` ON INSTALL, unasked; with gesture navigation it then forces
+     `accessibility_button_mode=1` and draws a floating pill. Long-press that pill -> Edit -> untick
+     "App-Block detection" and `enabled_accessibility_services` is EMPTY: blocking off, four taps, no
+     key, no computer, and nothing notices because the watchdog runs inside the service that just died.
+     Confirmed twice.
+
+     So N-1 traded a chord for a pill. The pill's picker is now bounced by SettingsWatch's checkable
+     rule (see Screen.checkables - our label sits ON the CheckBox there, where every list puts a bare
+     switch beside a label), and the Lock tab names the claim out loud, because clearing the target
+     itself needs `adb shell settings put secure accessibility_button_targets ""` and comes back on the
+     next install. Removing this flag is NOT the fix: it reopens the chord, which is worse. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"

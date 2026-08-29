@@ -622,6 +622,8 @@ fun protectionItems(
     adminActive: Boolean,
     batteryExempt: Boolean,
     notificationsEnabled: Boolean,
+    /** Whether an accessibility shortcut (the floating button, the volume chord) points at us. */
+    shortcutClaimed: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit,
     onOpenDateSettings: () -> Unit,
@@ -754,6 +756,24 @@ fun protectionItems(
                 okLabel = "",
                 ok = false,
                 consequence = stringResource(R.string.protection_omnibox_stale_body),
+            ),
+        )
+    }
+    if (shortcutClaimed) {
+        // The pill on the right-hand edge of the screen, and why it is there. Android adds App-Block
+        // to `accessibility_button_targets` **on install**, unasked, because the service requests the
+        // accessibility button (which is what stops a shortcut from toggling it off — N-1). On the S25
+        // that pill's Edit list was a four-tap, keyless off switch: untick "App-Block detection" and
+        // `enabled_accessibility_services` empties. That screen is now bounced, so this row is not a
+        // warning about an open door — it is the door being named, because the alternative is finding
+        // it again in an audit. There is no action button on purpose: the phone cannot clear a Secure
+        // setting, and the one on-device route to it is the screen we just guarded.
+        add(
+            ProtectionItem(
+                title = stringResource(R.string.protection_shortcut),
+                okLabel = "",
+                ok = false,
+                consequence = stringResource(R.string.protection_shortcut_body),
             ),
         )
     }

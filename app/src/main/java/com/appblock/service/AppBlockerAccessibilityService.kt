@@ -39,6 +39,7 @@ import com.appblock.engine.Decision
 import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.OcclusionHold
+import com.appblock.engine.OverlayRepairWatch
 import com.appblock.engine.RuleSource
 import com.appblock.engine.Schedule
 import com.appblock.engine.ServiceLiveness
@@ -54,6 +55,7 @@ import com.appblock.security.LockStore
 import com.appblock.ui.formatCoarse
 import com.appblock.ui.formatHm
 import com.appblock.ui.formatWindow
+import com.appblock.util.overlayAppOpAllows
 
 /**
  * The live blocker. Inputs that drive it:
@@ -135,9 +137,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * [noteForegroundPackage] for what deliberately doesn't count.
      */
     private var lastWindowPackage: String? = null
-    /** Cached `canDrawOverlays` — see [canDrawOverlay]. */
-    private var overlayGranted = true
+    /** Cached overlay readings — see [readOverlayGrant]. */
+    private var overlayGranted = true to true
     private var overlayGrantedAtMs = 0L
+    /**
+     * Owns the repair-mode stand-down, which used to be the bare expression `!canDrawOverlays()` and
+     * on 2026-08-29 disarmed the entire Settings tier for minutes on a reading that was wrong. See
+     * [OverlayRepairWatch] — it needs both readings to agree, and says so when it engages.
+     */
+    private val repairWatch = OverlayRepairWatch()
     /** Last Settings-side watchdog check — see [checkHealthWhileInSettings]. */
     private var lastHealthCheckElapsedMs = 0L
     /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
@@ -307,7 +315,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val screen = visibleWatchedScreen()
         val setupIncomplete = !Watchdog.setupCompleted(this)
         val windowOpen = unlockController.isOpen()
-        val repairMode = !canDrawOverlay()
+        val (canDraw, opAllows) = readOverlayGrant()
+        val repairMode = repairWatch.observe(canDraw, opAllows, SystemClock.elapsedRealtime())
+        // Repair mode disarms every rule below, so it may never be silent again (2026-08-29). Forcing
+        // the health report past its throttle is what turns "the guard is down" into a notification the
+        // user can see, on the pass it happens rather than up to fifteen minutes later.
+        if (repairWatch.justEngaged) announceRepairMode()
         val bounce = SettingsWatch.shouldBounce(
             packageName = pkg,
             screen = screen,
@@ -354,15 +367,40 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Repair mode has just engaged, so the Settings tier is standing down — say so out loud.
+     *
+     * The throttle is reset rather than respected: [checkHealthWhileInSettings] has almost always run
+     * moments earlier on this same screen, so honouring it would swallow the one report that matters.
+     * The health this posts is `NO_OVERLAY`, which is exactly right — repair mode only engages when
+     * both readings agree the permission is gone, or when a disagreement has outlived its grace, and
+     * "Appear on top is off, blocked apps just throw you Home" is the honest description of both.
+     *
+     * This is the fix for the *silence*, which is what made the 2026-08-29 outage a P0 rather than a
+     * bug: the guard came down, nothing said so, and the two symptoms it produced were written up that
+     * morning as two unrelated mysteries.
+     */
+    private fun announceRepairMode() {
+        if (!Watchdog.setupCompleted(this)) return
+        lastHealthCheckElapsedMs = SystemClock.elapsedRealtime()
+        runCatching { Watchdog.report(this, Watchdog.currentHealth(this)) }
+    }
+
+    /**
      * Why a settings-watch decision came out the way it did, on QA builds only, logged once per
      * distinct state. The instrument N-2 needed and did not have: on the phone the device-admin page
      * simply failed to bounce, and separating "the screen never reached the rules" from "the rules
      * said no" cost a whole cable session of `dumpsys` and inference.
      *
      * Read it as: `pkg` · how many strings the screen offered · whether our label was among them ·
-     * which control word matched, if any · `rescued=true` when the active window had to be pulled in
+     * which control word matched, if any · whether it sat on a **checkable** control (rule 3, the
+     * accessibility-button picker) · `rescued=true` when the active window had to be pulled in
      * because `getWindows()` had not offered it (**this is the N-2 answer** — true on the device-admin
      * page means `getWindows()` was the silent failure) · the three stand-downs · the verdict.
+     *
+     * `repairMode` now carries its evidence rather than just its value: `repairMode=false(disagree 42s)`
+     * means `canDrawOverlays()` is saying no while the app op says the permission is held, and the tier
+     * is deliberately staying armed. That is the state that ran silently for minutes on 2026-08-29 and
+     * cost two mis-written audit entries; printed, it names itself.
      *
      * `adb logcat -s AppBlockWatch`, open Device admin apps, tap the App-Block row, read one line.
      *
@@ -382,14 +420,25 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val label = getString(R.string.app_name)
         val namesUs = screen.texts.any { it.contains(label, ignoreCase = true) }
         val titleNamesUs = screen.titles.any { it.contains(label, ignoreCase = true) }
+        val checkNamesUs = screen.checkables.any { it.contains(label, ignoreCase = true) }
         val control = SettingsWatch.settingsControls.firstOrNull { needle ->
             screen.texts.any { it.contains(needle, ignoreCase = true) }
         }
+        // Bucketed, not exact: this line is deduplicated by equality, and a per-second value would make
+        // every event a new line — an instrument that floods the log it is read from is not one.
+        val disagreeMs = repairWatch.disagreementMs(SystemClock.elapsedRealtime())
+        val repair =
+            if (disagreeMs >= DISAGREE_BUCKET_MS) {
+                "$repairMode(disagree ~${disagreeMs / DISAGREE_BUCKET_MS * (DISAGREE_BUCKET_MS / 1_000)}s)"
+            } else {
+                "$repairMode"
+            }
         val line = "pkg=${packageName?.substringAfterLast('.')} " +
             "titles=${screen.titles.size} texts=${screen.texts.size} " +
-            "namesUs=$namesUs titleNamesUs=$titleNamesUs control=$control " +
+            "checkables=${screen.checkables.size} " +
+            "namesUs=$namesUs titleNamesUs=$titleNamesUs checkNamesUs=$checkNamesUs control=$control " +
             "rescued=$lastActiveWindowRescued " +
-            "setupIncomplete=$setupIncomplete windowOpen=$windowOpen repairMode=$repairMode " +
+            "setupIncomplete=$setupIncomplete windowOpen=$windowOpen repairMode=$repair " +
             "bounce=$bounce"
         if (line == lastWatchDiagLine) return
         lastWatchDiagLine = line
@@ -397,14 +446,18 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Whether the block overlay can still be drawn, cached for [OVERLAY_CHECK_TTL_MS] because this is
-     * consulted per Settings event and is a binder call. Defaults to granted so a check that hasn't
-     * happened yet leaves the self-defense armed rather than open.
+     * The two overlay-permission readings — `Settings.canDrawOverlays()` and the corroborating app-op
+     * check — cached together for [OVERLAY_CHECK_TTL_MS] because this is consulted per Settings event
+     * and both are binder calls. Defaults to granted-and-allowed so a check that hasn't happened yet
+     * leaves the self-defense armed rather than open.
+     *
+     * Cached as a pair on purpose: [OverlayRepairWatch] is judging whether the two *agree*, so reading
+     * them at different moments would let the cache manufacture a disagreement that never existed.
      */
-    private fun canDrawOverlay(): Boolean {
+    private fun readOverlayGrant(): Pair<Boolean, Boolean> {
         val now = SystemClock.elapsedRealtime()
         if (now - overlayGrantedAtMs > OVERLAY_CHECK_TTL_MS) {
-            overlayGranted = Settings.canDrawOverlays(this)
+            overlayGranted = Settings.canDrawOverlays(this) to overlayAppOpAllows(this)
             overlayGrantedAtMs = now
         }
         return overlayGranted
@@ -429,6 +482,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun visibleWatchedScreen(): SettingsWatch.Screen {
         val titles = ArrayList<CharSequence>(6)
         val texts = ArrayList<CharSequence>(64)
+        val checkables = ArrayList<CharSequence>(8)
         val walked = HashSet<Int>(6)
         var budget = NODE_BUDGET
         for (window in visibleWindows()) {
@@ -438,7 +492,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 walked.add(window.id)
                 val firstIndex = texts.size
                 val heading = ArrayList<CharSequence>(1)
-                budget = collectTexts(root, texts, heading, budget)
+                budget = collectTexts(root, texts, heading, checkables, budget)
                 val found = titles.size
                 window.title?.takeIf { it.isNotBlank() }?.let { titles.add(it) }
                 titles.addAll(heading)
@@ -463,7 +517,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 }
                 lastActiveWindowRescued = true
                 val heading = ArrayList<CharSequence>(1)
-                budget = collectTexts(active, texts, heading, budget)
+                budget = collectTexts(active, texts, heading, checkables, budget)
                 // Heading yes, first-text-in-reading-order no. The window title this window would have
                 // been judged against isn't available on this path, and the first-text candidate is
                 // only safe *because* it is the last resort of a window that offered neither (C-4): a
@@ -472,7 +526,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 titles.addAll(heading)
             }
         }
-        return SettingsWatch.Screen(titles, texts)
+        return SettingsWatch.Screen(titles, texts, checkables)
     }
 
     /**
@@ -480,25 +534,38 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * The first node marked as a heading also lands in [heading] — that is a screen title on every
      * layout that bothers to declare one, and it survives scrolling, which the position of the text
      * itself does not.
+     *
+     * A node the framework reports as `isCheckable` also lands in [checkables], which is what lets the
+     * watch tell "a switch **called** App-Block" from "a row *next to* an unlabelled switch" — the one
+     * distinction that separates the accessibility-button picker from every list it otherwise looks
+     * exactly like. See [SettingsWatch.Screen.checkables] for the two captures that settled it. Both
+     * text and contentDescription are taken, because on the picker One UI fills in both and there is no
+     * reason to bet on which survives a Samsung layout change.
      */
     private fun collectTexts(
         node: AccessibilityNodeInfo,
         out: MutableList<CharSequence>,
         heading: MutableList<CharSequence>,
+        checkables: MutableList<CharSequence>,
         budget: Int,
     ): Int {
         if (budget <= 0) return 0
         var remaining = budget - 1
         runCatching {
+            val checkable = runCatching { node.isCheckable }.getOrDefault(false)
             node.text?.let {
                 out.add(it)
+                if (checkable) checkables.add(it)
                 if (heading.isEmpty() && isHeading(node)) heading.add(it)
             }
-            node.contentDescription?.let { out.add(it) }
+            node.contentDescription?.let {
+                out.add(it)
+                if (checkable) checkables.add(it)
+            }
         }
         for (child in childrenOf(node)) {
             if (remaining <= 0) break
-            remaining = collectTexts(child, out, heading, remaining)
+            remaining = collectTexts(child, out, heading, checkables, remaining)
         }
         return remaining
     }
@@ -1171,9 +1238,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** How long the active-target set is reused before re-reading the rules — see [activeTargets]. */
         private const val ACTIVE_TARGETS_TTL_MS = 3_000L
         private const val BOUNCE_TOAST_THROTTLE_MS = 3_000L
-        /** How long `canDrawOverlays` is cached before re-checking — see [canDrawOverlay]. Short,
-         *  because it decides when the self-defense stands down to let the user re-grant it. */
+        /** How long the overlay readings are cached before re-checking — see [readOverlayGrant]. Short,
+         *  because they decide when the self-defense stands down to let the user re-grant it. */
         private const val OVERLAY_CHECK_TTL_MS = 5_000L
+        /** Bucket size for the diagnostic's disagreement age — see [diagnoseSelfDefense]. */
+        private const val DISAGREE_BUCKET_MS = 30_000L
         /** Min gap between Settings-side watchdog checks — see [checkHealthWhileInSettings]. Five
          *  binder reads per interval, only while Settings is up; short enough that a flipped toggle
          *  is nagged about before the user leaves the page. */

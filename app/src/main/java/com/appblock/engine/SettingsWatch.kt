@@ -29,16 +29,20 @@ package com.appblock.engine
  *
  * What separates them is **position**: on the left the label is one row in the body, on the right
  * the page is *about* one app and carries controls that only exist on such a page. Hence a [Screen]
- * rather than a bag of strings, and hence two ways in:
+ * rather than a bag of strings, and hence three ways in:
  *
  *  1. the label is in the screen's **title** — the page's identity is us; or
  *  2. the label is anywhere on the screen **and** a [settingsControls] word is present — the page
- *     offers a control that can only mean one app.
+ *     offers a control that can only mean one app; or
+ *  3. the label is *on a checkable control* ([Screen.checkables]) — the screen is not listing us, it
+ *     is offering a switch **whose own name is us**.
  *
- * A list of every app satisfies neither: its title is a category ("Apps", "Appear on top"), and it
- * offers no per-app control. The Accessibility toggle page satisfies both. The per-app permission
- * page satisfies **only rule 2** — measured on hardware 2026-08-06, it shares the list's title and
- * carries "Allow permission", which is the whole reason rule 2 exists.
+ * A list of every app satisfies none: its title is a category ("Apps", "Appear on top"), it offers no
+ * per-app control, and where its rows do carry switches those switches are unlabelled. The
+ * Accessibility toggle page satisfies rules 1 and 2. The per-app permission page satisfies **only rule
+ * 2** — measured on hardware 2026-08-06, it shares the list's title and carries "Allow permission",
+ * which is the whole reason rule 2 exists. The accessibility-button picker satisfies **only rule 3**,
+ * which is the whole reason rule 3 exists — see [Screen.checkables].
  *
  * The sanctioned way past it is the same gate as every other loosening (CONSTRAINTS.md §6): open the
  * durable-change window (stashed key → wait → 15-min window) and the watch stands down — turning the
@@ -64,10 +68,49 @@ object SettingsWatch {
      *
      * [texts] is the whole screen including the title, so a body match never has to reason about
      * which strings were promoted.
+     *
+     * [checkables] is the same idea one step further in: the strings carried by nodes the framework
+     * reports as `isCheckable`. Also a subset of [texts], for the same reason.
+     *
+     * ## Why a checkable control is a discriminator and not another C-4 bare match
+     *
+     * Added 2026-08-29, after the accessibility-button picker was found to be a **four-tap, keyless
+     * off switch** on the S25: long-press the floating pill → Edit → untick "App-Block detection", and
+     * `enabled_accessibility_services` empties. Confirmed twice. Nothing noticed, because the watchdog
+     * that would nag runs inside the service that had just been switched off.
+     *
+     * That screen defeats rules 1 and 2 completely. Its title is the shortcut's, not ours; it is
+     * twenty-two rows of every accessibility feature on the phone, with ours simply last; and not one
+     * [settingsControls] word appears anywhere on it. By the shape of its text it is a list — and the
+     * whole point of C-4 is that a blocker must not bounce lists.
+     *
+     * The two accessibility-tree captures, taken minutes apart on the same phone, are what separate
+     * them, and it is not the words:
+     *
+     * ```
+     * picker           CheckBox  checkable=true   text="App-Block detection"  desc="App-Block detection"
+     *                  TextView  checkable=false  text="App-Block detection"
+     *
+     * device-admin list  Switch  checkable=true   text=""                     desc=""
+     *                  TextView  checkable=false  text="App-Block protection"
+     * ```
+     *
+     * A list puts a **bare** switch next to a label; the association is positional and means nothing to
+     * a text walk. The picker puts the label **on the control itself**. So "our name is on something
+     * checkable" says the same thing rule 2 says — this screen offers a control that can only mean one
+     * app — proved by structure instead of by vocabulary, which is what the picker's vocabulary made
+     * necessary. The device-admin list, the Apps list and Accessibility → Installed apps (`"App-Block
+     * detection", "On"` — a label and a *word*, not a checkbox) all stay free, unchanged.
+     *
+     * ⚠️ Verified against the picker and the device-admin list only. Any Settings screen that labels a
+     * checkbox or switch with an app's name now bounces; if one turns up that is genuinely a list, it
+     * will be the first, and the fix is to require the label on the control *and* the control to be one
+     * of few — not to go back to a rule the picker walks straight through.
      */
     data class Screen(
         val titles: List<CharSequence> = emptyList(),
         val texts: List<CharSequence> = emptyList(),
+        val checkables: List<CharSequence> = emptyList(),
     )
 
     /**
@@ -276,6 +319,13 @@ object SettingsWatch {
      * merits. It stays because the per-app permission page one tap further in is still guarded, and
      * being bounced off *that* is the same lockout one step later.
      *
+     * ⚠️ **This flag is the one stand-down the user never asked for**, and on 2026-08-29 it was caught
+     * disarming the whole tier for minutes on a `canDrawOverlays()` reading that was simply wrong. It
+     * is no longer a bare sensor read: [OverlayRepairWatch] owns the decision, needs a second source to
+     * agree before it stands anything down, and announces itself when it does. This object's contract
+     * is unchanged — a boolean in, the Settings tier down — but who is allowed to set it, and on what
+     * evidence, is now a documented question with an answer.
+     *
      * ⚠️ **Corrected 2026-08-06, on hardware.** C-4 left that page guarded on an assumption — that its
      * app header would read as a *title* on One UI 8. It does not. The page was captured over adb and
      * its title is `Appear on top`, the same as the list's; "App-Block" is a body row on both. So for
@@ -306,11 +356,17 @@ object SettingsWatch {
         val readable = selfLabel.isNotBlank()
         val titleNamesUs = readable && screen.titles.any { it.contains(selfLabel, ignoreCase = true) }
         val namesUs = readable && screen.texts.any { it.contains(selfLabel, ignoreCase = true) }
+        val checkableNamesUs =
+            readable && screen.checkables.any { it.contains(selfLabel, ignoreCase = true) }
 
         if (pkg in settingsPackages) {
             if (windowOpen || repairMode) return false
             if (titleNamesUs) return true
             if (namesUs && screen.texts.anyContains(settingsControls)) return true
+            // Rule 3 — the accessibility-button picker. Stands down with the rest of the tier: a
+            // change window is the sanctioned way to switch the service off, and the picker is one
+            // more way of doing that.
+            if (checkableNamesUs) return true
             return isBypassScreen(screen.texts)
         }
         // Installer tier — armed through an open window, which is what makes uninstall cost more than

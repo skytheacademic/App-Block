@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
-import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -24,6 +23,7 @@ import com.appblock.engine.SignalCanary
 import com.appblock.util.isAccessibilityServiceEnabled
 import com.appblock.util.isBatteryExempt
 import com.appblock.util.isDeviceAdminActive
+import com.appblock.util.overlayPermissionHeld
 import java.util.concurrent.TimeUnit
 
 /**
@@ -120,7 +120,11 @@ object Watchdog {
         health(
             serviceEnabled = isAccessibilityServiceEnabled(context),
             serviceRunning = AppBlockerAccessibilityService.isRunning,
-            canDrawOverlays = Settings.canDrawOverlays(context),
+            // The corroborated read, not `Settings.canDrawOverlays` — that one spent several minutes
+            // on 2026-08-29 claiming the overlay permission was gone while it plainly was not, and
+            // this nag was one of the three things that believed it. A notification that cries wolf
+            // about a permission nobody touched is how the whole channel stops being believed.
+            canDrawOverlays = overlayPermissionHeld(context),
             adminActive = adminActive,
             batteryExempt = isBatteryExempt(context),
         )
