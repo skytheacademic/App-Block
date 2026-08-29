@@ -368,6 +368,72 @@ class SettingsWatchTest {
         assertFalse(bounce(pkg = installer, screen = uninstallDialog, setupIncomplete = true))
     }
 
+    // ---- N-2 (audit 2026-08-21): the device-admin page, the cheapest full bypass on the phone ----
+
+    /**
+     * ⚠️ Written from AOSP's `DeviceAdminAdd` strings, not a capture. **The capture arrived
+     * 2026-08-29 and is `s25DeviceAdminDialog` below** — the wording guess was close enough that
+     * "Deactivate" and the label both landed, but the *activity* was not AOSP's at all, and that is
+     * what N-2 actually tripped on. Kept as-is: AOSP wording is still what a non-Samsung build would
+     * show, and both must bounce. Security and privacy → Other security settings → Device admin apps → App-Block
+     * protection. The title is the framework's, not ours, so rule 1 never saw it; "Deactivate" is
+     * the only control on it, and it was not a control word. Ten taps, no key, and One UI Modes
+     * could suspend the blocker again.
+     */
+    private val deviceAdminDetail = titled(
+        "Device admin app",
+        "Device admin app", "App-Block protection",
+        "Requests no powers over your phone. Being listed here is what stops Android from " +
+            "suspending App-Block, which is how Modes and other apps can otherwise switch the blocking off.",
+        "This admin app is active and allows the app App-Block to perform the following operations:",
+        "Deactivate",
+    )
+
+    /** The list one tap out: one row per admin, each with a switch. Nothing on it deactivates. */
+    private val deviceAdminList = titled(
+        "Device admin apps",
+        "Device admin apps", "App-Block protection", "On", "Find My Mobile", "On",
+        "Google Pay", "Off",
+    )
+
+    /** Our own `onDisableRequested` text, shown by the framework before it deactivates. */
+    private val deactivateDialog = screen(
+        "Deactivate device admin app?",
+        "Turning this off lets Modes and other apps suspend App-Block, which switches blocking off completely.",
+        "Cancel", "Deactivate",
+    )
+
+    @Test fun `bounces the device-admin page on its control, not its title`() {
+        assertTrue(bounce(screen = deviceAdminDetail))
+        assertFalse(deviceAdminDetail.titles.any { it.contains(label, ignoreCase = true) })
+    }
+
+    @Test fun `bounces the deactivation confirmation`() {
+        assertTrue(bounce(screen = deactivateDialog))
+    }
+
+    /** A list of every admin is a list, and lists are what rule 2 exists to leave alone. */
+    @Test fun `the device-admin list one tap out does not bounce`() {
+        assertFalse(bounce(screen = deviceAdminList))
+        assertFalse(deviceAdminList.texts.any { it.contains("deactivate", ignoreCase = true) })
+    }
+
+    /**
+     * Deactivating the admin is a loosening like turning the service off, and it takes the same
+     * sanctioned route: the Settings tier stands down for an open window. The watchdog now reports
+     * the admin as inactive and the Lock tab can re-activate it, so a window spent this way is at
+     * least visible and reversible from the phone.
+     */
+    @Test fun `an open window stands the device-admin guard down like the rest of the settings tier`() {
+        assertFalse(bounce(screen = deviceAdminDetail, windowOpen = true))
+        assertFalse(bounce(screen = deviceAdminDetail, repairMode = true))
+    }
+
+    /** The word needs our label beside it — "deactivate" on a page about something else is nothing. */
+    @Test fun `deactivate alone, without the label, is not a screen about us`() {
+        assertFalse(bounce(screen = titled("SIM manager", "SIM manager", "Deactivate eSIM", "Add eSIM")))
+    }
+
     // ---- B-10: the wireless-debugging screen, which never names us ----
 
     private val wirelessDebugging = titled(
@@ -434,5 +500,86 @@ class SettingsWatchTest {
 
     @Test fun `the installer tier ignores bypass markers`() {
         assertFalse(bounce(pkg = installer, screen = wirelessDebugging))
+    }
+
+    // ---- N-2 on hardware (cable session 2026-08-29) ----
+
+    /**
+     * Both screens verbatim off the S25 (One UI 8, `uiautomator dump`, 2026-08-29). Samsung's page is
+     * `SecDeviceAdminAdd`, a **floating transparent** activity stacked in the Settings task — not
+     * AOSP's full-screen `DeviceAdminAdd` these strings were originally guessed from.
+     *
+     * The guess was right. `Deactivate` is the button, and `App-Block protection` carries the label.
+     * What the tests below pin down is that **the rules were never the problem**: the pair bounces the
+     * moment it is handed over, and the list alone — which is all the service actually collected on
+     * hardware, because it only ever read `getWindows()` — correctly does not.
+     */
+    private val s25DeviceAdminDialog = screen(
+        "Device admin app",
+        "App-Block protection",
+        "This admin app is active and allows App-Block to perform the following actions:",
+        "Cancel",
+        "Deactivate",
+    )
+
+    /** One tap out. Rows with switches, no per-app control — a list, and it must stay free. */
+    private val s25DeviceAdminList = screen(
+        "Device admin apps",
+        "App-Block protection", "Find Hub", "Link to Windows", "Outlook Device Policy", "Secure Folder",
+    )
+
+    /** Title-less on purpose: rule 1 must not be what saves this: the dialog has no window title. */
+    @Test fun `the S25 device-admin dialog bounces on label plus deactivate`() {
+        assertTrue(bounce(screen = s25DeviceAdminDialog))
+        assertFalse(s25DeviceAdminDialog.titles.any { it.contains(label, ignoreCase = true) })
+    }
+
+    /**
+     * 🐛 **N-2's hardware failure, as a test.** The dialog is transparent, so the list stayed visible
+     * behind it — and the list is what the watch judged, because the dialog's window never made it
+     * through `getWindows()`. The list names us (the row is literally "App-Block protection") but
+     * offers no per-app control, so rule 2 correctly declined. Correct verdict, wrong screen.
+     */
+    @Test fun `the S25 device-admin list alone does not bounce, which is why N-2 failed open`() {
+        assertFalse(bounce(screen = s25DeviceAdminList))
+        // It is not that the label was missing — that is the part that makes this a collection bug.
+        assertTrue(s25DeviceAdminList.texts.any { it.contains(label, ignoreCase = true) })
+        assertFalse(s25DeviceAdminList.texts.any { it.contains("deactivate", ignoreCase = true) })
+    }
+
+    /**
+     * What the second channel buys. The dialog is transparent, so on hardware both windows really are
+     * on screen at once — this is the screen the watch should have been judging all along.
+     */
+    @Test fun `the list plus the rescued dialog bounces`() {
+        val both = SettingsWatch.Screen(texts = s25DeviceAdminList.texts + s25DeviceAdminDialog.texts)
+        assertTrue(bounce(screen = both))
+    }
+
+    @Test fun `the S25 device-admin dialog is settings-tier, so the stand-downs reach it`() {
+        assertFalse(bounce(screen = s25DeviceAdminDialog, windowOpen = true))
+        assertFalse(bounce(screen = s25DeviceAdminDialog, repairMode = true))
+        assertFalse(bounce(screen = s25DeviceAdminDialog, setupIncomplete = true))
+    }
+
+    // ---- the active-window second channel ----
+
+    @Test fun `an active watched window that getWindows missed is walked`() {
+        assertTrue(SettingsWatch.shouldWalkActiveWindow(emptySet(), 42, "com.android.settings"))
+    }
+
+    @Test fun `a window already walked is not walked twice`() {
+        assertFalse(SettingsWatch.shouldWalkActiveWindow(setOf(42), 42, "com.android.settings"))
+    }
+
+    /** Widens *how* the watch sees a screen, never *which* screens it may judge. */
+    @Test fun `an unwatched active window is never walked`() {
+        assertFalse(SettingsWatch.shouldWalkActiveWindow(emptySet(), 42, "com.instagram.android"))
+        assertFalse(SettingsWatch.shouldWalkActiveWindow(emptySet(), 42, null))
+    }
+
+    /** The installer tier is watched too, and an install dialog is exactly the floating-window shape. */
+    @Test fun `the installer package also qualifies for the second channel`() {
+        assertTrue(SettingsWatch.shouldWalkActiveWindow(emptySet(), 7, installer))
     }
 }

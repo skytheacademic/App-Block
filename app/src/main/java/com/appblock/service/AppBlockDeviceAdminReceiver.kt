@@ -24,13 +24,31 @@ import com.appblock.R
  * out of Modes' reach.
  *
  * Deactivating the admin remains a bypass, but a different and slower one: Settings → Security and
- * privacy → Other security settings → Device admin apps, which is a screen the watchdog can bounce.
- * Wiring [onDisabled] into the tamper latch is deliberately left for that follow-up rather than
- * bolted on here — this class ships to answer one question.
+ * privacy → Other security settings → Device admin apps → App-Block protection → Deactivate. The
+ * 2026-08-21 audit (N-2) found that page was *not* bounced — its title isn't ours and "Deactivate"
+ * wasn't a control word — and that nothing watched the admin afterwards, so ten taps reopened the
+ * Modes bypass silently and only a cable session could close it again. Three things changed:
+ * `deactivate` joined [com.appblock.engine.SettingsWatch.settingsControls], the watchdog reports
+ * `ADMIN_INACTIVE`, and the Lock tab offers the system's own activation prompt so the phone can
+ * repair it alone.
  */
 class AppBlockDeviceAdminReceiver : DeviceAdminReceiver() {
 
-    /** Shown on the confirmation screen before deactivation. The only user-facing surface here. */
+    /** Shown on the confirmation screen before deactivation. */
     override fun onDisableRequested(context: Context, intent: Intent): CharSequence =
         context.getString(R.string.device_admin_disable_warning)
+
+    /**
+     * Nag immediately rather than within fifteen minutes. The admin is still listed as active while
+     * this callback runs (the framework removes it after the broadcast completes), so the live read
+     * would say "fine" — the state is passed in instead.
+     */
+    override fun onDisabled(context: Context, intent: Intent) {
+        Watchdog.report(context, Watchdog.currentHealth(context, adminActive = false))
+    }
+
+    /** The mirror image: withdraw the nag the moment the admin is back, not on the next poll. */
+    override fun onEnabled(context: Context, intent: Intent) {
+        Watchdog.report(context, Watchdog.currentHealth(context, adminActive = true))
+    }
 }

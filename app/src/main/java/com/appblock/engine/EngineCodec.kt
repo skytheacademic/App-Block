@@ -15,7 +15,9 @@ import java.time.LocalDate
  * Malformed exceptions decode to [ExceptionState.None] (strict — a lost exception just reverts to the
  * normal cap). Malformed *usage* decodes to null here, but the store reports it via
  * [EngineStore.usageCorrupt] and the coordinator burns that target's day — decode failure must never
- * turn into a fresh budget.
+ * turn into a fresh budget. A *negative* count is malformed in that sense: nothing in the engine can
+ * write one, so it can only have been edited in, and clamping it to 0 would have turned the edit
+ * into exactly the fresh budget the null path exists to refuse.
  */
 object EngineCodec {
 
@@ -28,9 +30,9 @@ object EngineCodec {
         if (raw.isNullOrBlank()) return null
         val parts = raw.split('|')
         if (parts.size != 2) return null
-        val seconds = parts[0].toLongOrNull() ?: return null
+        val seconds = parts[0].toLongOrNull()?.takeIf { it >= 0L } ?: return null
         val day = runCatching { LocalDate.parse(parts[1]) }.getOrNull() ?: return null
-        return BudgetUsage(secondsUsed = seconds.coerceAtLeast(0L), dayKey = day)
+        return BudgetUsage(secondsUsed = seconds, dayKey = day)
     }
 
     // ---- history ----

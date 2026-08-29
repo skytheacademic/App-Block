@@ -36,8 +36,11 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // 3 / 0.3.0: audit Batch B (N-4 day model + observer latch, the robustness items). 2 / 0.2.0
+        // was Batch A (N-1, N-2, N-3, G-1). Bumped per batch so App info on the phone says which build
+        // is installed; installs go in ascending order because a release build can't be downgraded.
+        versionCode = 4
+        versionName = "0.4.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

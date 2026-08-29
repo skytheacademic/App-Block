@@ -618,9 +618,16 @@ fun protectionItems(
     /** Website blocking's own canary — see [com.appblock.data.OmniboxWitnessStore.installedHealth]. */
     omniboxStale: Boolean,
     debuggable: Boolean,
+    /** The three doors the 2026-08-21 audit found open — each a free toggle nothing checked. */
+    adminActive: Boolean,
+    batteryExempt: Boolean,
+    notificationsEnabled: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit,
     onOpenDateSettings: () -> Unit,
+    onActivateAdmin: () -> Unit,
+    onRequestExemption: () -> Unit,
+    onAllowNotifications: () -> Unit,
 ): List<ProtectionItem> = buildList {
     add(
         ProtectionItem(
@@ -663,6 +670,46 @@ fun protectionItems(
             consequence = stringResource(R.string.protection_service_off),
             actionLabel = stringResource(R.string.action_enable),
             onAction = onOpenAccessibility,
+        ),
+    )
+    // The device-admin entry (N-2). Not a permission the blocker *uses* — it asks for no policies —
+    // but the fact that makes it un-suspendable, and the one grant that used to need the laptop to
+    // restore. The action is the system's own activation screen, so a reinstall or a tap on
+    // "Deactivate" is now one tap back instead of a cable session.
+    add(
+        ProtectionItem(
+            title = stringResource(R.string.protection_admin),
+            okLabel = stringResource(R.string.protection_admin_on),
+            ok = adminActive,
+            consequence = stringResource(R.string.protection_admin_off),
+            actionLabel = stringResource(R.string.action_activate),
+            onAction = onActivateAdmin,
+        ),
+    )
+    // The battery exemption (N-3): the single line of sleep hardening, and the precondition for
+    // Samsung's deep-sleep kill. Flipped on a list page the settings-watch correctly ignores, so
+    // this row and the watchdog are the only things that would ever notice.
+    add(
+        ProtectionItem(
+            title = stringResource(R.string.protection_exempt),
+            okLabel = stringResource(R.string.protection_exempt_on),
+            ok = batteryExempt,
+            consequence = stringResource(R.string.protection_exempt_off),
+            actionLabel = stringResource(R.string.action_exempt),
+            onAction = onRequestExemption,
+        ),
+    )
+    // Notifications are every warning above this row. Denied, the watchdog still runs and still
+    // detects — and Watchdog.report returns before posting. This row is the only place that failure
+    // is visible at all.
+    add(
+        ProtectionItem(
+            title = stringResource(R.string.protection_notifications),
+            okLabel = stringResource(R.string.protection_notifications_on),
+            ok = notificationsEnabled,
+            consequence = stringResource(R.string.protection_notifications_off),
+            actionLabel = stringResource(R.string.action_allow),
+            onAction = onAllowNotifications,
         ),
     )
     if (rulesWereCorrupt) {

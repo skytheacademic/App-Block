@@ -39,8 +39,18 @@ class RulesDraft(private val store: RuleStore) {
 
     val dirty: Boolean get() = draft != saved
 
-    /** Every field-level difference, in the gate's own words — the Lock tab's diff. */
-    val changes: List<FieldChange> get() = DurableChangeGate.changes(saved, draft)
+    /**
+     * Every field-level difference, in the gate's own words — the Lock tab's diff.
+     *
+     * Loosenings first (stable, so the rest keep the gate's order). Two readers depend on it: the
+     * Lock tab lists at most six changes, and the save receipt quotes the *first* one as what the
+     * window was spent on. Since the gate began reporting a flipped switch and its riders separately
+     * (G-1), a draft can carry a free "turned on" beside the loosening that actually gated it, and
+     * the loosening is the line both readers must not lose.
+     */
+    val changes: List<FieldChange>
+        get() = DurableChangeGate.changes(saved, draft)
+            .sortedByDescending { it.direction == ChangeDirection.LOOSEN }
 
     val direction: ChangeDirection get() = DurableChangeGate.classify(saved, draft)
 
@@ -100,10 +110,17 @@ class RulesDraft(private val store: RuleStore) {
     /**
      * The one commit point. Returns [ChangeResult.Blocked] when the edit loosens and no window is
      * open — the caller says why and routes to Lock; it never quietly writes a partial set.
+     *
+     * [onLooseningAccepted] runs when the gate has accepted a loosening, **before** the rules are
+     * written: it is where the caller spends the window. The order is the fail-safe one. A process
+     * death between the two steps then costs the user the window (a fresh wait for the same edit),
+     * never the gate a second free loosening with the first one already on disk — which is what
+     * consuming *after* the save left open.
      */
-    fun commit(unlocked: Boolean): ChangeResult {
+    fun commit(unlocked: Boolean, onLooseningAccepted: () -> Unit = {}): ChangeResult {
         val result = DurableChangeGate.applyChange(saved, draft, unlocked)
         if (result is ChangeResult.Applied) {
+            if (loosens) onLooseningAccepted()
             store.save(result.settings)
             saved = result.settings
             draft = result.settings

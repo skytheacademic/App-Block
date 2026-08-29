@@ -21,6 +21,28 @@ class SignalCanaryTest {
     private fun assess(witness: SignalCanary.Witness, atDay: Long) =
         SignalCanary.assess(witness, nowMs = atDay * day, graceMs = grace)
 
+    /**
+     * The optional ceiling on a confirmation's age. Off by default — the reel canary must never fire
+     * at a user who stopped watching reels — and the omnibox store turns it on, where any page load
+     * re-confirms for free and a month without one is real evidence the id moved server-side.
+     */
+    @Test fun `a confirmation older than the ceiling stops vouching, with no ceiling it never does`() {
+        val confirmedOnDay0 = SignalCanary.Witness(
+            confirmedVersion = v300, confirmedAtMs = 0L,
+            installedVersion = v300, installedSeenAtMs = 0L,
+        )
+        val month = 30 * day
+        assertEquals(SignalCanary.Health.CONFIRMED, SignalCanary.assess(confirmedOnDay0, 20 * day, grace, month))
+        assertEquals(SignalCanary.Health.STALE, SignalCanary.assess(confirmedOnDay0, 31 * day, grace, month))
+        assertEquals(SignalCanary.Health.CONFIRMED, SignalCanary.assess(confirmedOnDay0, 400 * day, grace))
+    }
+
+    @Test fun `an expired confirmation falls back to the grace arithmetic`() {
+        // Confirmed long ago, but the installed version was only noticed recently: inside the grace.
+        val w = SignalCanary.Witness(confirmedVersion = v300, confirmedAtMs = 0L, installedVersion = v300, installedSeenAtMs = 40 * day)
+        assertEquals(SignalCanary.Health.PENDING, SignalCanary.assess(w, 41 * day, grace, 30 * day))
+    }
+
     @Test fun `says nothing at all when Instagram is not installed`() {
         assertEquals(SignalCanary.Health.NO_APP, assess(SignalCanary.Witness(), atDay = 0))
         // Not even after a long time — there is no rule to verify.

@@ -20,6 +20,17 @@ class EngineCodecTest {
         assertNull(EngineCodec.decodeUsage("x|2026-07-24"))
     }
 
+    /**
+     * Nothing in the engine writes a negative count, so one can only have been edited in. It used to
+     * clamp to 0 — which turned the edit into a fresh budget, the exact outcome the null path (and
+     * the coordinator's burn-the-day on corrupt usage) exists to refuse.
+     */
+    @Test fun `a negative usage count decodes to null, not to zero`() {
+        assertNull(EngineCodec.decodeUsage("-1|2026-07-24"))
+        assertNull(EngineCodec.decodeUsage("-86400|2026-07-24"))
+        assertEquals(0L, EngineCodec.decodeUsage("0|2026-07-24")!!.secondsUsed)
+    }
+
     @Test fun `exception states round-trip`() {
         val day = LocalDate.of(2026, 7, 24)
         val none: ExceptionState = ExceptionState.None

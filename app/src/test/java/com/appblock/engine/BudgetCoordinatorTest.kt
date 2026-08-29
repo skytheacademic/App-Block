@@ -179,8 +179,13 @@ class BudgetCoordinatorTest {
         c.tick()
         assertEquals(12 * 60L, store.loadUsage(Target.TIKTOK)!!.secondsUsed)
 
-        // Past 4am the next morning: a new logical day, so the counter resets.
+        // Past 4am the next morning: a new logical day, so the counter resets. The day passes for
+        // real — the phone sat on the desk for 24 h of uptime — because a date that moves without
+        // uptime behind it is exactly what the day model refuses (TamperGuardTest).
+        c.onForeground("com.android.launcher")
+        clock.advance(24 * 60 * minute)
         clock.local = LocalDateTime.of(2026, 7, 25, 10, 0)
+        c.onForeground(tiktok)
         clock.advance(3 * minute)
         c.tick()
 

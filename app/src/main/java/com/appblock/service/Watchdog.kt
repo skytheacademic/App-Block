@@ -22,18 +22,24 @@ import com.appblock.data.OmniboxWitnessStore
 import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.SignalCanary
 import com.appblock.util.isAccessibilityServiceEnabled
+import com.appblock.util.isBatteryExempt
+import com.appblock.util.isDeviceAdminActive
 import java.util.concurrent.TimeUnit
 
 /**
  * Detects the "blocking silently died" states and nags loudly. Every ~15 min (WorkManager minimum) it
- * checks the three things blocking actually depends on — the accessibility service being enabled in
- * Settings, that service actually running, and the overlay permission still being granted — and posts
- * a high-priority notification when any of them is missing. Catches Samsung's battery killer, crashes,
- * and a revoked "Appear on top".
+ * checks what blocking actually depends on — the accessibility service being enabled in Settings,
+ * that service actually running, the overlay permission still being granted — plus, since the
+ * 2026-08-21 audit, the two grants that keep the *service itself* alive and un-suspendable: the
+ * device-admin entry (N-2) and the battery exemption (N-3). It posts a high-priority notification
+ * when any of them is missing. Catches Samsung's battery killer, crashes, a revoked "Appear on top",
+ * a tap on "Deactivate", and a flipped "Optimize battery usage".
  *
  * Honest limit: a manual Force Stop puts the app in the stopped state, where JobScheduler won't run
  * this worker either — closing *that* hole needs the Device Owner tier. Periodic work does survive
- * reboots, so no boot receiver is needed.
+ * reboots, so no boot receiver is needed. And a nag is a notification: with those denied, every
+ * state below is detected and reported into nothing, which is why the Lock tab carries a
+ * notifications row of its own.
  */
 class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
 
@@ -81,23 +87,43 @@ object Watchdog {
      * What state blocking is actually in. Ordered worst-first, because only one notification can be
      * shown and the user should be told about the biggest hole: a service that is off or dead blocks
      * nothing at all, whereas a missing overlay still stops the app — just crudely.
+     *
+     * The last two are a different kind of bad: blocking still works, but the thing that stops it
+     * being switched off from outside has gone. They rank below the three "broken now" states and
+     * above OK, with the admin first because its bypass is the cheaper one (One UI Modes, about a
+     * minute) and the exemption's needs a further Device care step.
      */
-    enum class Health { OK, SERVICE_DISABLED, SERVICE_DEAD, NO_OVERLAY }
+    enum class Health { OK, SERVICE_DISABLED, SERVICE_DEAD, NO_OVERLAY, ADMIN_INACTIVE, NOT_EXEMPT }
 
     /** Pure so the precedence above is testable without a device. */
-    fun health(serviceEnabled: Boolean, serviceRunning: Boolean, canDrawOverlays: Boolean): Health =
+    fun health(
+        serviceEnabled: Boolean,
+        serviceRunning: Boolean,
+        canDrawOverlays: Boolean,
+        adminActive: Boolean = true,
+        batteryExempt: Boolean = true,
+    ): Health =
         when {
             !serviceEnabled -> Health.SERVICE_DISABLED
             !serviceRunning -> Health.SERVICE_DEAD
             !canDrawOverlays -> Health.NO_OVERLAY
+            !adminActive -> Health.ADMIN_INACTIVE
+            !batteryExempt -> Health.NOT_EXEMPT
             else -> Health.OK
         }
 
-    fun currentHealth(context: Context): Health = health(
-        serviceEnabled = isAccessibilityServiceEnabled(context),
-        serviceRunning = AppBlockerAccessibilityService.isRunning,
-        canDrawOverlays = Settings.canDrawOverlays(context),
-    )
+    /**
+     * [adminActive] can be supplied because the one caller that knows better than the live read is
+     * the admin receiver itself: inside `onDisabled` the framework still lists the admin as active.
+     */
+    fun currentHealth(context: Context, adminActive: Boolean = isDeviceAdminActive(context)): Health =
+        health(
+            serviceEnabled = isAccessibilityServiceEnabled(context),
+            serviceRunning = AppBlockerAccessibilityService.isRunning,
+            canDrawOverlays = Settings.canDrawOverlays(context),
+            adminActive = adminActive,
+            batteryExempt = isBatteryExempt(context),
+        )
 
     /**
      * Post — or clear — the health notification.
@@ -136,14 +162,22 @@ object Watchdog {
             when (health) {
                 Health.SERVICE_DISABLED -> R.string.watchdog_text_disabled
                 Health.SERVICE_DEAD -> R.string.watchdog_text_dead
-                else -> R.string.watchdog_text_no_overlay
+                Health.NO_OVERLAY -> R.string.watchdog_text_no_overlay
+                Health.ADMIN_INACTIVE -> R.string.watchdog_text_admin
+                Health.NOT_EXEMPT -> R.string.watchdog_text_exempt
+                Health.OK -> error("unreachable: OK cancels above")
             },
         )
-        // A missing overlay is a degraded blocker, not an absent one — saying "not protecting you"
-        // there would be the kind of overstatement that gets the whole notification distrusted.
+        // A missing overlay is a degraded blocker, not an absent one, and an open door is neither —
+        // saying "not protecting you" for those would be the kind of overstatement that gets the
+        // whole notification distrusted. Each state names exactly what it has lost.
         val title = context.getString(
-            if (health == Health.NO_OVERLAY) R.string.watchdog_title_degraded
-            else R.string.watchdog_title,
+            when (health) {
+                Health.NO_OVERLAY -> R.string.watchdog_title_degraded
+                Health.ADMIN_INACTIVE -> R.string.watchdog_title_admin
+                Health.NOT_EXEMPT -> R.string.watchdog_title_exempt
+                else -> R.string.watchdog_title
+            },
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)

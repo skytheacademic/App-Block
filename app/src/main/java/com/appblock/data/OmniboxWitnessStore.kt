@@ -88,7 +88,7 @@ class OmniboxWitnessStore(context: Context) {
     fun refresh(pkg: String, nowMs: Long): SignalCanary.Health {
         val witness = SignalCanary.observe(load(pkg), installedVersion(pkg), nowMs)
         save(pkg, witness)
-        return SignalCanary.assess(witness, nowMs, GRACE_MS)
+        return SignalCanary.assess(witness, nowMs, GRACE_MS, CONFIRMED_TTL_MS)
     }
 
     /** The omnibox was just read as a committed URL — the id is good for the installed version. */
@@ -130,6 +130,19 @@ class OmniboxWitnessStore(context: Context) {
          * readable omnibox is real evidence the id moved, not evidence of a quiet week.
          */
         const val GRACE_MS = 7L * 24 * 60 * 60 * 1_000
+
+        /**
+         * How long a confirmation keeps vouching with no further read.
+         *
+         * The version anchor has one blind spot: a layout rolled out server-side moves the id with
+         * no version bump, and a version-keyed vouch would then stand forever with the blocklist
+         * quietly off. Unlike the reel canary, an expiry here costs nothing a user has to choose to
+         * do — a page load with the toolbar visible re-confirms within seconds of ordinary browsing —
+         * so the only way to reach it is a month without one readable address bar, and the price of
+         * reaching it is a block over an unreadable one until the next page load. A month rather than
+         * the seven-day grace so that a fortnight away from Chrome can't trip it on its own.
+         */
+        const val CONFIRMED_TTL_MS = 30L * 24 * 60 * 60 * 1_000
 
         /**
          * Whether an absent address bar may still be treated as innocent.

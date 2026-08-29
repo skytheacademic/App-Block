@@ -60,7 +60,12 @@ class PrefsRuleStore(
             return seed.also { save(it) }
         }
         if (stored.version != seed.version) {
-            return seed.also { save(it) }                // authorized re-seed from source
+            // Authorized re-seed from source — for the built-ins. A `pkg:` target can never be in
+            // the seed (it was added from the picker on the phone), so the seed has nothing to say
+            // about it and replacing the whole blob just deleted it: two config reconstructions
+            // before this carried them across. They come through with their settings intact.
+            val picked = stored.targets.filterKeys { it.userPackage != null && it !in seed.targets }
+            return seed.copy(targets = seed.targets + picked).also { save(it) }
         }
         return stored
     }

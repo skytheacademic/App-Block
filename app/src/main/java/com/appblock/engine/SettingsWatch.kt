@@ -147,6 +147,17 @@ object SettingsWatch {
      *
      * `disable` is *not* here even though it is in [killControls]: One UI's Apps list has a
      * "Disabled apps" filter, and a list of every app is precisely what this rule exists to ignore.
+     *
+     * `deactivate` was added 2026-08-21 (audit N-2) for the **device-admin page** — Security and
+     * privacy → Other security settings → Device admin apps → App-Block protection — whose one button
+     * deactivates the admin that keeps App-Block un-suspendable by One UI Modes. Its title is the
+     * framework's ("Device admin app"), not ours, so rule 1 never saw it, and none of the words above
+     * are on it; it was ten unguarded taps to the cheapest full bypass on the phone. The list one tap
+     * out ("Device admin apps") is rows with switches and carries no such word, so it stays free, as
+     * a list should. ⚠️ Both pages are written from AOSP's `DeviceAdminAdd` / `DeviceAdminSettings`
+     * strings, not a capture — the S25 wording is on the phone checklist. The word is safe even if
+     * Samsung phrases the button differently: rule 2 still needs our label beside it, and nothing
+     * else in Settings says "deactivate" next to "App-Block".
      */
     val settingsControls: List<String> = listOf(
         "uninstall",
@@ -156,6 +167,7 @@ object SettingsWatch {
         "app info",
         "turn off",
         "allow permission",
+        "deactivate",
     )
 
     /**
@@ -193,6 +205,42 @@ object SettingsWatch {
     val watchedPackages: Set<String> = settingsPackages + installerPackages
 
     fun isWatched(packageName: String?): Boolean = packageName in watchedPackages
+
+    /**
+     * Whether the *active* window's root is worth walking as a second channel, after the service has
+     * already walked everything `getWindows()` offered.
+     *
+     * Added 2026-08-29 after N-2 failed on hardware. The watch had exactly one channel to the screen —
+     * `getWindows()`, each entry rooted with `window.root` — and that channel **fails silently**: a
+     * window that is missing from the list, or whose `root` comes back null, is skipped by a
+     * `?: return@runCatching` and the screen is judged on whatever else happened to be visible. There
+     * is no signal that anything was missed.
+     *
+     * What that cost, measured on the S25 (One UI 8): Samsung's device-admin page is
+     * `SecDeviceAdminAdd`, a **floating, transparent** activity stacked inside the Settings task
+     * (`floating=true`, `isTopActivityTransparent=true` in the WindowManager log) rather than AOSP's
+     * full-screen `DeviceAdminAdd`. `uiautomator` read its five strings without trouble — including
+     * both halves rule 2 needs, `"App-Block protection"` and `"Deactivate"`, in 25 nodes against a
+     * budget of 800 — yet the page sat unbounced for 8+ s across four visits by the real route, while
+     * App-Block's own App info page bounced in under 1.5 s the same minute. The words were never the
+     * problem; the screen never reached [shouldBounce].
+     *
+     * ⚠️ **Which of the two silent failures actually happened is still unproven** — absent from
+     * `getWindows()`, or present with a null root. It needs the phone and the debug build's
+     * `AppBlockWatch` line to separate them. This helper does not care: the active window is by
+     * definition the one the user is looking at, and reading it through a second framework path
+     * (`getRootInActiveWindow()`) covers both.
+     *
+     * Deduplicated by window id so the ordinary case — the active window was already in
+     * `getWindows()`, which is almost always true — costs one integer lookup and walks nothing twice.
+     * The package test is the same one every other window gets: this widens *how* the watch sees a
+     * screen, never *which* screens it may judge.
+     */
+    fun shouldWalkActiveWindow(
+        walkedWindowIds: Set<Int>,
+        activeWindowId: Int,
+        activePackageName: String?,
+    ): Boolean = activeWindowId !in walkedWindowIds && isWatched(activePackageName)
 
     private fun Iterable<CharSequence>.anyContains(needles: List<String>): Boolean =
         any { text -> needles.any { text.contains(it, ignoreCase = true) } }

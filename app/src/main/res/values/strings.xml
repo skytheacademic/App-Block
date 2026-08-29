@@ -55,6 +55,13 @@
     <string name="watchdog_text_dead">The blocking service died (battery optimization or a crash). Open App-Block to bring it back.</string>
     <string name="watchdog_text_disabled">The Accessibility service is switched off, so nothing is blocked. Re-enable it in Settings.</string>
     <string name="watchdog_text_no_overlay">\"Appear on top\" is switched off, so the block screen can\'t be drawn. Blocked apps and sites now just throw you to the home screen with no explanation. Open App-Block to turn it back on.</string>
+    <!-- The two "door is open" states (audit 2026-08-21, N-2 / N-3): nothing is broken yet, but the
+         thing that stops it breaking has been switched off. Same ongoing nag, because both are one
+         tap to fix inside the app and both reopen a bypass that used to need a cable to close. -->
+    <string name="watchdog_title_admin">App-Block can be suspended</string>
+    <string name="watchdog_text_admin">Its device admin entry was deactivated, so Modes and other apps can suspend App-Block and switch blocking off. Open App-Block → Lock → Activate to restore it.</string>
+    <string name="watchdog_title_exempt">App-Block can be put to sleep</string>
+    <string name="watchdog_text_exempt">Its battery exemption was removed, so the phone can stop the blocking service in deep sleep — and this warning with it. Open App-Block → Lock → Exempt to restore it.</string>
     <string name="signal_channel_name">Detection drift</string>
     <string name="signal_title">Reels blocking needs a re-check</string>
     <string name="signal_text">Instagram has updated since App-Block last recognised the Reels player, so reels may not be getting blocked any more. Open Reels once — if the block screen appears, everything is fine and this will go away.</string>
@@ -270,6 +277,7 @@
     <string name="lock_loosening_count_hint">Your window covers one change, and this edit loosens %1$d. Undo all but the one you want — the others each need their own window.</string>
     <string name="lock_window_cancelled">Change window cancelled.</string>
     <string name="lock_wait_started">Wait started. You\'ll get a notification when the window opens.</string>
+    <string name="lock_key_already_set">A lock key already exists — nothing was changed.</string>
     <string name="lock_key_created">Lock key set. Stash the QR somewhere you can\'t reach on impulse.</string>
 
     <!-- Protection list -->
@@ -285,6 +293,18 @@
     <string name="protection_service">Blocking service</string>
     <string name="protection_service_on">running</string>
     <string name="protection_service_off">The service isn\'t running, so nothing is blocked. Re-enable the Accessibility service to restart it.</string>
+    <string name="protection_admin">Protection admin</string>
+    <string name="protection_admin_on">active</string>
+    <string name="protection_admin_off">Deactivated, so Modes and other apps can suspend App-Block and switch blocking off. Activating it asks for no powers over your phone.</string>
+    <string name="protection_exempt">Battery exemption</string>
+    <string name="protection_exempt_on">exempt</string>
+    <string name="protection_exempt_off">Removed, so the phone can put the blocking service to sleep — nothing is blocked while it sleeps, and nothing warns you.</string>
+    <string name="protection_notifications">Notifications</string>
+    <string name="protection_notifications_on">allowed</string>
+    <string name="protection_notifications_off">Blocked, so App-Block can\'t tell you when blocking has died or a door has been opened. Every warning it has is a notification.</string>
+    <string name="action_activate">Activate</string>
+    <string name="action_exempt">Exempt</string>
+    <string name="action_allow">Allow</string>
     <string name="protection_debug_build">Debug build</string>
     <string name="protection_debug_build_body">This build is debuggable — its data can be edited over ADB. Install a release build for real use.</string>
     <string name="lock_export">Keep a copy of your rules</string>

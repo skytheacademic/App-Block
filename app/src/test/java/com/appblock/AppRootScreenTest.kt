@@ -73,18 +73,46 @@ class AppRootScreenTest {
         ruleStore.load()   // seed
     }
 
-    private fun show() {
+    private fun show(adminActive: Boolean = true, batteryExempt: Boolean = true) {
         compose.setContent {
             AppBlockTheme {
                 AppRoot(
                     accessibilityEnabled = true,
                     overlayGranted = true,
+                    adminActive = adminActive,
+                    batteryExempt = batteryExempt,
+                    notificationsEnabled = true,
                     onOpenAccessibility = {},
                     onOpenOverlay = {},
                     onOpenDateSettings = {},
+                    onActivateAdmin = {},
+                    onRequestExemption = {},
+                    onAllowNotifications = {},
                 )
             }
         }
+    }
+
+    /**
+     * The two doors the 2026-08-21 audit found (N-2, N-3) reach the protection list as cards with a
+     * repair action, and read as plain rows while held. Before this nothing in the app read either
+     * state, so "Deactivate" and "Optimize battery usage" were free and silent.
+     */
+    @Test
+    fun `an open door is a card on the Lock tab, a held one is a row`() {
+        show(adminActive = false, batteryExempt = false)
+        goTo("Lock")
+        compose.onNodeWithText("Activate").assertExists()
+        compose.onNodeWithText("Exempt").assertExists()
+    }
+
+    @Test
+    fun `held doors show no repair action`() {
+        show()
+        goTo("Lock")
+        compose.onNodeWithText("Protection admin").assertExists()
+        compose.onNodeWithText("Activate").assertDoesNotExist()
+        compose.onNodeWithText("Exempt").assertDoesNotExist()
     }
 
     /** Tabs are found by their icon's description — "Apps" is also the screen's own title. */
@@ -94,11 +122,13 @@ class AppRootScreenTest {
      * Open X's limits: the card's name area is the tap target, not a separate Edit button.
      *
      * **Why X and not TikTok**, which every scenario below used until 2026-08-05: TikTok now seeds
-     * *disabled* ([com.appblock.engine.DefaultRules.seededOff]), and `DurableChangeGate` treats a
-     * target that is off before and after as contributing nothing whatever its numbers say. Stepping
-     * its caps became a no-op, so five gate tests failed while the gate itself was fine — the fixture
-     * had gone inert, not the behaviour. X keeps the shape these tests need: enforced, with distinct
-     * weekday (15) and weekend (20) caps, so the two-loosenings case still has two fields to move.
+     * *disabled* ([com.appblock.engine.DefaultRules.seededOff]), and at the time `DurableChangeGate`
+     * treated a target that is off before and after as contributing nothing whatever its numbers
+     * said. Stepping its caps became a no-op, so five gate tests failed while the gate itself was
+     * "fine" — the fixture had gone inert, not the behaviour. (That rule was audit finding G-1 and
+     * is gone: a dormant target's caps are gated like a running one's. The fixture stays on X
+     * because the reason it was chosen still holds — enforced, with distinct weekday (15) and
+     * weekend (20) caps, so the two-loosenings case has two fields to move.)
      */
     private fun openXLimits() {
         goTo("Apps")

@@ -73,10 +73,17 @@ class LockStore(context: Context) {
 
     fun keyHash(): KeyHash? = EngineCodec.decodeKeyHash(prefs.getString(KEY_HASH, null))
 
-    /** Store the verifier for a freshly generated key. */
-    fun setKey(generated: GeneratedKey) {
+    /**
+     * Store the verifier for a freshly generated key. Returns false, writing nothing, when a key is
+     * already configured: the one-shot rule ("no in-app re-key") used to be enforced by the UI alone
+     * — the Create button is simply not shown once a key exists — and a store that would happily
+     * overwrite the verifier is a store one stray code path away from a free re-key.
+     */
+    fun setKey(generated: GeneratedKey): Boolean {
+        if (isConfigured()) return false
         val keyHash = KeyAuthority.create(generated.code, generated.salt, Sha256Hasher())
         prefs.edit().putString(KEY_HASH, EngineCodec.encodeKeyHash(keyHash)).apply()
+        return true
     }
 
     /** True iff [code] matches the stored key. False when no key is configured. */

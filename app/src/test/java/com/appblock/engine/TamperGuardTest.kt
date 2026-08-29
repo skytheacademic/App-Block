@@ -261,8 +261,186 @@ class TamperGuardTest {
         assertNotNull(s.c.tamperReason())
 
         s.integrity.autoTimeZone = true
+        s.clock.changeZone(-4 * 3600)                    // the OS re-detects the real zone
         assertEquals(Access.ALLOW, s.c.tick().access)
         assertNull(s.c.tamperReason())
+    }
+
+    /**
+     * The toggle alone is not the fix. If the zone is still where the user put it when the toggle
+     * comes back on (airplane mode: nothing for the OS to re-detect from), the latch holds until the
+     * zone matches the baseline again — or the phone reboots, which is the accepted escape.
+     */
+    @Test fun `re-enabling the zone toggle with the zone still moved stays latched`() {
+        val s = setup(autoTime = true, autoTimeZone = false)
+        s.c.onForeground(tiktok)
+        s.c.tick()
+        s.clock.changeZone(14 * 3600)
+        assertEquals(Access.BLOCK, s.c.tick().access)
+
+        s.integrity.autoTimeZone = true                  // toggled on, zone left at +14
+        assertEquals(Access.BLOCK, s.c.tick().access)
+        assertNotNull(s.c.tamperReason())
+
+        s.clock.changeZone(-4 * 3600)                    // back in step with the baseline
+        assertEquals(Access.ALLOW, s.c.tick().access)
+        assertNull(s.c.tamperReason())
+    }
+
+    // ---- N-4: the day is corroborated by uptime, and the baseline survives a toggle round-trip ----
+
+    /**
+     * The trusted forward jump: both toggles read ON, yet local time moves a day (a zone the OS took
+     * from a mock location; a date change laundered through toggle-off/change/toggle-on between two
+     * passes). Before: no latch, fresh budget. Now: no latch either — the clock is the OS's — but
+     * the day is still yesterday until uptime has actually covered the distance.
+     */
+    @Test fun `a trusted forward jump does not buy a fresh day until uptime catches up`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.clock.advance(31 * minute)
+        assertEquals(Access.BLOCK, s.c.tick().access)
+
+        s.clock.jumpWall(day)                            // "tomorrow", with the clock fully automatic
+        assertEquals(Access.BLOCK, s.c.tick().access)
+        assertNull("a trusted clock is not tampering", s.c.tamperReason())
+        assertEquals(LocalDate.of(2026, 7, 24), s.store.loadUsage(Target.TIKTOK)!!.dayKey)
+
+        s.clock.advance(day)                             // a real day of uptime goes by
+        assertEquals(Access.ALLOW, s.c.tick().access)    // now it really is tomorrow
+    }
+
+    /** Route 2 of the audit: a zone hop with automatic time zone ON — OS-owned, so never latched. */
+    @Test fun `an OS-owned zone hop cannot advance the day faster than uptime`() {
+        val s = setup(autoTime = true, autoTimeZone = true)
+        s.c.onForeground(tiktok)
+        s.clock.advance(31 * minute)
+        assertEquals(Access.BLOCK, s.c.tick().access)
+
+        s.clock.changeZone(14 * 3600)                    // 10:00 → 04:00 next day: the wall says Jul 25
+        assertEquals(Access.BLOCK, s.c.tick().access)
+        assertNull(s.c.tamperReason())
+    }
+
+    @Test fun `time spent after a trusted forward jump is charged to the day uptime is still on`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.clock.advance(5 * minute)
+        s.c.tick()
+        s.clock.jumpWall(day)
+        s.c.tick()
+        s.clock.advance(5 * minute)
+        s.c.tick()
+        val usage = s.store.loadUsage(Target.TIKTOK)!!
+        assertEquals(LocalDate.of(2026, 7, 24), usage.dayKey)
+        assertEquals(10 * 60L, usage.secondsUsed)
+    }
+
+    /**
+     * Route 3 of the audit: the re-key was a loosening. Monday 1200 s → (a real day passes) →
+     * Tuesday 300 s → roll the date back to Monday → Monday used to read 300. The archived Monday
+     * row is the larger count and is what survives.
+     */
+    @Test fun `rolling the date back onto an archived day keeps the larger count`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.clock.advance(20 * minute)
+        s.c.tick()                                       // Jul 24: 1200 s
+        s.c.onForeground("com.android.launcher")
+        s.clock.advance(day)
+        s.clock.local = LocalDateTime.of(2026, 7, 25, 10, 0)
+        s.c.onForeground(tiktok)
+        s.clock.advance(5 * minute)
+        s.c.tick()                                       // Jul 25: 300 s, Jul 24 archived at 1200 s
+        assertEquals(1200L, s.store.loadHistory(Target.TIKTOK).single().secondsUsed)
+
+        s.clock.jumpWall(-day)                           // back to Jul 24, clock still trusted
+        s.c.tick()
+        val usage = s.store.loadUsage(Target.TIKTOK)!!
+        assertEquals(LocalDate.of(2026, 7, 24), usage.dayKey)
+        assertEquals("the larger of the two counts", 1200L, usage.secondsUsed)
+    }
+
+    @Test fun `switching a clock toggle off latches at once, before any pass`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.c.tick()
+
+        s.integrity.autoTime = false
+        s.c.onClockSettingChanged()                      // the ContentObserver's call
+        assertNotNull(s.c.tamperReason())
+        assertEquals(Access.BLOCK, s.c.tick().access)
+    }
+
+    /**
+     * The between-two-passes laundering the old guard could not see: toggle off, move the clock,
+     * toggle on — all while nothing ticks. The observer latches on the off, the baseline stays
+     * frozen through the round-trip, and the latch holds until the clock is back where the OS had
+     * it. (With a network the OS does that itself the moment automatic time comes back on.)
+     */
+    @Test fun `toggle off, move the clock, toggle on stays latched until the clock comes back`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.c.tick()                                       // the trusted baseline
+
+        s.integrity.autoTime = false
+        s.c.onClockSettingChanged()
+        s.clock.jumpWall(-2 * 60 * minute)               // wind back past closing hours
+        s.integrity.autoTime = true                      // and cover the tracks
+        assertEquals(Access.BLOCK, s.c.tick().access)
+        assertNotNull(s.c.tamperReason())
+        assertEquals(Access.BLOCK, s.c.tick().access)    // and the pass after that
+
+        s.clock.jumpWall(2 * 60 * minute)                // the OS (or the user) puts it back
+        assertEquals(Access.ALLOW, s.c.tick().access)
+        assertNull(s.c.tamperReason())
+    }
+
+    @Test fun `an honest toggle off and straight back on clears on the next pass`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.c.tick()
+        s.integrity.autoTimeZone = false
+        s.c.onClockSettingChanged()
+        assertNotNull(s.c.tamperReason())
+        s.integrity.autoTimeZone = true
+        s.clock.advance(minute)
+        assertEquals(Access.ALLOW, s.c.tick().access)
+        assertNull(s.c.tamperReason())
+    }
+
+    /** Turning a toggle on is never the event — a stray change notification with both on is a no-op. */
+    @Test fun `a change notification with both toggles on does not latch`() {
+        val s = setup(autoTime = true)
+        s.c.onForeground(tiktok)
+        s.c.tick()
+        s.c.onClockSettingChanged()
+        assertNull(s.c.tamperReason())
+    }
+
+    /**
+     * The reboot path used to clear exceptions per *enabled* rule. An exception granted while a
+     * target was on, on a target switched off since, survived the reboot with monotonic anchors
+     * from the old boot. The store clears everything it holds now.
+     */
+    @Test fun `a reboot clears an exception on a target whose rule has since been disabled`() {
+        val clock = FakeClock()
+        val store = InMemoryEngineStore()
+        val integrity = FakeIntegrity()
+        var rules = DefaultRules.rules
+        val c = BudgetCoordinator(clock, store, integrity, RuleSource { rules })
+        c.onForeground(tiktok)
+        clock.advance(31 * minute)
+        c.tick()
+        c.requestException(Target.TIKTOK, extraMinutes = 30, windowMinutes = 120)
+        assertTrue(store.loadException(Target.TIKTOK) is ExceptionState.Pending)
+
+        rules = DefaultRules.rules.filterNot { it.target == Target.TIKTOK }   // switched off
+        integrity.boot = 2
+        clock.elapsed = 1_000L
+        clock.wall += 2 * minute
+        c.tick()
+        assertEquals(ExceptionState.None, store.loadException(Target.TIKTOK))
     }
 
     @Test fun `latched state freezes accrual`() {

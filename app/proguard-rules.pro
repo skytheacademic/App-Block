@@ -1,4 +1,5 @@
-# App-Block — release IS minified and resource-shrunk (isMinifyEnabled = true, build.gradle.kts).
+# App-Block — release IS minified (isMinifyEnabled = true, build.gradle.kts); resources are NOT
+# shrunk (no isShrinkResources), so a missing drawable is never this file's doing.
 #
 # No keep rules have been needed so far. Everything reflective in the app is reached through
 # frameworks that ship their own consumer rules: WorkManager instantiates the Workers, Compose keeps
