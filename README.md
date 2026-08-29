@@ -30,7 +30,7 @@ Still the software-friction tier: safe mode, a factory reset and adb from a comp
 - Variants: `debug` (`com.appblock.debug`, debuggable, what CI publishes) · `debugFast` (`com.appblock.fast`, 1-minute caps for QA, non-debuggable) · `release` (`com.appblock`, R8-minified, the daily driver).
 - Release: `./gradlew assembleRelease` signs only if `keystore.properties` + the `.jks` are present at
   the repo root (both gitignored — private keystore, deliberately with no synced copy); without them the release APK builds unsigned.
-- Tests: `./gradlew testDebugUnitTest --rerun` — pass `--rerun`, because an up-to-date run reports success without executing anything. 536 JVM tests (engine + Robolectric screens/stores/workers) at the time of writing.
+- Tests: `./gradlew testDebugUnitTest --rerun` — pass `--rerun`, because an up-to-date run reports success without executing anything. 543 JVM tests (engine + Robolectric screens/stores/workers) at the time of writing.
 
 ## Install (sideload)
 1. Install the APK (`adb install -r`, or Android Studio Run).
