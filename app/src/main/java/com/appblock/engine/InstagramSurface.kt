@@ -47,4 +47,33 @@ object InstagramSurface {
     fun targetFor(resourceIds: Set<String>): Target? =
         if (REEL_PAGER in resourceIds && DM_SENDER !in resourceIds) Target.INSTAGRAM_REELS_EXPLORE
         else null
+
+    /**
+     * The strictest [Target] across **every** Instagram window on screen, one signal set per window.
+     *
+     * Instagram is not one window. Opening the reel long-press menu adds a second window owned by the
+     * same package — an anchored `PopupWindow`, higher layer, ~28 nodes, carrying neither signal — and
+     * the service used to take the *first* Instagram window it was offered and never look at another.
+     * `getWindows()` hands them over topmost-first, so the popup won at every tie and the reel player
+     * underneath was never read: no pager, no target, no block.
+     *
+     * 🔴 **Confirmed on hardware 2026-08-29, and confirmed by the user as a bypass they had already
+     * used to watch reels while over the cap.** The menu covers only the bottom-left third of the
+     * screen (`Rect(56, 1513 - 653, 2298)` of 1080×2340), so the reel keeps playing in plain view.
+     *
+     * Strictest-wins, evaluated **per window rather than on the union**, and that distinction is the
+     * whole safety argument: [DM_SENDER] exempts a reel only when it sits in the *same* window as the
+     * pager, which is what "one reel a real person sent you" actually looks like. Unioning the sets
+     * instead would let any window that happens to carry a sender field — a share sheet, a reply bar —
+     * manufacture an exemption for a firehose reel in a different window. That would be a new
+     * loosening path opened by a fix for a loosening bug.
+     *
+     * The four cases, all covered by tests:
+     *  - firehose reel alone → blocked (unchanged)
+     *  - firehose reel + popup → **blocked (this is the fix)**
+     *  - DM reel alone → free (unchanged)
+     *  - DM reel + popup → free (the exemption survives the fix)
+     */
+    fun targetForWindows(perWindowResourceIds: List<Set<String>>): Target? =
+        perWindowResourceIds.firstNotNullOfOrNull { targetFor(it) }
 }
