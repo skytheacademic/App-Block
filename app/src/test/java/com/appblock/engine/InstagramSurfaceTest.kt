@@ -64,5 +64,65 @@ class InstagramSurfaceTest {
         assertNull(InstagramSurface.targetFor(emptySet()))
     }
 
+    // --- Multi-window: Instagram is not one window (regression, 2026-08-29) ---
+    //
+    // Captured on the S25 FE while a reel's long-press menu was open. TWO windows, both owned by
+    // com.instagram.android:
+    //   id=6515  "Popup Window"  layer=1  focused/active   28 nodes, ids all context_menu*
+    //   id=6488  "Instagram"     layer=0                   the reel player, carries the pager
+    // getWindows() offers them topmost-first, and the service took the FIRST Instagram window it was
+    // given — the menu — so the pager was never read and the reel was never budgeted.
+    // 🔴 The user confirmed independently that this defeated a real block while over the reels cap.
+    //
+    // The popup's own set is empty here because the scan only ever collects SIGNAL_IDS, and the menu
+    // carries neither. That is the point: an empty window used to be allowed to speak for the app.
+
+    @Test fun `firehose reel is budgeted with its long-press menu on top`() {
+        // The real ordering: popup first, player second.
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(emptySet(), ids(pager, clip("clips_video_container")))),
+        )
+    }
+
+    @Test fun `window order does not decide the verdict`() {
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(ids(pager), emptySet())),
+        )
+    }
+
+    @Test fun `DM reel keeps its exemption while a menu is open over it`() {
+        assertNull(InstagramSurface.targetForWindows(listOf(emptySet(), ids(pager, sender))))
+    }
+
+    @Test fun `a sender field in another window cannot exempt a firehose reel`() {
+        // THE reason this is per-window and not a union of every window's ids. A share sheet or reply
+        // bar carrying sender_username_or_fullname must not buy a free pass for an algorithmic reel
+        // playing in a different window — that would be a new loosening path opened by the fix for a
+        // loosening bug. Union would return null here; per-window blocks.
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(ids(sender), ids(pager))),
+        )
+    }
+
+    @Test fun `no instagram window is free`() {
+        assertNull(InstagramSurface.targetForWindows(emptyList()))
+    }
+
+    @Test fun `every window free stays free`() {
+        assertNull(InstagramSurface.targetForWindows(listOf(emptySet(), ids(clip("explore_action_bar")))))
+    }
+
+    @Test fun `one window agrees with the single-surface rule`() {
+        for (surface in listOf(ids(pager), ids(pager, sender), emptySet())) {
+            assertEquals(
+                InstagramSurface.targetFor(surface),
+                InstagramSurface.targetForWindows(listOf(surface)),
+            )
+        }
+    }
+
     private fun clip(name: String) = "${InstagramSurface.PACKAGE}:id/$name"
 }

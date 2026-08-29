@@ -127,6 +127,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** Nodes walked by the last Instagram signal scan — diagnostic only (tells a pruned tree apart
      *  from a tree that simply doesn't have the reel pager in it). */
     private var lastIgNodeCount = 0
+
+    /** How many Instagram windows the last scan walked. >1 means a popup/sheet was stacked over the
+     *  app, which is exactly the case that used to read the wrong one. Diagnostic only. */
+    private var lastIgWindowCount = 0
     /** The last real read taken before our overlay started occluding it — see [holdThroughOcclusion]. */
     private val occlusionHold = OcclusionHold<Foreground>()
     /**
@@ -556,7 +560,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      */
     private fun resolveForeground(): Foreground {
         var packageTarget: Target? = null
-        var instagramRoot: AccessibilityNodeInfo? = null
+        // Every Instagram window, not the first one. A reel's long-press menu is a second window owned
+        // by com.instagram.android, and getWindows() offers it first (topmost). Taking only the first
+        // meant reading a 28-node context menu instead of the reel player under it. See
+        // InstagramSurface.targetForWindows.
+        val instagramRoots = ArrayList<AccessibilityNodeInfo>(2)
         var browserVisible = false
         var webBlock: BrowserPolicy.WebBlock? = null
         var webHost: String? = null
@@ -577,7 +585,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val root = window.root ?: return@runCatching
                 val pkg = root.packageName?.toString() ?: return@runCatching
                 if (packageTarget == null) AppTargets.targetFor(pkg, activeTargets())?.let { packageTarget = it }
-                if (instagramRoot == null && pkg == InstagramSurface.PACKAGE) instagramRoot = root
+                if (pkg == InstagramSurface.PACKAGE) instagramRoots.add(root)
                 if (BrowserTargets.isAllowlisted(pkg)) visibleBrowsers.add(pkg)
                 if (webBlock == null &&
                     (BrowserTargets.isAllowlisted(pkg) || BrowserTargets.isWebApp(pkg) || pkg in browsers)
@@ -604,18 +612,25 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // as the fresh tree it is: full grace, and no earlier successful read still vouching for it.
         // Done after the loop, so a browser we just read is never evicted by its own pass.
         addressWatch.retain(visibleBrowsers)
-        val signals = instagramRoot?.let { collectInstagramSignals(it) }
+        // One signal set per Instagram window, sharing a single node budget so a cheap popup cannot
+        // starve the walk of the window that actually matters.
+        val perWindowSignals = collectInstagramSignals(instagramRoots)
+        // Union — for the canary and the log only. The *decision* is per-window (see below).
+        val signals = if (instagramRoots.isEmpty()) null else perWindowSignals.flatten().toSet()
         if (signals != null && InstagramSurface.REEL_PAGER in signals) noteReelSignal()
         // Both, not either. `packageTarget` used to win outright, which made the surface target
         // unreachable whenever a package also matched — and for Instagram a package now always
         // matches (its whole-app closing hours), so the reels budget would have gone dark.
-        val surfaceTarget = signals?.let { InstagramSurface.targetFor(it) }
+        // Strictest-wins across windows, never on the union: a share sheet carrying a sender field
+        // must not exempt a firehose reel playing in a different window.
+        val surfaceTarget = InstagramSurface.targetForWindows(perWindowSignals)
         val targets = listOfNotNull(packageTarget, surfaceTarget).distinct()
         val target = targets.firstOrNull()
-        val read = Foreground(targets, instagramRoot != null, browserVisible, webBlock, webHost, browserPkg)
+        val read =
+            Foreground(targets, instagramRoots.isNotEmpty(), browserVisible, webBlock, webHost, browserPkg)
         val effective = holdThroughOcclusion(read)
         diagnose(
-            windowList.size, packageTarget, instagramRoot != null, signals, target, effective.target,
+            windowList.size, packageTarget, instagramRoots.isNotEmpty(), signals, target, effective.target,
             browserPkg, omnibox, webBlock, effective.webBlock,
         )
         return effective
@@ -717,7 +732,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val web = if (browserPkg == null) "" else
             " browser=${browserPkg.substringAfterLast('.')} addr=$addr web=$webBlock"
         val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
-            "igNodes=$lastIgNodeCount igSignals=${signals?.map { it.substringAfterLast('/') }} " +
+            "igWindows=$lastIgWindowCount igNodes=$lastIgNodeCount " +
+            "igSignals=${signals?.map { it.substringAfterLast('/') }} " +
             "target=$target overlay=${overlayView != null}$held$web"
         if (line == lastDiagLine) return
         lastDiagLine = line
@@ -728,24 +744,42 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * Depth-first collect only the Instagram resource-ids the surface rule cares about
      * ([InstagramSurface.SIGNAL_IDS]), capped at [IG_NODE_BUDGET] nodes and short-circuiting once every
      * signal is seen — so a large Instagram tree can't stall the service.
+     *
+     * **One set per window, kept apart on purpose.** Instagram can own more than one window at a time
+     * (a reel's long-press menu is an anchored `PopupWindow` of the same package), and which window a
+     * signal came from is load-bearing: [InstagramSurface.targetForWindows] exempts a reel only when
+     * the DM sender field shares a window with the pager. Flattening here would throw that away.
      */
-    private fun collectInstagramSignals(root: AccessibilityNodeInfo): Set<String> {
-        val found = HashSet<String>(SIGNAL_COUNT)
-        val stack = ArrayDeque<AccessibilityNodeInfo>()
-        stack.addLast(root)
+    private fun collectInstagramSignals(roots: List<AccessibilityNodeInfo>): List<Set<String>> {
+        lastIgWindowCount = roots.size
+        if (roots.isEmpty()) {
+            lastIgNodeCount = 0
+            return emptyList()
+        }
+        // One budget for the whole pass, not one per window, so N windows can't cost N × the walk.
+        // A reel's popup menu is ~28 nodes against a 1_200 budget, so in the case this fix exists for
+        // the second walk is nearly free. `igWindows` in the diagnostic line is what would show a
+        // future Instagram spending the budget before the player is reached.
         var budget = IG_NODE_BUDGET
         var walked = 0
-        while (stack.isNotEmpty() && budget-- > 0) {
-            val node = stack.removeLast()
-            walked++
-            idOf(node)?.let { id ->
-                if (id in InstagramSurface.SIGNAL_IDS) found.add(id)
+        val perWindow = ArrayList<Set<String>>(roots.size)
+        for (root in roots) {
+            val found = HashSet<String>(SIGNAL_COUNT)
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.addLast(root)
+            while (stack.isNotEmpty() && budget-- > 0) {
+                val node = stack.removeLast()
+                walked++
+                idOf(node)?.let { id ->
+                    if (id in InstagramSurface.SIGNAL_IDS) found.add(id)
+                }
+                if (found.size == SIGNAL_COUNT) break   // seen everything the rule needs
+                stack.addAll(childrenOf(node))
             }
-            if (found.size == SIGNAL_COUNT) break   // seen everything the rule needs
-            stack.addAll(childrenOf(node))
+            perWindow.add(found)
         }
         lastIgNodeCount = walked
-        return found
+        return perWindow
     }
 
     /**
