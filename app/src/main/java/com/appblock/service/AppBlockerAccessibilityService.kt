@@ -117,6 +117,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var browserCacheAtMs = 0L
     /** Last line emitted by [diagnose], so debug logging only fires when the resolved state changes. */
     private var lastDiagLine: String? = null
+    /** Last line emitted by [diagnoseSelfDefense] — same once-per-distinct-state rule as [lastDiagLine]. */
+    private var lastWatchDiagLine: String? = null
+    /** Whether the last [visibleWatchedScreen] read had to fall back to the active window because
+     *  `getWindows()` had not offered it. Diagnostic only, but it is *the* N-2 question: if this is
+     *  true on the device-admin page, `getWindows()` was the silent failure. */
+    private var lastActiveWindowRescued = false
     /** Nodes walked by the last Instagram signal scan — diagnostic only (tells a pruned tree apart
      *  from a tree that simply doesn't have the reel pager in it). */
     private var lastIgNodeCount = 0
@@ -297,14 +303,19 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // agree: an open window stands down the Settings tier but leaves the installer tier armed
         // (B-8). Only setup-incomplete disarms everything. Cost is one text walk while a window is
         // open in Settings, which is bounded and rare.
+        val screen = visibleWatchedScreen()
+        val setupIncomplete = !Watchdog.setupCompleted(this)
+        val windowOpen = unlockController.isOpen()
+        val repairMode = !canDrawOverlay()
         val bounce = SettingsWatch.shouldBounce(
             packageName = pkg,
-            screen = visibleWatchedScreen(),
+            screen = screen,
             selfLabel = getString(R.string.app_name),
-            setupIncomplete = !Watchdog.setupCompleted(this),
-            windowOpen = unlockController.isOpen(),
-            repairMode = !canDrawOverlay(),
+            setupIncomplete = setupIncomplete,
+            windowOpen = windowOpen,
+            repairMode = repairMode,
         )
+        diagnoseSelfDefense(pkg, screen, setupIncomplete, windowOpen, repairMode, bounce)
         if (!bounce) return false
         performGlobalAction(GLOBAL_ACTION_HOME)
         val now = SystemClock.elapsedRealtime()
@@ -342,6 +353,49 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Why a settings-watch decision came out the way it did, on QA builds only, logged once per
+     * distinct state. The instrument N-2 needed and did not have: on the phone the device-admin page
+     * simply failed to bounce, and separating "the screen never reached the rules" from "the rules
+     * said no" cost a whole cable session of `dumpsys` and inference.
+     *
+     * Read it as: `pkg` · how many strings the screen offered · whether our label was among them ·
+     * which control word matched, if any · `rescued=true` when the active window had to be pulled in
+     * because `getWindows()` had not offered it (**this is the N-2 answer** — true on the device-admin
+     * page means `getWindows()` was the silent failure) · the three stand-downs · the verdict.
+     *
+     * `adb logcat -s AppBlockWatch`, open Device admin apps, tap the App-Block row, read one line.
+     *
+     * Strings are counted, never printed. Every string on a watched Settings screen is fair game to
+     * log by the same argument the omnibox diagnostic uses in reverse — but titles alone would leak
+     * which Settings pages were visited, and the counts answer the question just as well.
+     */
+    private fun diagnoseSelfDefense(
+        packageName: String?,
+        screen: SettingsWatch.Screen,
+        setupIncomplete: Boolean,
+        windowOpen: Boolean,
+        repairMode: Boolean,
+        bounce: Boolean,
+    ) {
+        if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        val label = getString(R.string.app_name)
+        val namesUs = screen.texts.any { it.contains(label, ignoreCase = true) }
+        val titleNamesUs = screen.titles.any { it.contains(label, ignoreCase = true) }
+        val control = SettingsWatch.settingsControls.firstOrNull { needle ->
+            screen.texts.any { it.contains(needle, ignoreCase = true) }
+        }
+        val line = "pkg=${packageName?.substringAfterLast('.')} " +
+            "titles=${screen.titles.size} texts=${screen.texts.size} " +
+            "namesUs=$namesUs titleNamesUs=$titleNamesUs control=$control " +
+            "rescued=$lastActiveWindowRescued " +
+            "setupIncomplete=$setupIncomplete windowOpen=$windowOpen repairMode=$repairMode " +
+            "bounce=$bounce"
+        if (line == lastWatchDiagLine) return
+        lastWatchDiagLine = line
+        android.util.Log.d(WATCH_TAG, line)
+    }
+
+    /**
      * Whether the block overlay can still be drawn, cached for [OVERLAY_CHECK_TTL_MS] because this is
      * consulted per Settings event and is a binder call. Defaults to granted so a check that hasn't
      * happened yet leaves the self-defense armed rather than open.
@@ -374,11 +428,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun visibleWatchedScreen(): SettingsWatch.Screen {
         val titles = ArrayList<CharSequence>(6)
         val texts = ArrayList<CharSequence>(64)
+        val walked = HashSet<Int>(6)
         var budget = NODE_BUDGET
         for (window in visibleWindows()) {
             runCatching {
                 val root = window.root ?: return@runCatching
                 if (!SettingsWatch.isWatched(root.packageName?.toString())) return@runCatching
+                walked.add(window.id)
                 val firstIndex = texts.size
                 val heading = ArrayList<CharSequence>(1)
                 budget = collectTexts(root, texts, heading, budget)
@@ -388,6 +444,32 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 if (titles.size == found) texts.getOrNull(firstIndex)?.let { titles.add(it) }
             }
             if (budget <= 0) break
+        }
+        lastActiveWindowRescued = false
+        // Second channel for the window the user is actually looking at — see
+        // [SettingsWatch.shouldWalkActiveWindow] for the N-2 hardware failure that bought it. Only
+        // ever *adds* a window the first pass missed, so on the ordinary screen this is one set lookup.
+        if (budget > 0) {
+            runCatching {
+                val active = rootInActiveWindow ?: return@runCatching
+                if (!SettingsWatch.shouldWalkActiveWindow(
+                        walkedWindowIds = walked,
+                        activeWindowId = active.windowId,
+                        activePackageName = active.packageName?.toString(),
+                    )
+                ) {
+                    return@runCatching
+                }
+                lastActiveWindowRescued = true
+                val heading = ArrayList<CharSequence>(1)
+                budget = collectTexts(active, texts, heading, budget)
+                // Heading yes, first-text-in-reading-order no. The window title this window would have
+                // been judged against isn't available on this path, and the first-text candidate is
+                // only safe *because* it is the last resort of a window that offered neither (C-4): a
+                // list scrolled so App-Block's row sits at the top would otherwise read as a page about
+                // App-Block. Rule 2 still sees every string, which is what N-2 needs.
+                titles.addAll(heading)
+            }
         }
         return SettingsWatch.Screen(titles, texts)
     }
@@ -1104,6 +1186,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val OMNIBOX_HEALTH_TTL_MS = 60_000L
         /** `adb logcat -s AppBlockFg` — debug builds only, see [diagnose]. */
         private const val DIAG_TAG = "AppBlockFg"
+        /** Settings-watch diagnostic — see [diagnoseSelfDefense]. Its own tag so `-s AppBlockWatch`
+         *  isolates it from the per-frame foreground chatter on [DIAG_TAG]. */
+        private const val WATCH_TAG = "AppBlockWatch"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
          *  as a VIEW intent and lands on a blank page. No network, no third-party site, and nothing a
          *  redirect can bounce off. See [exitOverlay]. */
