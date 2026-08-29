@@ -2,10 +2,15 @@ name: CI
 
 # Every branch, not just main. The whole point is that a branch is known-good *before* it is merged —
 # batch-b-robustness sat un-mergeable for a week because nothing ever built it from a clean clone.
+#
+# `push` only, no `pull_request` trigger: with both, every push to a branch that has a PR open ran
+# the whole job twice (the push run and the PR run, ~4 min each, identical answers). A PR shows the
+# push run's checks on its head commit anyway, and a branch with no PR still gets its APK artifact.
+# The trade: nothing here builds the hypothetical merge commit — acceptable for a one-person repo
+# whose branches are short-lived and rebased onto main.
 on:
   push:
     branches: ['**']
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -18,27 +23,24 @@ concurrency:
 
 jobs:
   build:
-    name: Unit tests + debug APK
+    name: Unit tests + lint + APKs
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      # Action majors are kept current deliberately, not opportunistically: GitHub retires the Node
-      # runtime an old major is pinned to, and when it does these start failing on a day nothing in
-      # the project changed. A green CI that goes red for a reason outside the repo is the worst kind
-      # of red — so the bump happens while the run is passing, never as an emergency.
-      #
-      # Check the majors against the registry rather than incrementing by one and assuming: the first
-      # pass here went v4->v5 across the board, and CI came back green while *still* warning that
-      # upload-artifact and setup-gradle were on Node 20 — because those two were already at v7 and
-      # v6. A green run does not mean the pins are current, only that they resolve.
-      - uses: actions/checkout@v7
+      # Every action is pinned to a full commit SHA, with the version it resolves to in the comment
+      # beside it. A tag like `@v7` is mutable — whoever controls the action's repo can move it, and
+      # the job here runs with the repo's contents and a network. The SHA is
+      # what actually ran when the pin was reviewed. Dependabot (.github/dependabot.yml, monthly,
+      # grouped) bumps the SHA and rewrites the comment; the old advice about checking majors by hand
+      # is now its job — a green run never meant the pins were current, only that they resolved.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # JDK 17, matching compileOptions/jvmTarget and the README's stated requirement. Robolectric
       # pins its SDK per-test for JDK-17 compatibility (see app/build.gradle.kts), so this is the
       # version the test suite is actually written against.
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: '17'
@@ -47,10 +49,10 @@ jobs:
       # AGP downloads whatever `compileSdk` asks for, so this one workflow serves branches on 35 and
       # 36 alike without needing an edit each time the project moves.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
 
       # testDebugUnitTest, not `test`: ui-test-manifest is a debugImplementation, so the Compose
       # screen tests can only resolve their host activity in the debug variant.
@@ -60,7 +62,7 @@ jobs:
       # always(), because a red run is exactly when the report is worth reading.
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-results-${{ github.sha }}
           path: |
@@ -69,14 +71,35 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
-      - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      # Lint on the release variant — the one that ships. Errors fail the job (abortOnError is the
+      # default); warnings stay in the report. The first run of this step found two NewApi errors
+      # (`longVersionCode` is API 28 against minSdk 26) that weeks of green test runs never could:
+      # the JVM suite runs on a modern SDK and cannot see a minSdk violation. app/lint.xml
+      # holds the project-wide decisions about which warnings are silenced and why.
+      - name: Lint (release variant)
+        run: ./gradlew lintRelease --stacktrace
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lint-report-${{ github.sha }}
+          path: app/build/reports/lint-results-release.html
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Both variants. `assembleRelease` here is unsigned (the keystore is gitignored and stays off
+      # CI) and is not uploaded — an unsigned APK installs nowhere. It is built anyway so that R8 and
+      # the release configuration are proven from a clean clone on every push, not discovered broken
+      # on the laptop the evening a build is needed.
+      - name: Build debug + release APKs
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
 
       # Sideloadable straight from the GitHub app on the phone — every green push leaves an install
       # candidate behind, so trying a change out never depends on having a laptop nearby. Debug only:
       # release signing needs the keystore, which is gitignored and stays off CI.
       - name: Upload debug APK
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk

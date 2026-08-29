@@ -1,5 +1,6 @@
 import java.io.FileInputStream
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -98,10 +99,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -123,6 +120,14 @@ android {
  * so `./gradlew test` was red on a clean tree even though `testDebugUnitTest` was green. The engine
  * tests still run in every variant — only the screen tests are scoped.
  */
+// `kotlinOptions` is deprecated in KGP 2.x; `compilerOptions` on the Kotlin extension is its
+// replacement. Same value as compileOptions above — the two must agree or AGP fails the build.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
 tasks.withType<Test>().configureEach {
     if (name != "testDebugUnitTest") {
         filter {

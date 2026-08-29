@@ -57,7 +57,8 @@
         <activity
             android:name="com.journeyapps.barcodescanner.CaptureActivity"
             android:screenOrientation="portrait"
-            tools:replace="android:screenOrientation" />
+            tools:replace="android:screenOrientation"
+            tools:ignore="LockedOrientationActivity,DiscouragedApi" />
 
         <!-- Not here to police the phone — it asks for no policies at all. An active device admin
              is one of the packages PackageManager refuses to suspend, and suspension is exactly how

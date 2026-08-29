@@ -1,6 +1,7 @@
 package com.appblock.data
 
 import android.content.Context
+import androidx.core.content.pm.PackageInfoCompat
 import com.appblock.engine.BrowserTargets
 import com.appblock.engine.SignalCanary
 
@@ -63,7 +64,8 @@ class OmniboxWitnessStore(context: Context) {
      * this should be unreachable; it is handled rather than asserted.
      */
     fun installedVersion(pkg: String): Long? = runCatching {
-        app.packageManager.getPackageInfo(pkg, 0).longVersionCode
+        // PackageInfoCompat: `longVersionCode` itself is API 28 and minSdk is 26 (lint NewApi).
+        PackageInfoCompat.getLongVersionCode(app.packageManager.getPackageInfo(pkg, 0))
     }.getOrNull()
 
     fun load(pkg: String): SignalCanary.Witness = SignalCanary.Witness(

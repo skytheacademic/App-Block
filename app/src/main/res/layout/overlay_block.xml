@@ -20,6 +20,8 @@
   left in here are what a preview renders and what a failed lookup would show — never what ships.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="Overdraw"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"

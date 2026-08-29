@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Project-wide lint decisions. CI runs `lintRelease` and fails on errors; warnings are kept visible
+     in the uploaded report, so anything silenced here is silenced for a stated reason. -->
+<lint>
+    <!-- "Use the KTX extension instead" on ~23 SharedPreferences.edit / Uri.parse call sites: sugar,
+         not a defect. Swap to the KTX form when a file is next being edited, not in a sweep. -->
+    <issue id="UseKtx" severity="ignore" />
+
+    <!-- Single-locale personal app; the flagged strings ("%d blocked", "…and %d more",
+         "%d of %d closed now") read correctly in the singular as they stand. -->
+    <issue id="PluralsCandidate" severity="ignore" />
+
+    <!-- isAccessibilityTool is API 31+, minSdk is 26: it is there for Android 17's Advanced
+         Protection (which revokes accessibility from apps without it), and older phones ignore it. -->
+    <issue id="UnusedAttribute">
+        <ignore path="src/main/res/xml/accessibility_service_config.xml" />
+    </issue>
+</lint>
