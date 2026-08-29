@@ -1,6 +1,7 @@
 package com.appblock.service
 
 import android.accessibilityservice.AccessibilityService
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
@@ -878,6 +879,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * at all. [applyFacts] compares before it writes, so the 5-second tick costs nothing until a
      * rendered minute actually rolls over.
      */
+    // InflateParams: the inflated view has no parent by design — it is handed to WindowManager.
+    @SuppressLint("InflateParams")
     private fun showOverlay(message: CharSequence, key: String, facts: BlockFacts.Facts): Boolean {
         overlayView?.let { view ->
             if (key != overlayKey) {

@@ -1,0 +1,18 @@
+# Keeps the SHA-pinned actions in .github/workflows/ci.yml current: Dependabot rewrites the pin and
+# the `# vX.Y.Z` comment beside it. Monthly and grouped, so a personal repo sees one PR a month at
+# most, not one per action per week.
+#
+# No `gradle` ecosystem on purpose. gradle/verification-metadata.xml pins a checksum for every
+# artifact, so a Dependabot bump would fail dependency verification until someone ran
+# `./gradlew --write-verification-metadata sha256` on the PR — every bump PR would arrive red.
+# Gradle dependencies are bumped by hand, with that step, when there is a reason to.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"

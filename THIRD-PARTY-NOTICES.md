@@ -11,7 +11,7 @@ upstream `LICENSE`. A guessed year in a licence notice is worse than no notice a
 | Component | Where it lives | Licence |
 | --- | --- | --- |
 | Inter 4.001 | `app/src/main/res/font/inter_{regular,medium}.ttf` | SIL Open Font License 1.1 |
-| Phosphor Icons | `app/src/main/res/drawable/ic_ph_*.xml` (32 files) | MIT |
+| Phosphor Icons | `app/src/main/res/drawable/ic_ph_*.xml` (27 files) | MIT |
 
 **On the APK.** OFL §2 accepts the notice as "machine-readable metadata fields within text or binary
 files as long as those fields can be easily viewed by the user". The shipped TTFs carry both the
