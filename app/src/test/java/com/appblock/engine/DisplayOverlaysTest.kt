@@ -48,26 +48,54 @@ class DisplayOverlaysTest {
         val calls = mutableListOf<String>()
         val managers = HashMap<Int, FakeWm>()
 
+        /**
+         * `WindowManager.removeView` dispatches `onViewDetachedFromWindow`, and the service's listener
+         * calls straight back into `noteDetached`. Modelling that re-entrancy is the point: the guard
+         * that our own removal is a no-op is only worth anything if the callback actually happens.
+         */
+        var dispatchDetachOnRemove = false
+        var overlaysRef: DisplayOverlays<FakeWm, FakeView, String>? = null
+
+        /** Every view minted per display, newest last. */
+        val inflated = HashMap<Int, MutableList<FakeView>>()
+
+        /** What `covered()` reported at the instant each detach was dispatched. */
+        val coveredDuringDetach = mutableListOf<Set<Int>>()
+
         fun wmFor(id: Int): FakeWm? =
             if (id in liveDisplays) managers.getOrPut(id) { FakeWm(id) } else null
 
-        fun overlays() = DisplayOverlays<FakeWm, FakeView, String>(
+        fun overlays() = buildOverlays().also { overlaysRef = it }
+
+        private fun buildOverlays() = DisplayOverlays<FakeWm, FakeView, String>(
             mayDraw = { mayDraw },
             defaultWindowManager = { wmFor(0) },
             secondaryWindowManager = { wmFor(it) },
-            inflate = { id, _ -> FakeView(id) },
+            inflate = { id, _ -> FakeView(id).also { inflated.getOrPut(id) { mutableListOf() }.add(it) } },
             add = { wm, view ->
                 calls.add("add $wm $view")
                 addSucceeds(view.displayId)
             },
             remove = { wm, view ->
                 calls.add("remove $wm $view")
+                if (dispatchDetachOnRemove) overlaysRef?.let {
+                    coveredDuringDetach.add(it.covered())
+                    it.noteDetached(view.displayId, view)
+                }
                 if (view.displayId == removeThrowsOn) throw IllegalStateException("detached")
             },
             bindMessage = { view, msg -> calls.add("msg $view"); view.message = msg },
             bindFacts = { view, facts -> calls.add("facts $view"); view.facts = facts },
         )
     }
+
+    /**
+     * The view the fake attached to [displayId]. `inflate` mints a fresh [FakeView] per attach, so this
+     * is what the service's `OnAttachStateChangeListener` would be handed — the only honest way to test
+     * the identity check rather than asserting against a view we invented.
+     */
+    private fun FakeHost.attachedView(displayId: Int): FakeView =
+        inflated.getValue(displayId).last()
 
     private fun content(key: String, message: String = key, facts: String = key) =
         DisplayOverlays.Content(message = message, key = key, facts = facts)
@@ -187,5 +215,181 @@ class DisplayOverlaysTest {
         overlays.removeAll()
         assertEquals(emptySet<Int>(), overlays.covered())
         assertTrue(host.calls.toString(), host.calls.any { it == "remove wm3 view3" })
+    }
+
+    // ---- noteDetached: covered() is a fact, not a memory of one ----
+    //
+    // Finding [P1] 2026-08-30. The audit reported it against `showOverlay`'s old
+    // `return overlayView != null`; that expression is gone, but the SHAPE survived the multi-display
+    // rewrite — `covered()` was the set of adds that had once returned true, and nothing ever asked
+    // again. Every test below is one question: can this class claim a display is covered when it isn't?
+
+    /**
+     * BITE. The defect itself. One UI takes our window down — a revoked "Appear on top", a display
+     * teardown we did not see — and without this the block screen is gone while the engine is certain
+     * it is blocking.
+     */
+    @Test fun `a view detached by the platform stops counting as covered`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a")))
+        val view = host.attachedView(phone)
+        overlays.noteDetached(phone, view)
+        assertEquals(emptySet<Int>(), overlays.covered())
+    }
+
+    /**
+     * BITE, and this is the consequence that matters. The two callers the memory was lying to: a
+     * silently-detached phone overlay must make `satisfied` false and the kick-to-home fire.
+     */
+    @Test fun `a silent detach reaches satisfied and the home fallback`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        val want = setOf(phone)
+        overlays.reconcile(mapOf(phone to content("a")))
+        assertTrue(DisplayCoverage.satisfied(want, overlays.covered()))
+        assertFalse(DisplayCoverage.homeFallback(want, overlays.covered(), phone))
+
+        overlays.noteDetached(phone, host.attachedView(phone))
+
+        assertFalse(DisplayCoverage.satisfied(want, overlays.covered()))
+        assertTrue(DisplayCoverage.homeFallback(want, overlays.covered(), phone))
+    }
+
+    /** BITE. Self-healing: the next pass puts it back in `plan.add`, with no extra state to hold. */
+    @Test fun `a detached display is re-attached on the next reconcile`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a")))
+        overlays.noteDetached(phone, host.attachedView(phone))
+        host.calls.clear()
+
+        assertEquals(setOf(phone), overlays.reconcile(mapOf(phone to content("a"))))
+        assertTrue(host.calls.toString(), host.calls.any { it.startsWith("add wm0") })
+    }
+
+    /** BITE. And it must be visible: `failed()` is what prints `ov=FAIL` in the census line. */
+    @Test fun `a detached display is reported as failed, not merely absent`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a"), monitor to content("a")))
+        overlays.noteDetached(monitor, host.attachedView(monitor))
+        assertEquals(setOf(monitor), overlays.failed())
+        assertEquals(setOf(phone), overlays.covered())
+    }
+
+    /**
+     * GUARD, and the one that keeps the fix from being worse than the bug. Our own `hideOn` calls
+     * `removeView`, which dispatches the detach straight back in here. If that echo were treated as a
+     * platform teardown, every ordinary hide would mark the display FAILED and the next tick would
+     * re-add an overlay the engine had just decided to take down — a block screen that will not close.
+     */
+    @Test fun `our own hideOn does not mark the display failed through the detach echo`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        host.dispatchDetachOnRemove = true
+        overlays.reconcile(mapOf(phone to content("a")))
+
+        overlays.hideOn(phone)
+
+        assertEquals(emptySet<Int>(), overlays.covered())
+        assertEquals(emptySet<Int>(), overlays.failed())
+    }
+
+    /** GUARD. Same echo, via the reconcile path that removes a display the plan no longer wants. */
+    @Test fun `reconciling a display away does not mark it failed through the detach echo`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        host.dispatchDetachOnRemove = true
+        overlays.reconcile(mapOf(phone to content("a"), monitor to content("a")))
+
+        assertEquals(setOf(phone), overlays.reconcile(mapOf(phone to content("a"))))
+        assertEquals(emptySet<Int>(), overlays.failed())
+    }
+
+    /**
+     * GUARD. The identity check, and why it is not paranoia: if the platform posts the detach instead of
+     * dispatching it inline, it can land after a *new* view is already attached for that id. Acting on
+     * the old view's echo would take down a live, correct overlay — the bug this class exists to
+     * prevent, introduced by its own fix.
+     */
+    @Test fun `a late detach for a replaced view leaves the live overlay alone`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a")))
+        val stale = host.attachedView(phone)
+        overlays.hideOn(phone)
+        overlays.reconcile(mapOf(phone to content("b")))
+        val live = host.attachedView(phone)
+        assertTrue("the fake must hand out a fresh view", stale !== live)
+
+        overlays.noteDetached(phone, stale)
+
+        assertEquals(setOf(phone), overlays.covered())
+        assertEquals(emptySet<Int>(), overlays.failed())
+    }
+
+    /** GUARD. Nothing attached there, nothing to correct — and certainly nothing to call FAILED. */
+    @Test fun `noteDetached for an uncovered display is a no-op`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a")))
+
+        overlays.noteDetached(monitor, FakeView(monitor))
+
+        assertEquals(setOf(phone), overlays.covered())
+        assertEquals(emptySet<Int>(), overlays.failed())
+    }
+
+    /** GUARD. One display's teardown says nothing about the other's — the whole reason this is a map. */
+    @Test fun `a detach on one display leaves the other covered`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a"), monitor to content("a")))
+
+        overlays.noteDetached(phone, host.attachedView(phone))
+
+        assertEquals(setOf(monitor), overlays.covered())
+    }
+
+    /**
+     * BITE (M5). The ordering *inside* `hideOn`, pinned directly rather than through its outcome.
+     *
+     * The echo guard is carried by two mechanisms that cover for each other — the record is dropped
+     * before `remove` is called, **and** `hideOn` clears the failed mark afterwards — so reversing
+     * either one alone changes no result and no outcome-level test can see it. That redundancy is
+     * fine to have and dangerous to rely on unexamined, so each half gets a test of its own: this one
+     * says the callback finds nothing left to act on, and the next says the mark is cleared.
+     */
+    @Test fun `our own removal drops the record before the platform detach can land`() {
+        val host = FakeHost()
+        val overlays = host.overlays()
+        host.dispatchDetachOnRemove = true
+        overlays.reconcile(mapOf(phone to content("a")))
+
+        overlays.hideOn(phone)
+
+        assertEquals(1, host.coveredDuringDetach.size)
+        assertFalse(
+            "the detach callback must not find a live record for the view being removed",
+            phone in host.coveredDuringDetach.single(),
+        )
+    }
+
+    /**
+     * BITE (M4). The other half. A display we stop wanting must not stay marked FAILED — the census
+     * prints `ov=FAIL` from that set, and a stale mark is a permanent false alarm about a monitor that
+     * is no longer plugged in.
+     */
+    @Test fun `hiding a display clears an earlier failed mark`() {
+        val host = FakeHost()
+        host.addSucceeds = { it != monitor }
+        val overlays = host.overlays()
+        overlays.reconcile(mapOf(phone to content("a"), monitor to content("a")))
+        assertEquals(setOf(monitor), overlays.failed())
+
+        overlays.hideOn(monitor)
+
+        assertEquals(emptySet<Int>(), overlays.failed())
     }
 }

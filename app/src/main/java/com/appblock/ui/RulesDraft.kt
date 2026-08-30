@@ -76,6 +76,14 @@ class RulesDraft(private val store: RuleStore) {
 
     fun setSchedule(target: Target, schedule: Schedule?) = update(target) { it.copy(schedule = schedule) }
 
+    // 🚨 There is deliberately NO `setScheduleOnly` here, and adding one is not a one-line change.
+    // `DurableChangeGate.fields()` skips all three cap comparisons across a `scheduleOnly` flip — safe
+    // only because no user edit can produce that flip today, so the caps cannot change in the same
+    // save. Give the draft a mode setter and a raised cap starts riding through unnamed on a receipt
+    // that says "daily caps removed", then returning on the free TIGHTEN flip back. Fix the gate
+    // first; `DurableChangeGateTest.a cap raised across a schedule-only flip…` is written to be found
+    // from here.
+
     /**
      * Add a target the settings didn't have. A tightening — the gate reads an absent target as fully
      * open — so it saves freely, which is the asymmetry that lets an on-device "block another app"
