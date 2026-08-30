@@ -83,6 +83,30 @@ object SignalCanary {
     }
 
     /**
+     * The verdict for a rule that rests on **several** witnessed signals at once — the worst of them.
+     *
+     * A rule is only as healthy as its weakest id. Instagram's Explore-preview rule needs
+     * [InstagramSurface.CONTEXT_MENU] *and* [InstagramSurface.EXPLORE_ACTION_BAR]; website blocking
+     * needs a readable address bar in every installed allowlisted browser. One drifted id is a dead
+     * rule however confidently the others are confirmed.
+     *
+     * The precedence is deliberate and is not the enum's declaration order: [Health.STALE] outranks
+     * [Health.PENDING] outranks [Health.CONFIRMED] outranks [Health.NO_APP]. [Health.NO_APP] comes last
+     * because it is the *absence* of a claim — "nothing here to verify" must never mask a real verdict
+     * from a signal that does exist — so an empty collection is the only way to actually get it.
+     *
+     * Lives here rather than in either witness store because both ask this identical question, and two
+     * callers folding the same case analysis separately is how `classify` and `looseningReasons` came
+     * apart once already.
+     */
+    fun worst(healths: Collection<Health>): Health = when {
+        Health.STALE in healths -> Health.STALE
+        Health.PENDING in healths -> Health.PENDING
+        Health.CONFIRMED in healths -> Health.CONFIRMED
+        else -> Health.NO_APP
+    }
+
+    /**
      * Fold in a fresh look at what's installed. Restarts the grace clock only when the version actually
      * changed — calling this every scan must not keep pushing the deadline away, or the canary could
      * never reach [Health.STALE].

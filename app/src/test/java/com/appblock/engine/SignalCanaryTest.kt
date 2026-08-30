@@ -43,6 +43,24 @@ class SignalCanaryTest {
         assertEquals(SignalCanary.Health.PENDING, SignalCanary.assess(w, 41 * day, grace, 30 * day))
     }
 
+    /**
+     * A rule that rests on several ids is only as healthy as its weakest one, and the precedence is
+     * not the enum's declaration order. NO_APP is last because it is the *absence* of a claim: one id
+     * with nothing to say must never mask another that is genuinely stale.
+     */
+    @Test fun `worst takes the weakest verdict, and no-app never masks a real one`() {
+        val stale = SignalCanary.Health.STALE
+        val pending = SignalCanary.Health.PENDING
+        val confirmed = SignalCanary.Health.CONFIRMED
+        val noApp = SignalCanary.Health.NO_APP
+        assertEquals(stale, SignalCanary.worst(listOf(confirmed, stale, pending, noApp)))
+        assertEquals(pending, SignalCanary.worst(listOf(confirmed, pending, noApp)))
+        assertEquals(confirmed, SignalCanary.worst(listOf(noApp, confirmed)))
+        assertEquals(noApp, SignalCanary.worst(listOf(noApp, noApp)))
+        // Nothing to fold is the only honest way to reach "nothing to verify".
+        assertEquals(noApp, SignalCanary.worst(emptyList()))
+    }
+
     @Test fun `says nothing at all when Instagram is not installed`() {
         assertEquals(SignalCanary.Health.NO_APP, assess(SignalCanary.Witness(), atDay = 0))
         // Not even after a long time — there is no rule to verify.

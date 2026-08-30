@@ -29,6 +29,8 @@ class WitnessStoreTest {
     private val day = 24L * 60 * 60 * 1_000
     private val chrome = "com.android.chrome"
     private val brave = "com.brave.browser"
+    private val pager = InstagramSurface.REEL_PAGER
+    private val exploreBar = InstagramSurface.EXPLORE_ACTION_BAR
 
     @Before fun clear() {
         app.getSharedPreferences("appblock_runtime", Context.MODE_PRIVATE).edit().clear().commit()
@@ -83,23 +85,89 @@ class WitnessStoreTest {
 
     // ---- reels ----
 
-    @Test fun `a reel witness round-trips`() {
+    @Test fun `a reel witness round-trips per signal id`() {
         val s = SignalWitnessStore(app)
         val w = SignalCanary.Witness(confirmedVersion = 300L, confirmedAtMs = 1L, installedVersion = 301L, installedSeenAtMs = 2L)
-        s.save(w)
-        assertEquals(w, s.load())
+        s.save(pager, w)
+        assertEquals(w, s.load(pager))
+        assertEquals(SignalCanary.Witness(), s.load(exploreBar))     // another signal is untouched
     }
 
     @Test fun `instagram absent reads as no version`() {
         assertNull(SignalWitnessStore(app).installedVersion())
-        assertEquals(Health.NO_APP, SignalWitnessStore(app).refresh(0L))
+        assertEquals(Health.NO_APP, SignalWitnessStore(app).installedHealth(0L))
     }
 
     /** No ceiling here on purpose: a user who stopped watching reels must never be prompted for it. */
     @Test fun `a reel confirmation never expires on its own`() {
         install(InstagramSurface.PACKAGE, 300L)
         val s = SignalWitnessStore(app)
-        s.confirm(0L)
-        assertEquals(Health.CONFIRMED, s.refresh(400 * day))
+        s.confirm(pager, 0L)
+        assertEquals(Health.CONFIRMED, s.refresh(pager, 400 * day))
+    }
+
+    /**
+     * 🔴 The defect this store was re-shaped for. Confirming the pager used to confirm *the canary*,
+     * so once the Explore-preview rule started resting on `explore_action_bar` too, Instagram could
+     * rename that id, the rule could stop firing, and the drift notification would stay silent because
+     * the pager was still being seen every day.
+     */
+    @Test fun `the surface verdict is only as healthy as its worst id`() {
+        install(InstagramSurface.PACKAGE, 300L)
+        val s = SignalWitnessStore(app)
+        s.confirm(pager, 0L)
+        // A newly witnessed id starts its OWN grace clock the first time it is observed, so adding
+        // one can never post a drift notification on the day it ships — it is pending, not stale.
+        assertEquals(Health.PENDING, s.installedHealth(0L))
+        assertEquals(Health.CONFIRMED, s.refresh(pager, 15 * day))   // the pager alone looks fine…
+        assertEquals(Health.STALE, s.installedHealth(15 * day))      // …the rule as a whole does not
+    }
+
+    @Test fun `confirming one signal does not confirm another`() {
+        install(InstagramSurface.PACKAGE, 300L)
+        val s = SignalWitnessStore(app)
+        s.confirm(pager, 0L)
+        assertEquals(Health.PENDING, s.refresh(exploreBar, day))
+        s.confirm(exploreBar, day)
+        assertEquals(Health.CONFIRMED, s.installedHealth(400 * day))
+    }
+
+    /**
+     * The upgrade path. A phone that earned a pager confirmation before the store became per-id must
+     * keep it — otherwise every existing install comes out of the update unconfirmed and posts a drift
+     * notification about an id that never moved, on release day.
+     */
+    @Test fun `a confirmation earned before the store became per-id still counts`() {
+        install(InstagramSurface.PACKAGE, 300L)
+        writeLegacyWitness(confirmedVersion = 300L, confirmedAtMs = 0L, installedVersion = 300L, installedSeenAtMs = 0L)
+        assertEquals(Health.CONFIRMED, SignalWitnessStore(app).refresh(pager, 400 * day))
+    }
+
+    @Test fun `a namespaced record wins over the legacy one`() {
+        install(InstagramSurface.PACKAGE, 301L)
+        writeLegacyWitness(confirmedVersion = 300L, confirmedAtMs = 0L, installedVersion = 300L, installedSeenAtMs = 0L)
+        val s = SignalWitnessStore(app)
+        s.confirm(pager, 10 * day)                                   // seen on the NEW version
+        assertEquals(301L, s.load(pager).confirmedVersion)
+    }
+
+    /** The fallback is the pager's own history, so no other signal may inherit it. */
+    @Test fun `the legacy fallback belongs to the pager alone`() {
+        writeLegacyWitness(confirmedVersion = 300L, confirmedAtMs = 0L, installedVersion = 300L, installedSeenAtMs = 0L)
+        assertEquals(SignalCanary.Witness(), SignalWitnessStore(app).load(exploreBar))
+    }
+
+    private fun writeLegacyWitness(
+        confirmedVersion: Long,
+        confirmedAtMs: Long,
+        installedVersion: Long,
+        installedSeenAtMs: Long,
+    ) {
+        app.getSharedPreferences("appblock_runtime", Context.MODE_PRIVATE).edit()
+            .putLong("signal_confirmed_version", confirmedVersion)
+            .putLong("signal_confirmed_at", confirmedAtMs)
+            .putLong("signal_installed_version", installedVersion)
+            .putLong("signal_installed_seen_at", installedSeenAtMs)
+            .commit()
     }
 }

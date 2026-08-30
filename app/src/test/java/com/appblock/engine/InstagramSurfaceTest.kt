@@ -234,5 +234,37 @@ class InstagramSurfaceTest {
         )
     }
 
+    /**
+     * Every collected id must be one somebody has **decided** about: either the canary watches it for
+     * drift, or it is excluded on purpose with the reason written down. A fifth id added without a
+     * decision would land in neither set and fail here, which is the point — the drift canary silently
+     * covering one id out of three is precisely the failure it exists to catch, aimed at itself.
+     *
+     * The membership itself is argued on [InstagramSurface.WITNESSED_IDS]; this only asserts that the
+     * partition is total and that nothing is witnessed which is never collected.
+     */
+    @Test fun `every signal id is either witnessed for drift or deliberately excluded`() {
+        val witnessed = InstagramSurface.WITNESSED_IDS
+        val excludedOnPurpose = setOf(sender, menu)
+        assertEquals(emptySet<String>(), witnessed - InstagramSurface.SIGNAL_IDS)
+        assertEquals(InstagramSurface.SIGNAL_IDS, witnessed + excludedOnPurpose)
+        assertEquals(emptySet<String>(), witnessed intersect excludedOnPurpose)
+    }
+
+    /**
+     * GUARD, and deliberately labelled one: it cannot arise on today's single-display code. It documents
+     * a **call-site** choice made by the multi-display change — [InstagramSurface.targetForWindows] is
+     * called once per display, never once across all of them.
+     *
+     * The cross-window "may only ever add strictness" rule is scoped to **one** display, because that is
+     * the only scope in which a `PopupWindow` can actually be anchored over a grid. Flatten two displays'
+     * windows into one list and a preview card open on the phone would manufacture a block from the
+     * monitor's Explore grid — strictness invented out of two unrelated screens.
+     */
+    @Test fun `a preview card on one display does not manufacture a block from another display's grid`() {
+        assertNull(InstagramSurface.targetForWindows(listOf(previewMenuWindow)))
+        assertNull(InstagramSurface.targetForWindows(listOf(exploreGridWindow)))
+    }
+
     private fun clip(name: String) = "${InstagramSurface.PACKAGE}:id/$name"
 }
