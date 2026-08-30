@@ -20,6 +20,39 @@ package com.appblock.engine
  * Net rule: **budget the pager UNLESS a DM sender field is present.** That one line covers "one reel a
  * friend sent me is fine, the rabbit-hole is not" uniformly across every entry point — no swipe
  * counting, no per-entry special-casing.
+ *
+ * ## The second rule: the Explore press-and-hold preview (added 2026-08-29, fifth cable)
+ *
+ * The pager rule above is not sufficient, because **there is a way to watch a reel with no pager on
+ * screen at all.** Press and hold a thumbnail in the Explore grid and Instagram plays it near-full-width
+ * in a *preview card* with a Like / Share / Repost menu under it. Reproduced over the cap on 0.6.0:
+ * **three minutes of playback, finger off the glass, no block** (two screenshots three minutes apart are
+ * different frames of the same reel).
+ *
+ * The window arrangement is the opposite of the one [targetForWindows] was written for:
+ *  - the `PopupWindow` (`Rect(56, 1513 - 653, 2298)`, 28 nodes) holds **only** [`context_menu`][CONTEXT_MENU]
+ *    and its items — the menu, nothing else;
+ *  - the **video plays inside the Explore grid's own window** (`MainTabActivity`, 99 nodes).
+ *
+ * So both Instagram windows get walked, correctly, and **neither carries the pager**. Nothing was broken:
+ * the multi-window fix taught the scan to read a player *underneath* a popup, and here **there is no
+ * player**.
+ *
+ * The signal is therefore the pair — [`context_menu`][CONTEXT_MENU] **and**
+ * [`explore_action_bar`][EXPLORE_ACTION_BAR] — because measurement on hardware showed neither half is
+ * sufficient alone:
+ *  - **Home feed**, press and hold → **no popup at all** (it just double-tap-likes, `like_heart`). Free,
+ *    and free without needing a rule.
+ *  - **Profile grid**, press and hold → the **identical** `context_menu`. Profile browsing is free
+ *    (CONSTRAINTS §1), so *the menu on its own would block a free surface*. `explore_action_bar` is what
+ *    scopes the rule to Explore; the profile's action bar is a different id.
+ *  - **A plain tap** on an Explore reel opens the real player and is already blocked by the pager rule
+ *    (measured 3/3 under 1.6 s). Only the *hold* needed a new rule.
+ *
+ * ⚖️ **A photo preview is budgeted too, deliberately.** The context menu is byte-identical for a reel and
+ * a photo (only the labels differ, by adding "Report"), so no rule keyed on it can tell them apart —
+ * and the owner's call on 2026-08-29 was that an Explore preview counts either way. CONSTRAINTS §1
+ * keeps the Explore **grid** free; a full-card preview is not the grid.
  */
 object InstagramSurface {
 
@@ -35,10 +68,34 @@ object InstagramSurface {
     const val DM_SENDER = "${PREFIX}sender_username_or_fullname"
 
     /**
-     * The only resource-ids the on-device scan needs to look for — so the accessibility tree walk can
-     * stop as soon as it has seen both, instead of collecting the whole (large) Instagram tree.
+     * The press-and-hold media preview's menu, which lives in its own `PopupWindow`.
+     *
+     * Present for a reel **and** for a photo, and present on the profile grid too — so it says "a
+     * preview card is open", never "a reel is playing" and never "this surface is budgeted". It only
+     * decides anything paired with [EXPLORE_ACTION_BAR].
      */
-    val SIGNAL_IDS: Set<String> = setOf(REEL_PAGER, DM_SENDER)
+    const val CONTEXT_MENU = "${PREFIX}context_menu"
+
+    /**
+     * The Explore grid's own action bar — what the preview above is anchored over.
+     *
+     * A **free** surface's id being load-bearing looks odd, so: it is not evidence of anything budgeted.
+     * It is the scope limiter that keeps [CONTEXT_MENU] from firing on the profile grid, whose action
+     * bar carries a different id. Verified still present on Instagram 444.0.0.46.85 (2026-08-29), which
+     * re-confirms the 2026-07-22 mapping.
+     */
+    const val EXPLORE_ACTION_BAR = "${PREFIX}explore_action_bar"
+
+    /**
+     * The only resource-ids the on-device scan needs to look for, instead of collecting the whole
+     * (large) Instagram tree.
+     *
+     * ⚠️ The walk's "stop once every signal is seen" short-circuit is now nearly dead — no single window
+     * carries all four — so in practice the walk is bounded by its node budget rather than by this set.
+     * That costs nothing measured: the two windows in the case this exists for are **99 + 28 nodes**
+     * against a 1,200 budget, and a full reel player is ~692.
+     */
+    val SIGNAL_IDS: Set<String> = setOf(REEL_PAGER, DM_SENDER, CONTEXT_MENU, EXPLORE_ACTION_BAR)
 
     /**
      * The budgeted [Target] for the Instagram surface described by [resourceIds] (the set of
@@ -73,7 +130,42 @@ object InstagramSurface {
      *  - firehose reel + popup → **blocked (this is the fix)**
      *  - DM reel alone → free (unchanged)
      *  - DM reel + popup → free (the exemption survives the fix)
+     *
+     * ## Then [explorePreview] arrives and *does* look across windows — read this before touching it
+     *
+     * Everything above says: never judge on the union. The Explore-preview rule breaks that shape, and
+     * the reason it is still safe is an **asymmetry, not an exception**:
+     *
+     * > **A cross-window signal may only ever ADD strictness. It may never create an exemption.**
+     *
+     * [DM_SENDER] is the only exempting signal in this file, and it is still read **strictly
+     * per-window**, inside [targetFor], exactly as before — so the share-sheet attack that motivated the
+     * per-window discipline is still refused (its test is unchanged and still passes). [explorePreview]
+     * can only turn "free" into "budgeted", so unioning its two inputs cannot manufacture a free pass;
+     * the worst a wrong union can do there is block something it shouldn't, which is the safe direction
+     * and visible immediately.
+     *
+     * Invert that and the fix would re-open the loosening bug it was written beside. If a future signal
+     * needs to *exempt* across windows, it does not belong here.
      */
     fun targetForWindows(perWindowResourceIds: List<Set<String>>): Target? =
         perWindowResourceIds.firstNotNullOfOrNull { targetFor(it) }
+            ?: explorePreview(perWindowResourceIds)
+
+    /**
+     * The Explore press-and-hold preview: a media preview card open over the Explore grid.
+     *
+     * Both halves are required and neither is checked per-window, because on hardware they are *never*
+     * in the same window — the menu is a `PopupWindow`, the grid is the activity. Asking only that each
+     * appears *somewhere* is also the more robust of the two spellings: were Instagram to move the menu
+     * into the activity's own window, "different windows" would silently stop firing (a loosening
+     * failure), whereas "anywhere" keeps working.
+     *
+     * See the class KDoc for why the pair is needed: the menu alone also fires on the free profile grid.
+     */
+    private fun explorePreview(perWindowResourceIds: List<Set<String>>): Target? {
+        val previewOpen = perWindowResourceIds.any { CONTEXT_MENU in it }
+        val overExplore = perWindowResourceIds.any { EXPLORE_ACTION_BAR in it }
+        return if (previewOpen && overExplore) Target.INSTAGRAM_REELS_EXPLORE else null
+    }
 }

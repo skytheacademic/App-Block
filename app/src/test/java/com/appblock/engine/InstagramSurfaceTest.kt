@@ -124,5 +124,115 @@ class InstagramSurfaceTest {
         }
     }
 
+    // --- The Explore press-and-hold preview (2026-08-29, fifth cable) ---
+    //
+    // Captured on the S25 FE, over the cap, on release 0.6.0. Press and hold a thumbnail in the Explore
+    // grid and the reel plays in a preview card for MINUTES with no block — verified by two screenshots
+    // three minutes apart showing different frames of the same reel, finger off the glass.
+    //
+    //   Window #11  PopupWindow:21aa864   com.instagram.android   28 nodes, ids ALL context_menu*
+    //               bounds [56,1513][653,2298]  <- the menu only; no video in this window
+    //   Window #13  MainTabActivity       com.instagram.android   99 nodes, carries explore_action_bar
+    //               <- the video plays HERE, in the Explore grid's own window
+    //
+    // Neither window carries the pager, so the rule above returns null — correctly. There is no player
+    // to find. The fixtures below use exactly those two id sets.
+
+    private val menu = InstagramSurface.CONTEXT_MENU
+    private val exploreBar = InstagramSurface.EXPLORE_ACTION_BAR
+
+    /** Window #11 verbatim: the 28-node popup carries the menu and nothing else the scan looks for. */
+    private val previewMenuWindow = ids(menu)
+
+    /** Window #13 verbatim, as the scan sees it: the Explore grid, no pager anywhere. */
+    private val exploreGridWindow = ids(exploreBar, clip("preview_clip_play_count"))
+
+    @Test fun `media held open in the explore preview is budgeted`() {
+        // Covers a photo as well as a reel, and there is deliberately no second test for the photo:
+        // the two produce the *same* id set on hardware (the photo's menu differs only by adding a
+        // "Report" label, which is not a resource-id), so a photo case here would assert the identical
+        // thing and prove nothing. That they are indistinguishable is the finding — and budgeting both
+        // was the owner's call on 2026-08-29.
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(previewMenuWindow, exploreGridWindow)),
+        )
+    }
+
+    @Test fun `explore preview verdict does not depend on window order`() {
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(exploreGridWindow, previewMenuWindow)),
+        )
+    }
+
+    @Test fun `both halves in one window still count`() {
+        // Robustness, not an observed layout: were Instagram to stop using a separate PopupWindow, a
+        // "the two must be in different windows" spelling would silently stop firing — a loosening
+        // failure. See explorePreview's KDoc.
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(exploreGridWindow + previewMenuWindow)),
+        )
+    }
+
+    @Test fun `the same preview menu on the profile grid is free`() {
+        // 🔴 THE reason the rule is a pair. Press and hold on the profile grid produces the IDENTICAL
+        // context_menu (measured on hardware the same session), and profile browsing is free under
+        // CONSTRAINTS §1. Only explore_action_bar keeps this from blocking a free surface.
+        assertNull(
+            InstagramSurface.targetForWindows(listOf(previewMenuWindow, ids(clip("profile_tab")))),
+        )
+    }
+
+    @Test fun `feed press and hold is free`() {
+        // Measured: the feed produces NO popup at all — it just double-tap-likes (like_heart). So there
+        // is no context_menu to pair with anything, whatever else is on screen.
+        assertNull(
+            InstagramSurface.targetForWindows(listOf(ids(clip("like_heart"), clip("main_feed_action_bar")))),
+        )
+    }
+
+    @Test fun `explore grid with nothing held open is free`() {
+        // The grid itself is free (CONSTRAINTS §1) — explore_action_bar must never budget on its own,
+        // or merely opening Explore would block.
+        assertNull(InstagramSurface.targetForWindows(listOf(exploreGridWindow)))
+        assertNull(InstagramSurface.targetFor(exploreGridWindow))
+    }
+
+    @Test fun `a preview menu with no explore grid anywhere is free`() {
+        assertNull(InstagramSurface.targetForWindows(listOf(previewMenuWindow, emptySet())))
+    }
+
+    @Test fun `the DM exemption is still read per-window, not across the union`() {
+        // The asymmetry that makes the cross-window rule safe: adding it must not let a DM sender field
+        // in one window exempt a firehose reel in another. The new ids are on screen here and change
+        // nothing — the pager window has no sender, so it is still budgeted.
+        assertEquals(
+            Target.INSTAGRAM_REELS_EXPLORE,
+            InstagramSurface.targetForWindows(listOf(ids(sender), ids(pager), previewMenuWindow)),
+        )
+    }
+
+    @Test fun `a DM reel keeps its exemption with a preview menu on screen`() {
+        // …and the exemption itself still works when the new signals are present but unpaired.
+        assertNull(InstagramSurface.targetForWindows(listOf(previewMenuWindow, ids(pager, sender))))
+    }
+
+    @Test fun `the new ids never budget a single surface on their own`() {
+        // targetFor is the per-window rule and must stay pager-only: the Explore rule is cross-window
+        // by construction, so no single window may resolve on it.
+        for (surface in listOf(ids(menu), ids(exploreBar), ids(menu, exploreBar))) {
+            assertNull(InstagramSurface.targetFor(surface))
+        }
+    }
+
+    @Test fun `every signal the scan collects is one the rules actually read`() {
+        assertEquals(
+            setOf(pager, sender, menu, exploreBar),
+            InstagramSurface.SIGNAL_IDS,
+        )
+    }
+
     private fun clip(name: String) = "${InstagramSurface.PACKAGE}:id/$name"
 }
