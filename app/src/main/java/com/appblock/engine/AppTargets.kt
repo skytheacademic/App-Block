@@ -149,6 +149,30 @@ object AppTargets {
     }
 
     /**
+     * The subset of [packagesTopmostFirst] that something actually budgets — i.e. the packages whose
+     * continued presence on screen justifies keeping a block up.
+     *
+     * Deliberately **packages, not targets**: `Target` carries a key, and only user-added ones carry a
+     * package (`Target.userPackage`), so a list of targets cannot answer "is the app that is still on
+     * screen one of the ones we blocked?" for any built-in. That question is what
+     * `OcclusionHold.sustain` asks once per pass.
+     *
+     * Same traversal and the same `targetFor` as [foregroundTargets], so the two cannot drift into
+     * disagreeing about what counts as budgeted — the pairing a caller depends on is that every package
+     * here contributed a target there.
+     */
+    fun budgetedPackages(
+        packagesTopmostFirst: List<String>,
+        activeTargets: Set<Target>,
+    ): Set<String> {
+        val out = LinkedHashSet<String>(4)
+        for (packageName in packagesTopmostFirst) {
+            if (targetFor(packageName, activeTargets) != null) out.add(packageName)
+        }
+        return out
+    }
+
+    /**
      * Packages the picker must never offer, because something already enforces them.
      *
      * Keyed on *being enforced*, which is the property that actually matters, rather than on

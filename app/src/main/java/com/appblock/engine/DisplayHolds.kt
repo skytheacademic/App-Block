@@ -94,6 +94,7 @@ class DisplayHolds<T : Any>(
     fun effective(
         reads: Map<Int, T>,
         blockable: (T) -> Boolean,
+        justifiedBy: (T) -> Set<String>,
         covered: Set<Int>,
         nowMs: Long,
     ): Map<Int, T> {
@@ -109,7 +110,10 @@ class DisplayHolds<T : Any>(
             }
             if (raw != null && blockable(raw)) {
                 // A real read got through the pruning: re-arm on it and restart the countdown.
-                holdFor(id).arm(raw, lastPackage[id], nowMs)
+                // Armed on what the READ says is on screen, never on `lastPackage` — the event stream's
+                // most recent name is one of possibly several live apps, and picking it made the hold
+                // fight the other split-screen pane. See OcclusionHold.heldPackages.
+                holdFor(id).arm(raw, justifiedBy(raw), nowMs)
                 out[id] = raw
                 continue
             }
@@ -119,8 +123,8 @@ class DisplayHolds<T : Any>(
     }
 
     /** Arm only if nothing is held for [displayId] — see [OcclusionHold.seed] for why not `arm`. */
-    fun seed(displayId: Int, value: T, nowMs: Long) {
-        holdFor(displayId).seed(value, lastPackage[displayId], nowMs)
+    fun seed(displayId: Int, value: T, justifiedBy: Set<String>, nowMs: Long) {
+        holdFor(displayId).seed(value, justifiedBy, nowMs)
     }
 
     fun release(displayId: Int) {

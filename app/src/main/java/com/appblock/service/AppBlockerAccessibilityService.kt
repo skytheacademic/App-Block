@@ -53,6 +53,7 @@ import com.appblock.engine.ServiceLiveness
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
+import com.appblock.engine.WindowKindMemo
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.LockStore
@@ -188,6 +189,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * does not count as moving on.
      */
     private val holds = DisplayHolds<Foreground>()
+
+    /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
+    private val windowKinds = WindowKindMemo()
     /** Cached overlay readings — see [readOverlayGrant]. */
     private var overlayGranted = true to true
     private var overlayGrantedAtMs = 0L
@@ -370,13 +374,68 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun noteForegroundPackage(event: AccessibilityEvent) {
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName && event.className?.toString() != MainActivity::class.java.name) return
+        // Only an APPLICATION window changing means the user moved between apps. A system window
+        // appearing over the current one does not — and on 2026-08-30 that was a user-drivable flicker:
+        // press volume, the panel is `TYPE_SYSTEM`, its event named `com.android.systemui`, the moved-on
+        // test read that as "left", and the block screen dropped for ~40-80 ms on every press. Measured
+        // on hardware with the panel open: Instagram and TikTok `TYPE_APPLICATION`, One UI Home
+        // `TYPE_APPLICATION`, Volume and the accessibility button `TYPE_SYSTEM`.
+        //
+        // ⚠️ Structural, not a package blocklist — the same discriminator shape as the settings-watch's
+        // "our label on a *checkable* control". A list of system packages would go stale the first time
+        // Samsung renamed one, and would be silently wrong rather than loudly wrong.
+        //
+        // A system window appearing over the current one is not the user leaving — press volume and the
+        // panel's `com.android.systemui` event used to read as "left", dropping the block for 40–80 ms
+        // on every press. See [WindowKindMemo] for why this is a *learned* judgement rather than the
+        // obvious `type != TYPE_APPLICATION` test, which was built, measured, and broke the exit outright
+        // (0/5 Home presses released, because a pruned launcher window has no readable type either).
+        val type = changedWindowType(event)
+        windowKinds.note(pkg, type, AccessibilityWindowInfo.TYPE_APPLICATION)
+        if (BuildConfig.FAST_CAPS) {
+            android.util.Log.d(
+                EVT_TAG,
+                "pkg=$pkg winId=${event.windowId} type=$type sysOnly=${windowKinds.isSystemOnly(pkg)} " +
+                    "cls=${event.className}",
+            )
+        }
+        if (windowKinds.isSystemOnly(pkg)) return
         val displayId =
             if (attributable) DisplayCensus.attribute(eventDisplayId(event)) ?: return
             else DisplayCensus.DEFAULT_DISPLAY
         // Reaching here is the proof that the moved-on release condition has a live channel to work
         // with, which is what retires that display's timeout backstop (C-1). It is fed only by the
         // events that survive the filter above, so the overlay cannot prove the point by its own churn.
+        //
+        // 💡 The system-window filter above deliberately gates the LATCH as well as the package. The
+        // latch claims "the moved-on test has a live channel here", and only events that can actually
+        // release are evidence of that. Retiring the backstop on volume-panel events, on a device where
+        // no app event ever arrived, would leave a hold with no exit at all.
         holds.noteForegroundEvent(displayId, pkg)
+    }
+
+    /**
+     * The accessibility window type of the window [event] is about, or null when it cannot be read.
+     *
+     * One extra `windowsOnAllDisplays` read per window-state event, deliberately **not** routed through
+     * [windowsByDisplay]: that one owns the `lastAllDisplaysApi` diagnostic and the display-0 backfill
+     * invariant, and neither belongs on this path. It is cheap next to what the pass this event triggers
+     * is about to do — window enumeration is one binder call from the accessibility cache, while the
+     * node walking that follows is what actually costs.
+     */
+    private fun changedWindowType(event: AccessibilityEvent): Int? {
+        val id = event.windowId
+        // -1 literal, not AccessibilityWindowInfo.UNDEFINED_WINDOW_ID: that constant is not public API.
+        if (id == -1) return null
+        fun typeIn(list: List<AccessibilityWindowInfo>?): Int? =
+            list?.firstOrNull { runCatching { it.id }.getOrDefault(-1) == id }
+                ?.let { runCatching { it.type }.getOrNull() }
+        if (multiDisplay) {
+            runCatching { windowsOnAllDisplays }.getOrNull()?.let { sparse ->
+                for (i in 0 until sparse.size()) typeIn(sparse.valueAt(i))?.let { return it }
+            }
+        }
+        return typeIn(runCatching { windows }.getOrNull())
     }
 
     /** The event's own display, or null below API 33 / when the framework never filled it in. */
@@ -415,14 +474,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val coveredOnEntry = overlays.covered()
         val raw = scanDisplays()
         holds.retain(raw.keys + enumeratedDisplayIds())
-        val effective = holds.effective(raw, Foreground::blockable, coveredOnEntry, now)
+        val effective =
+            holds.effective(raw, Foreground::blockable, Foreground::holdPackages, coveredOnEntry, now)
         diagnose(raw, effective)
         refreshForeground(mergeForegrounds(effective))
         val decision = coordinator.tick()
         applyDecision(decision, effective)
         val coveredNow = overlays.covered()
         for ((id, read) in effective) {
-            if (id in coveredNow && read.blockable) holds.seed(id, read, now)
+            if (id in coveredNow && read.blockable) holds.seed(id, read, read.holdPackages, now)
         }
         diagnoseDisplays()
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
@@ -869,6 +929,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val webHost: String? = null,
         /** Which browser produced [webBlock] — the overlay's exit needs to steer that same browser. */
         val webPkg: String? = null,
+        /**
+         * The packages on this display that [targets] came from — see [holdPackages], the only reader.
+         * Kept beside [targets] rather than derived from them because a built-in `Target` carries a key,
+         * not a package.
+         */
+        val budgetedPackages: Set<String> = emptySet(),
     ) {
         /**
          * "Is anything limited on screen?" — the question every existing caller was really asking of
@@ -882,6 +948,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
          * used inline, named so [DisplayHolds.effective] can take it as `Foreground::blockable`.
          */
         val blockable: Boolean get() = target != null || webBlock != null
+
+        /**
+         * Every package whose presence on screen justifies keeping this block up — what
+         * [DisplayHolds.effective] arms the occlusion hold with.
+         *
+         * ⚠️ **[webPkg] is in here for a reason and removing it is a lockout, not a loosening.** A web
+         * block has no [targets] at all, so without the browser this set would be empty for every
+         * blocked URL; the hold would then release on the browser's own next event, which is a flicker,
+         * and — worse — the set would carry no way to distinguish "still on the blocked page" from
+         * "left". `webPkg` is non-null whenever [webBlock] is, set on the same pass in `resolveDisplay`.
+         *
+         * The launcher is deliberately **absent**: pressing Home must release the hold, and that is the
+         * whole exit this test exists to provide (see [OcclusionHold]).
+         */
+        val holdPackages: Set<String>
+            get() = if (webPkg == null) budgetedPackages else budgetedPackages + webPkg
     }
 
     /**
@@ -1040,8 +1122,21 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val surfaceTarget = InstagramSurface.targetForWindows(perWindowSignals)
         // The mapping itself is pure and tested; this side only supplies what it saw. Order matters —
         // the engine gates every target here but accrues to the first, so topmost must stay first.
-        val targets =
-            AppTargets.foregroundTargets(onScreenPackages.toList(), activeTargets(), surfaceTarget)
+        // Hoisted: read once so the target list and the package set below cannot be resolved against
+        // two different rule snapshots, which would let the hold be justified by a package that did not
+        // produce a target on this same pass.
+        val active = activeTargets()
+        val topmost = onScreenPackages.toList()
+        val targets = AppTargets.foregroundTargets(topmost, active, surfaceTarget)
+        // Instagram is added explicitly when only the *surface* matched: a reels/Explore block can exist
+        // with no package target at all (it did before RULES_VERSION 5 made Instagram one), and without
+        // this the hold for a reel would be justified by nothing and drop on the first event.
+        val budgeted =
+            if (surfaceTarget != null) {
+                AppTargets.budgetedPackages(topmost, active) + InstagramSurface.PACKAGE
+            } else {
+                AppTargets.budgetedPackages(topmost, active)
+            }
         omnibox?.let { lastOmniboxRead[displayId] = it }
         return DisplayScan(
             Foreground(
@@ -1051,6 +1146,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 webBlock,
                 webHost,
                 browserPkg,
+                budgeted,
             ),
             topPackage = onScreenPackages.firstOrNull(),
         )
@@ -1807,6 +1903,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val WATCH_TAG = "AppBlockWatch"
         /** Per-display census — see [diagnoseDisplays]. Its own tag so `-s AppBlockDsp` isolates it. */
         private const val DSP_TAG = "AppBlockDsp"
+        private const val EVT_TAG = "AppBlockEvt"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
          *  as a VIEW intent and lands on a blank page. No network, no third-party site, and nothing a
          *  redirect can bounce off. See [exitOverlay]. */

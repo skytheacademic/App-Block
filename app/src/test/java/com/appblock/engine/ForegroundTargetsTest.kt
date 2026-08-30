@@ -128,4 +128,44 @@ class ForegroundTargetsTest {
         val shizuku = "moe.shizuku.privileged.api"
         assertEquals(AppTargets.alwaysBlockedTargets.toList(), resolve(shizuku))
     }
+
+    // ---- budgetedPackages: which packages justify holding a block up ----
+    //
+    // The occlusion hold needs PACKAGES, not targets: a built-in `Target` carries a key and no package,
+    // so a list of targets cannot answer "is the app still on screen one of the ones we blocked?".
+    // Getting that wrong is what made the block screen flicker ~120 ms every 2-3 s in split-screen on
+    // hardware (2026-08-30) — see OcclusionHold.heldPackages.
+
+    private fun budgeted(vararg packages: String, active: Set<Target> = emptySet()) =
+        AppTargets.budgetedPackages(packages.toList(), active)
+
+    /** 🔴 The whole point: both panes, so the other pane's events cannot look like "the user left". */
+    @Test fun `both budgeted apps on screen are returned`() {
+        assertEquals(setOf(tiktok, x), budgeted(tiktok, x))
+    }
+
+    /** GUARD. Unbudgeted packages must stay out, or Home would stop releasing the hold. */
+    @Test fun `the launcher and unbudgeted apps are excluded`() {
+        assertEquals(setOf(tiktok), budgeted(launcher, tiktok, reddit))
+    }
+
+    /**
+     * GUARD, and the pairing that keeps this honest: every package here contributed a target there.
+     * If these two ever disagree, the hold is justified by something that is not actually being blocked.
+     */
+    @Test fun `it agrees with foregroundTargets about what counts as budgeted`() {
+        val packages = listOf(launcher, tiktok, reddit, x, tiktokTrill)
+        val targets = AppTargets.foregroundTargets(packages, emptySet())
+        val justified = AppTargets.budgetedPackages(packages, emptySet())
+        assertEquals(
+            targets.toSet(),
+            justified.mapNotNull { AppTargets.foregroundTargets(listOf(it), emptySet()).firstOrNull() }
+                .toSet(),
+        )
+    }
+
+    /** GUARD. Nothing budgeted on screen is an empty set, not a launcher-shaped false positive. */
+    @Test fun `nothing budgeted gives an empty set`() {
+        assertEquals(emptySet<String>(), budgeted(launcher, reddit))
+    }
 }
