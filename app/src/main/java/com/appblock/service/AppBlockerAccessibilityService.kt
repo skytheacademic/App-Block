@@ -2,9 +2,12 @@ package com.appblock.service
 
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
+import android.app.ActivityOptions
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -16,6 +19,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -36,9 +40,12 @@ import com.appblock.engine.BrowserPolicy
 import com.appblock.engine.BrowserTargets
 import com.appblock.engine.BudgetCoordinator
 import com.appblock.engine.Decision
+import com.appblock.engine.DisplayCensus
+import com.appblock.engine.DisplayCoverage
+import com.appblock.engine.DisplayHolds
+import com.appblock.engine.DisplayOverlays
 import com.appblock.engine.DomainMatcher
 import com.appblock.engine.InstagramSurface
-import com.appblock.engine.OcclusionHold
 import com.appblock.engine.OverlayRepairWatch
 import com.appblock.engine.RuleSource
 import com.appblock.engine.Schedule
@@ -46,6 +53,7 @@ import com.appblock.engine.ServiceLiveness
 import com.appblock.engine.SettingsWatch
 import com.appblock.engine.SignalCanary
 import com.appblock.engine.Target
+import com.appblock.engine.WindowKindMemo
 import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.LockStore
@@ -62,7 +70,10 @@ import com.appblock.util.overlayAppOpAllows
  *  1. Window events (TYPE_WINDOW_STATE_CHANGED / TYPE_WINDOWS_CHANGED) — something on screen changed.
  *  2. A window *scan* on every event and tick: a budgeted app counts as foreground if it occupies ANY
  *     visible window, not just the focused one — split-screen / Samsung App Pairs can't park TikTok
- *     in an unfocused pane for free.
+ *     in an unfocused pane for free. ⚠️ **This was only half true until 2026-08-30.** The scan did walk
+ *     every window, but it kept the *first* package target it found and discarded the rest, so with two
+ *     budgeted apps on screen the one underneath was neither gated nor metered. The claim above is the
+ *     one this line was always making; [AppTargets.foregroundTargets] is what finally makes it hold.
  *  3. A ~5s heartbeat while a budgeted app / Instagram / a browser is on screen — so the block appears
  *     the *moment* the budget runs out (or a reel opens, or a blocked URL loads), not only on the next
  *     app switch.
@@ -83,13 +94,30 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         getSystemService(WINDOW_SERVICE) as WindowManager
     }
 
-    private var overlayView: View? = null
-    private var overlayKey: String? = null
+    private val displayManager by lazy { getSystemService(DISPLAY_SERVICE) as DisplayManager }
+
     /**
-     * The browser to steer away from a blocked page when the user taps the overlay's exit, or null
-     * when what's blocked is an app (→ Home instead). See [exitOverlay].
+     * One block overlay per covered display. Replaces the single `overlayView` / `overlayKey` /
+     * `overlayExitBrowserPkg` triple, each of which was a service-wide singleton that becomes wrong the
+     * moment two displays can be covered at once — see [DisplayOverlays] for what each one broke.
+     *
+     * Display 0 still draws through the service's own [windowManager] and inflates from the service
+     * context, i.e. literally today's code path, on a change that ships unverified on DeX hardware.
      */
-    private var overlayExitBrowserPkg: String? = null
+    private val overlays by lazy {
+        DisplayOverlays<WindowManager, View, FactRows>(
+            mayDraw = { Settings.canDrawOverlays(this) },
+            defaultWindowManager = { windowManager },
+            secondaryWindowManager = ::secondaryWindowManager,
+            inflate = ::inflateOverlay,
+            add = { wm, view -> runCatching { wm.addView(view, overlayParams()) }.isSuccess },
+            remove = { wm, view -> runCatching { wm.removeView(view) } },
+            bindMessage = { view, message ->
+                runCatching { view.findViewById<TextView>(R.id.block_message).text = message }
+            },
+            bindFacts = ::writeFactRows,
+        )
+    }
     private lateinit var clock: AndroidEngineClock
     private lateinit var coordinator: BudgetCoordinator
 
@@ -122,6 +150,24 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var lastDiagLine: String? = null
     /** Last line emitted by [diagnoseSelfDefense] — same once-per-distinct-state rule as [lastDiagLine]. */
     private var lastWatchDiagLine: String? = null
+    /** Last line emitted by [diagnoseDisplays] — same once-per-distinct-state rule as [lastDiagLine]. */
+    private var lastDspDiagLine: String? = null
+    /** Whether the last window read used `getWindowsOnAllDisplays()`. `api=legacy` on an Android 16
+     *  phone means the SDK guard is inverted and the multi-display path never ran. */
+    private var lastAllDisplaysApi = false
+    /** The display holding the active window on the last scan — where `GLOBAL_ACTION_HOME` will land. */
+    private var lastActiveDisplayId: Int? = null
+    /** Which displays offered watched Settings windows on the last self-defense pass. */
+    private var lastWatchedDisplays: Set<Int> = emptySet()
+    /** Node budget left after the last settings walk — an existing silent fail-open, now instrumented. */
+    private var lastSettingsBudgetLeft = 0
+    /** The displays [applyDecision] last decided to cover. */
+    private var lastCover: Set<Int> = emptySet()
+    /** Per-display census of the last scan, for [diagnose] and [diagnoseDisplays]. */
+    private var lastCensus: List<DisplayCensus.Display> = emptyList()
+    /** Last time a [DisplayManager.DisplayListener] callback drove a pump — see [scheduleDisplayPump]. */
+    private var lastDisplayPumpElapsedMs = 0L
+    private var displayListener: DisplayManager.DisplayListener? = null
     /** Whether the last [visibleWatchedScreen] read had to fall back to the active window because
      *  `getWindows()` had not offered it. Diagnostic only, but it is *the* N-2 question: if this is
      *  true on the device-admin page, `getWindows()` was the silent failure. */
@@ -133,14 +179,19 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     /** How many Instagram windows the last scan walked. >1 means a popup/sheet was stacked over the
      *  app, which is exactly the case that used to read the wrong one. Diagnostic only. */
     private var lastIgWindowCount = 0
-    /** The last real read taken before our overlay started occluding it — see [holdThroughOcclusion]. */
-    private val occlusionHold = OcclusionHold<Foreground>()
     /**
-     * The package of the last window-state change, which is how the hold learns the user has moved on:
-     * events keep arriving with a package name even while `getWindows()` is pruned to nothing. See
-     * [noteForegroundPackage] for what deliberately doesn't count.
+     * The last real read taken on each display before our own overlay started occluding it.
+     *
+     * One hold **per display**, because the framework's occlusion pruning is computed per display: with
+     * one global hold, a tap on the phone releases the monitor's block. [DisplayHolds] carries the whole
+     * argument, including the Gate B measurements this used to document. It also owns the per-display
+     * "last window package" the moved-on test needs — see [noteForegroundPackage] for what deliberately
+     * does not count as moving on.
      */
-    private var lastWindowPackage: String? = null
+    private val holds = DisplayHolds<Foreground>()
+
+    /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
+    private val windowKinds = WindowKindMemo()
     /** Cached overlay readings — see [readOverlayGrant]. */
     private var overlayGranted = true to true
     private var overlayGrantedAtMs = 0L
@@ -152,17 +203,25 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private val repairWatch = OverlayRepairWatch()
     /** Last Settings-side watchdog check — see [checkHealthWhileInSettings]. */
     private var lastHealthCheckElapsedMs = 0L
-    /** When the reel pager was last recorded as seen — null means not yet this service lifetime, which
-     *  must confirm immediately rather than wait out the throttle. See [noteReelSignal]. */
-    private var lastSignalConfirmElapsedMs: Long? = null
+    /** When each witnessed Instagram id was last recorded as seen. An id absent from the map has not
+     *  been seen this service lifetime and must confirm immediately rather than wait out the throttle.
+     *  Keyed per id (rather than one timestamp for all) so a signal seen constantly cannot throttle a
+     *  rarer one out of ever being confirmed. See [noteSignals]. */
+    private val lastSignalConfirmElapsedMs = HashMap<String, Long>()
     /** Per-browser address-bar watch: turns a missing url_bar into "not yet" or "not ever". Fed the
-     *  read by [omniboxFor], the on-screen browser set by [resolveForeground], and the durable
+     *  read by [omniboxFor], the on-screen browser set by [scanDisplays], and the durable
      *  version-keyed vouch by [omniboxIdsVouched]. */
     private val addressWatch = AddressWatch(idsVouched = ::omniboxIdsVouched)
     /** Cached omnibox-vouch verdicts, package → (vouched, elapsed-at). See [omniboxIdsVouched]. */
     private val omniboxVouchCache = HashMap<String, Pair<Boolean, Long>>()
     /** Last time each browser's readable omnibox was written through to the witness store. */
     private val lastOmniboxConfirmElapsedMs = HashMap<String, Long>()
+    /** What each display's address bar said on the last scan — diagnostics only, for [diagnose]'s
+     *  `addr=` field. Cleared at the start of every scan so a departed display cannot keep vouching. */
+    private val lastOmniboxRead = HashMap<Int, BrowserTargets.Omnibox>()
+    /** The union of Instagram signal ids seen on the last scan, across every display — the `igSignals=`
+     *  field, and the canary's input. Diagnostic use only; the *decision* is per window per display. */
+    private var lastSignals: Set<String> = emptySet()
 
     private val tickRunnable = object : Runnable {
         override fun run() {
@@ -192,6 +251,50 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         clockSettingsWatch = ClockSettingsWatch(this) {
             runCatching { coordinator.onClockSettingChanged() }
         }.also { it.start() }
+        registerDisplayListener()
+    }
+
+    /**
+     * Watch for displays appearing and disappearing, so plugging a monitor in is noticed without waiting
+     * for the next accessibility event.
+     *
+     * Registered with the service's own main-looper [handler], which is what keeps every display
+     * callback on the same thread as the rest of the service state: **no new concurrency** around the
+     * hold map or the attachment map, no locks, nothing volatile.
+     *
+     * The whole registration is wrapped, because [onServiceConnected] must never throw — a throw here
+     * would kill the service and the watchdog would not notice for up to fifteen minutes.
+     */
+    private fun registerDisplayListener() {
+        runCatching {
+            displayListener?.let { displayManager.unregisterDisplayListener(it) }   // reconnect guard
+            val listener = object : DisplayManager.DisplayListener {
+                override fun onDisplayAdded(displayId: Int) = scheduleDisplayPump()
+                override fun onDisplayRemoved(displayId: Int) = scheduleDisplayPump()
+                // Fires on every rotation of display 0 and, on this LTPO panel, on adaptive
+                // refresh-rate changes. It must NEVER tear down a live overlay — that is a dropped
+                // block-screen frame per rotation, i.e. the C-1 defect class. A re-pump is safe
+                // because nothing is cached per display.
+                override fun onDisplayChanged(displayId: Int) = scheduleDisplayPump()
+            }
+            displayManager.registerDisplayListener(listener, handler)
+            displayListener = listener
+        }
+    }
+
+    /**
+     * All three display callbacks mean the same thing: re-enumerate.
+     *
+     * Deliberately non-load-bearing — every outcome is reachable from the window map on the next event
+     * or tick, so a callback that never arrives costs latency, never correctness. Throttled so that an
+     * adaptive-refresh-rate storm on the phone's own panel cannot become a pump storm.
+     */
+    private fun scheduleDisplayPump() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDisplayPumpElapsedMs < DISPLAY_PUMP_THROTTLE_MS) return
+        lastDisplayPumpElapsedMs = now
+        runCatching { pump() }
+        diagnoseDisplays()
     }
 
     /**
@@ -257,35 +360,131 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * Two kinds of event carry our own package and must NOT count as moving on:
      *  - the block overlay itself being added or removed, and the self-defense Toast. Treating those as
      *    a foreground change would release the hold every time the overlay appears, which is precisely
-     *    the once-a-second oscillation [holdThroughOcclusion] exists to stop.
+     *    the once-a-second oscillation [DisplayHolds] exists to stop.
      *  - so only our real UI qualifies, identified by class: opening App-Block *is* leaving the blocked
      *    app, and the block screen shouldn't sit on top of the app's own settings.
+     *
+     * ## Which display the event is filed under
+     *
+     * At API 33+ an event carries its own display id, and one it could not attribute
+     * (`INVALID_DISPLAY` = −1) is **dropped rather than filed under display 0** — filing it there would
+     * let it release the *phone's* hold, which is the loosening direction. Below 33 no event carries a
+     * display id at all, so every event files under display 0, byte-identical to today.
      */
     private fun noteForegroundPackage(event: AccessibilityEvent) {
         val pkg = event.packageName?.toString() ?: return
         if (pkg == packageName && event.className?.toString() != MainActivity::class.java.name) return
-        lastWindowPackage = pkg
+        // Only an APPLICATION window changing means the user moved between apps. A system window
+        // appearing over the current one does not — and on 2026-08-30 that was a user-drivable flicker:
+        // press volume, the panel is `TYPE_SYSTEM`, its event named `com.android.systemui`, the moved-on
+        // test read that as "left", and the block screen dropped for ~40-80 ms on every press. Measured
+        // on hardware with the panel open: Instagram and TikTok `TYPE_APPLICATION`, One UI Home
+        // `TYPE_APPLICATION`, Volume and the accessibility button `TYPE_SYSTEM`.
+        //
+        // ⚠️ Structural, not a package blocklist — the same discriminator shape as the settings-watch's
+        // "our label on a *checkable* control". A list of system packages would go stale the first time
+        // Samsung renamed one, and would be silently wrong rather than loudly wrong.
+        //
+        // A system window appearing over the current one is not the user leaving — press volume and the
+        // panel's `com.android.systemui` event used to read as "left", dropping the block for 40–80 ms
+        // on every press. See [WindowKindMemo] for why this is a *learned* judgement rather than the
+        // obvious `type != TYPE_APPLICATION` test, which was built, measured, and broke the exit outright
+        // (0/5 Home presses released, because a pruned launcher window has no readable type either).
+        val type = changedWindowType(event)
+        windowKinds.note(pkg, type, AccessibilityWindowInfo.TYPE_APPLICATION)
+        if (BuildConfig.FAST_CAPS) {
+            android.util.Log.d(
+                EVT_TAG,
+                "pkg=$pkg winId=${event.windowId} type=$type sysOnly=${windowKinds.isSystemOnly(pkg)} " +
+                    "cls=${event.className}",
+            )
+        }
+        if (windowKinds.isSystemOnly(pkg)) return
+        val displayId =
+            if (attributable) DisplayCensus.attribute(eventDisplayId(event)) ?: return
+            else DisplayCensus.DEFAULT_DISPLAY
         // Reaching here is the proof that the moved-on release condition has a live channel to work
-        // with, which is what retires the hold's timeout backstop (C-1). It is fed only by the events
-        // that survive the filter above, so the overlay cannot prove the point by its own churn.
-        occlusionHold.noteForegroundEvent()
+        // with, which is what retires that display's timeout backstop (C-1). It is fed only by the
+        // events that survive the filter above, so the overlay cannot prove the point by its own churn.
+        //
+        // 💡 The system-window filter above deliberately gates the LATCH as well as the package. The
+        // latch claims "the moved-on test has a live channel here", and only events that can actually
+        // release are evidence of that. Retiring the backstop on volume-panel events, on a device where
+        // no app event ever arrived, would leave a hold with no exit at all.
+        holds.noteForegroundEvent(displayId, pkg)
     }
 
     /**
-     * One decision cycle: resolve what's foreground (surface-aware for Instagram, URL-aware for
-     * browsers), tick the engine, apply the overlay, and keep ticking while anything blockable — a live
-     * target, a visible Instagram window, or a visible browser — is on screen.
+     * The accessibility window type of the window [event] is about, or null when it cannot be read.
+     *
+     * One extra `windowsOnAllDisplays` read per window-state event, deliberately **not** routed through
+     * [windowsByDisplay]: that one owns the `lastAllDisplaysApi` diagnostic and the display-0 backfill
+     * invariant, and neither belongs on this path. It is cheap next to what the pass this event triggers
+     * is about to do — window enumeration is one binder call from the accessibility cache, while the
+     * node walking that follows is what actually costs.
+     */
+    private fun changedWindowType(event: AccessibilityEvent): Int? {
+        val id = event.windowId
+        // -1 literal, not AccessibilityWindowInfo.UNDEFINED_WINDOW_ID: that constant is not public API.
+        if (id == -1) return null
+        fun typeIn(list: List<AccessibilityWindowInfo>?): Int? =
+            list?.firstOrNull { runCatching { it.id }.getOrDefault(-1) == id }
+                ?.let { runCatching { it.type }.getOrNull() }
+        if (multiDisplay) {
+            runCatching { windowsOnAllDisplays }.getOrNull()?.let { sparse ->
+                for (i in 0 until sparse.size()) typeIn(sparse.valueAt(i))?.let { return it }
+            }
+        }
+        return typeIn(runCatching { windows }.getOrNull())
+    }
+
+    /** The event's own display, or null below API 33 / when the framework never filled it in. */
+    private fun eventDisplayId(event: AccessibilityEvent): Int? =
+        if (attributable) runCatching { event.displayId }.getOrNull() else null
+
+    /** Can the multi-display window read run? `getWindowsOnAllDisplays()` is API 30. */
+    private val multiDisplay get() = Build.VERSION.SDK_INT >= MULTI_DISPLAY_SDK
+
+    /**
+     * Can an event be attributed to a display? `AccessibilityRecord.getDisplayId()` is API 33. Below
+     * that NO event carries one, so every event files under display 0 — exactly what every line of this
+     * service assumed before DeX.
+     */
+    private val attributable get() = Build.VERSION.SDK_INT >= EVENT_DISPLAY_SDK
+
+    /**
+     * One decision cycle: resolve what's foreground on **every** display (surface-aware for Instagram,
+     * URL-aware for browsers), tick the engine once, cover the displays that need covering, and keep
+     * ticking while anything blockable — a live target, a visible Instagram window, or a visible
+     * browser — is on any screen.
+     *
+     * ⚠️ **The order below is load-bearing in two places, and both traps have been paid for once in
+     * this file already.**
+     *
+     *  1. `coveredOnEntry` is the set as of **entry**, never after [DisplayOverlays.reconcile]. Reading
+     *     it afterwards would treat a display we just covered as having been covered when its read was
+     *     taken, flipping the arm/sustain branch. This is the per-display form of the old
+     *     `holdThroughOcclusion` relying on `overlayView == null` being the *previous* pass's state.
+     *  2. The **seed stays after** the overlay goes up, or the one-scan free frame comes back: the
+     *     overlay appears, the next scan is already pruned, nothing has been held yet, and the block
+     *     drops for ~200 ms.
      */
     private fun pump() {
-        val fg = refreshForeground()
+        val now = SystemClock.elapsedRealtime()
+        val coveredOnEntry = overlays.covered()
+        val raw = scanDisplays()
+        holds.retain(raw.keys + enumeratedDisplayIds())
+        val effective =
+            holds.effective(raw, Foreground::blockable, Foreground::holdPackages, coveredOnEntry, now)
+        diagnose(raw, effective)
+        refreshForeground(mergeForegrounds(effective))
         val decision = coordinator.tick()
-        applyDecision(decision, fg.webBlock, fg.webHost, fg.webPkg)
-        // Seed the occlusion hold with the read that *caused* this overlay. Without it there is a
-        // one-scan gap: the overlay goes up, the next scan already comes back pruned, and nothing has
-        // been held yet - so the block drops for ~200ms and hands back a free frame of the reel.
-        if (overlayView != null && (fg.target != null || fg.webBlock != null)) {
-            occlusionHold.seed(fg, lastWindowPackage, SystemClock.elapsedRealtime())
+        applyDecision(decision, effective)
+        val coveredNow = overlays.covered()
+        for ((id, read) in effective) {
+            if (id in coveredNow && read.blockable) holds.seed(id, read, read.holdPackages, now)
         }
+        diagnoseDisplays()
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
 
@@ -298,7 +497,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * What counts as "about App-Block" is [SettingsWatch]'s call, and it is narrower than it looks:
      * a screen merely *containing* our label is a list of every app on the phone as often as it is a
      * page about us (C-4). The service's job is only to hand over the screen's identity along with
-     * its words — see [visibleWatchedScreen].
+     * its words — see [visibleWatchedScreens].
+     *
+     * ⚠️ **One [SettingsWatch.Screen] per display, OR-ed — never merged into one.** That is a
+     * correctness argument, not a preference: `isBypassScreen` is `markers && !exclusions`, so a string
+     * from the *phone's* Settings screen could satisfy an exclusion and suppress a bounce the monitor
+     * had earned — a fail-open manufactured by a refactor, on the tier that guards every other tier.
      *
      * An open durable-change window makes "switch the service off" a gated loosening like any other
      * (CONSTRAINTS §6) — but only that. It no longer stands down the *installer* tier, so it can't
@@ -316,7 +520,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // agree: an open window stands down the Settings tier but leaves the installer tier armed
         // (B-8). Only setup-incomplete disarms everything. Cost is one text walk while a window is
         // open in Settings, which is bounded and rare.
-        val screen = visibleWatchedScreen()
+        val screens = visibleWatchedScreens()
+        lastWatchedDisplays = screens.keys
         val setupIncomplete = !Watchdog.setupCompleted(this)
         val windowOpen = unlockController.isOpen()
         val (canDraw, opAllows) = readOverlayGrant()
@@ -325,17 +530,22 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // the health report past its throttle is what turns "the guard is down" into a notification the
         // user can see, on the pass it happens rather than up to fifteen minutes later.
         if (repairWatch.justEngaged) announceRepairMode()
-        val bounce = SettingsWatch.shouldBounce(
-            packageName = pkg,
-            screen = screen,
-            selfLabel = getString(R.string.app_name),
-            setupIncomplete = setupIncomplete,
-            windowOpen = windowOpen,
-            repairMode = repairMode,
-        )
-        diagnoseSelfDefense(pkg, screen, setupIncomplete, windowOpen, repairMode, bounce)
+        // The three stand-downs are read ONCE per pass, above, and applied identically to every
+        // display's screen. Only the screen itself is per display.
+        val bounce = screens.values.any { screen ->
+            SettingsWatch.shouldBounce(
+                packageName = pkg,
+                screen = screen,
+                selfLabel = getString(R.string.app_name),
+                setupIncomplete = setupIncomplete,
+                windowOpen = windowOpen,
+                repairMode = repairMode,
+            )
+        }
+        diagnoseSelfDefense(pkg, screens, setupIncomplete, windowOpen, repairMode, bounce)
         if (!bounce) return false
         performGlobalAction(GLOBAL_ACTION_HOME)
+        DisplayCoverage.bounceDisplay(screens.keys, lastActiveDisplayId)?.let { launchHomeOn(it) }
         val now = SystemClock.elapsedRealtime()
         if (now - lastBounceToastElapsedMs > BOUNCE_TOAST_THROTTLE_MS) {
             lastBounceToastElapsedMs = now
@@ -348,6 +558,29 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             Toast.makeText(this, getString(message), Toast.LENGTH_SHORT).show()
         }
         return true
+    }
+
+    /**
+     * A second, display-targeted Home for a watched Settings screen the global action may miss.
+     *
+     * `performGlobalAction(GLOBAL_ACTION_HOME)` injects a HOME key event, which goes to the
+     * **input-focused** display and is not selectable. In DeX dual mode the phone can hold focus while a
+     * page about App-Block sits open on the monitor, so the global action lands on the wrong screen —
+     * a fail-open on the tier that guards every other tier.
+     *
+     * Purely additive: the global action has already fired, so if the platform refuses this we are
+     * exactly where we would have been without it, and `active=` in the `AppBlockWatch` line says so.
+     * `setLaunchDisplayId` is API 26, i.e. minSdk, so it needs no guard.
+     */
+    private fun launchHomeOn(displayId: Int) {
+        runCatching {
+            startActivity(
+                Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_HOME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                ActivityOptions.makeBasic().setLaunchDisplayId(displayId).toBundle(),
+            )
+        }
     }
 
     /**
@@ -414,7 +647,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      */
     private fun diagnoseSelfDefense(
         packageName: String?,
-        screen: SettingsWatch.Screen,
+        screens: Map<Int, SettingsWatch.Screen>,
         setupIncomplete: Boolean,
         windowOpen: Boolean,
         repairMode: Boolean,
@@ -422,11 +655,16 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     ) {
         if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
         val label = getString(R.string.app_name)
-        val namesUs = screen.texts.any { it.contains(label, ignoreCase = true) }
-        val titleNamesUs = screen.titles.any { it.contains(label, ignoreCase = true) }
-        val checkNamesUs = screen.checkables.any { it.contains(label, ignoreCase = true) }
+        // Counts sum across displays so titles=/texts=/checkables= keep meaning what they meant, and the
+        // three `namesUs` flags stay "anywhere on any watched screen", which is what the rules ask.
+        val titles = screens.values.flatMap { it.titles }
+        val texts = screens.values.flatMap { it.texts }
+        val checkables = screens.values.flatMap { it.checkables }
+        val namesUs = texts.any { it.contains(label, ignoreCase = true) }
+        val titleNamesUs = titles.any { it.contains(label, ignoreCase = true) }
+        val checkNamesUs = checkables.any { it.contains(label, ignoreCase = true) }
         val control = SettingsWatch.settingsControls.firstOrNull { needle ->
-            screen.texts.any { it.contains(needle, ignoreCase = true) }
+            texts.any { it.contains(needle, ignoreCase = true) }
         }
         // Bucketed, not exact: this line is deduplicated by equality, and a per-second value would make
         // every event a new line — an instrument that floods the log it is read from is not one.
@@ -437,11 +675,18 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             } else {
                 "$repairMode"
             }
+        // dsp= says whether the self-defense tier can even SEE the monitor's Settings page; active= says
+        // where the injected HOME is going to land. `dsp=[3] active=0` with `bounce=true` is the
+        // fail-open shape: the tier fired and the kick went to the wrong screen. budgetLeft= covers an
+        // EXISTING silent fail-open — running the settings walk out of budget makes it miss the screen,
+        // and until now there was no instrument for it at all.
         val line = "pkg=${packageName?.substringAfterLast('.')} " +
-            "titles=${screen.titles.size} texts=${screen.texts.size} " +
-            "checkables=${screen.checkables.size} " +
+            "titles=${titles.size} texts=${texts.size} " +
+            "checkables=${checkables.size} " +
             "namesUs=$namesUs titleNamesUs=$titleNamesUs checkNamesUs=$checkNamesUs control=$control " +
             "rescued=$lastActiveWindowRescued " +
+            "dsp=${DisplayCensus.order(screens.keys)} active=$lastActiveDisplayId " +
+            "budgetLeft=$lastSettingsBudgetLeft " +
             "setupIncomplete=$setupIncomplete windowOpen=$windowOpen repairMode=$repair " +
             "bounce=$bounce"
         if (line == lastWatchDiagLine) return
@@ -482,33 +727,57 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * comes first in the tree, giving "Apps", "Appear on top", "Installed apps", "Developer options" —
      * but a list scrolled so that App-Block's own row is at the top would read as a screen about
      * App-Block, which is the exact false positive this whole change exists to remove.
+     *
+     * ## One screen per display, and a budget per display
+     *
+     * A Settings page about App-Block can be opened on a DeX monitor, and until 2026-08-30 this read
+     * only the default display's windows — so that page reached no rule at all and was never bounced.
+     * The tier that guards every other tier was single-display.
+     *
+     * The budget is **per display, not shared**, and that is mandatory rather than tidy: a shared 800
+     * lets a deep Settings page on one display starve the walk on the other, and a starved walk reads as
+     * an innocent screen. The `walked` window-id set stays shared, because accessibility window ids come
+     * from one global counter and cannot collide across displays.
+     *
+     * `getRootInActiveWindow()` is documented **global** — *"It could be from any logical display"* — so
+     * the N-2 second channel does not go blind on DeX. But its result no longer belongs to display 0 by
+     * assumption, which is what the attribution below is for.
      */
-    private fun visibleWatchedScreen(): SettingsWatch.Screen {
-        val titles = ArrayList<CharSequence>(6)
-        val texts = ArrayList<CharSequence>(64)
-        val checkables = ArrayList<CharSequence>(8)
+    private fun visibleWatchedScreens(): Map<Int, SettingsWatch.Screen> {
+        val out = LinkedHashMap<Int, SettingsWatch.Screen>(2)
         val walked = HashSet<Int>(6)
-        var budget = NODE_BUDGET
-        for (window in visibleWindows()) {
-            runCatching {
-                val root = window.root ?: return@runCatching
-                if (!SettingsWatch.isWatched(root.packageName?.toString())) return@runCatching
-                walked.add(window.id)
-                val firstIndex = texts.size
-                val heading = ArrayList<CharSequence>(1)
-                budget = collectTexts(root, texts, heading, checkables, budget)
-                val found = titles.size
-                window.title?.takeIf { it.isNotBlank() }?.let { titles.add(it) }
-                titles.addAll(heading)
-                if (titles.size == found) texts.getOrNull(firstIndex)?.let { titles.add(it) }
+        val byDisplay = windowsByDisplay()
+        var lowestBudget = NODE_BUDGET
+        for (displayId in DisplayCensus.order(byDisplay.keys)) {
+            val titles = ArrayList<CharSequence>(6)
+            val texts = ArrayList<CharSequence>(64)
+            val checkables = ArrayList<CharSequence>(8)
+            var budget = NODE_BUDGET
+            for (window in byDisplay[displayId].orEmpty()) {
+                runCatching {
+                    val root = window.root ?: return@runCatching
+                    if (!SettingsWatch.isWatched(root.packageName?.toString())) return@runCatching
+                    walked.add(window.id)
+                    val firstIndex = texts.size
+                    val heading = ArrayList<CharSequence>(1)
+                    budget = collectTexts(root, texts, heading, checkables, budget)
+                    val found = titles.size
+                    window.title?.takeIf { it.isNotBlank() }?.let { titles.add(it) }
+                    titles.addAll(heading)
+                    if (titles.size == found) texts.getOrNull(firstIndex)?.let { titles.add(it) }
+                }
+                if (budget <= 0) break
             }
-            if (budget <= 0) break
+            lowestBudget = minOf(lowestBudget, budget)
+            if (texts.isNotEmpty() || titles.isNotEmpty()) {
+                out[displayId] = SettingsWatch.Screen(titles, texts, checkables)
+            }
         }
         lastActiveWindowRescued = false
         // Second channel for the window the user is actually looking at — see
         // [SettingsWatch.shouldWalkActiveWindow] for the N-2 hardware failure that bought it. Only
         // ever *adds* a window the first pass missed, so on the ordinary screen this is one set lookup.
-        if (budget > 0) {
+        if (lowestBudget > 0) {
             runCatching {
                 val active = rootInActiveWindow ?: return@runCatching
                 if (!SettingsWatch.shouldWalkActiveWindow(
@@ -521,17 +790,40 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 }
                 lastActiveWindowRescued = true
                 val heading = ArrayList<CharSequence>(1)
-                budget = collectTexts(active, texts, heading, checkables, budget)
+                val rescuedTexts = ArrayList<CharSequence>(64)
+                val rescuedCheckables = ArrayList<CharSequence>(8)
+                lowestBudget = collectTexts(active, rescuedTexts, heading, rescuedCheckables, lowestBudget)
                 // Heading yes, first-text-in-reading-order no. The window title this window would have
                 // been judged against isn't available on this path, and the first-text candidate is
                 // only safe *because* it is the last resort of a window that offered neither (C-4): a
                 // list scrolled so App-Block's row sits at the top would otherwise read as a page about
                 // App-Block. Rule 2 still sees every string, which is what N-2 needs.
-                titles.addAll(heading)
+                val id = rescuedDisplayId(active)
+                val existing = out[id]
+                out[id] = SettingsWatch.Screen(
+                    titles = (existing?.titles.orEmpty() + heading),
+                    texts = (existing?.texts.orEmpty() + rescuedTexts),
+                    checkables = (existing?.checkables.orEmpty() + rescuedCheckables),
+                )
             }
         }
-        return SettingsWatch.Screen(titles, texts, checkables)
+        lastSettingsBudgetLeft = lowestBudget
+        return out
     }
+
+    /**
+     * Which display the rescued active window belongs to.
+     *
+     * `AccessibilityWindowInfo.getDisplayId()` is API 30; below that only one display can exist, so
+     * defaulting to [DisplayCensus.DEFAULT_DISPLAY] is exact rather than a guess.
+     */
+    private fun rescuedDisplayId(active: AccessibilityNodeInfo): Int = runCatching {
+        if (Build.VERSION.SDK_INT >= MULTI_DISPLAY_SDK) {
+            active.window?.displayId ?: DisplayCensus.DEFAULT_DISPLAY
+        } else {
+            DisplayCensus.DEFAULT_DISPLAY
+        }
+    }.getOrDefault(DisplayCensus.DEFAULT_DISPLAY)
 
     /**
      * Depth-first text collection, capped at [budget] nodes so a huge tree can't stall the service.
@@ -583,19 +875,45 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && node.isHeading
 
     /**
-     * Resolve what's foreground and inform the coordinator if the *target* changed. Tracking by target —
-     * not package — is what lets Instagram flip between budgeted (reel player) and free (feed/DMs) within
-     * the one package. Returns the full [Foreground] so [pump] also gets the website decision.
+     * Inform the coordinator if the *target* changed. Tracking by target — not package — is what lets
+     * Instagram flip between budgeted (reel player) and free (feed/DMs) within the one package.
+     *
+     * ⚠️ [fg] is the **merged** read across displays, and its target list must be order-stable between
+     * passes with unchanged content. An order that flapped would call `onForegroundTargets` every pass,
+     * which banks the accrued time and re-picks the accruing target — splitting one sitting between two
+     * budgets so that neither ever reaches its cap. That is why the ordering lives in
+     * [DisplayCensus.mergeTargets], with a test, rather than in a map's iteration order.
      */
-    private fun refreshForeground(): Foreground {
-        val fg = resolveForeground()
+    private fun refreshForeground(fg: Foreground) {
         surfaceAppVisible = fg.instagramVisible
         browserVisible = fg.browserVisible
         if (fg.targets != lastForegroundTargets) {
             lastForegroundTargets = fg.targets
             coordinator.onForegroundTargets(fg.targets)
         }
-        return fg
+    }
+
+    /**
+     * One [Foreground] for the coordinator and the block message, folded from the per-display reads.
+     *
+     * Deliberately impure and short: **coverage is decided per display from the per-display reads and
+     * never from this merge**, so a mistake here can only pick the wrong *message*. The one part that is
+     * not cosmetic — the target order, which decides accrual — is delegated to
+     * [DisplayCensus.mergeTargets], which is pure and tested.
+     *
+     * Visibility flags are OR-ed across displays, so a browser or Instagram on the monitor keeps the
+     * 5-second tick alive.
+     */
+    private fun mergeForegrounds(reads: Map<Int, Foreground>): Foreground {
+        val ordered = DisplayCensus.order(reads.keys).mapNotNull { reads[it] }
+        return Foreground(
+            targets = DisplayCensus.mergeTargets(reads.mapValues { it.value.targets }),
+            instagramVisible = ordered.any { it.instagramVisible },
+            browserVisible = ordered.any { it.browserVisible },
+            webBlock = ordered.firstNotNullOfOrNull { it.webBlock },
+            webHost = ordered.firstNotNullOfOrNull { it.webHost },
+            webPkg = ordered.firstNotNullOfOrNull { it.webPkg },
+        )
     }
 
     private data class Foreground(
@@ -611,6 +929,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val webHost: String? = null,
         /** Which browser produced [webBlock] — the overlay's exit needs to steer that same browser. */
         val webPkg: String? = null,
+        /**
+         * The packages on this display that [targets] came from — see [holdPackages], the only reader.
+         * Kept beside [targets] rather than derived from them because a built-in `Target` carries a key,
+         * not a package.
+         */
+        val budgetedPackages: Set<String> = emptySet(),
     ) {
         /**
          * "Is anything limited on screen?" — the question every existing caller was really asking of
@@ -618,15 +942,125 @@ class AppBlockerAccessibilityService : AccessibilityService() {
          * the resolution underneath became plural.
          */
         val target: Target? get() = targets.firstOrNull()
+
+        /**
+         * Is anything block-worthy on this display? — the arm condition the old `holdThroughOcclusion`
+         * used inline, named so [DisplayHolds.effective] can take it as `Foreground::blockable`.
+         */
+        val blockable: Boolean get() = target != null || webBlock != null
+
+        /**
+         * Every package whose presence on screen justifies keeping this block up — what
+         * [DisplayHolds.effective] arms the occlusion hold with.
+         *
+         * ⚠️ **[webPkg] is in here for a reason and removing it is a lockout, not a loosening.** A web
+         * block has no [targets] at all, so without the browser this set would be empty for every
+         * blocked URL; the hold would then release on the browser's own next event, which is a flicker,
+         * and — worse — the set would carry no way to distinguish "still on the blocked page" from
+         * "left". `webPkg` is non-null whenever [webBlock] is, set on the same pass in `resolveDisplay`.
+         *
+         * The launcher is deliberately **absent**: pressing Home must release the hold, and that is the
+         * whole exit this test exists to provide (see [OcclusionHold]).
+         */
+        val holdPackages: Set<String>
+            get() = if (webPkg == null) budgetedPackages else budgetedPackages + webPkg
     }
 
     /**
-     * Scan the visible windows once, resolving three things: the budgeted [Target] (a whole-app TikTok/X
-     * in any pane wins, else Instagram's reel surface), whether Instagram is visible, and the website
-     * decision (an allowlisted browser on a blocked URL, or any non-allowlisted browser at all).
+     * Scan **every** display's visible windows, one [Foreground] each.
+     *
+     * ⚠️ **Two things must happen once for the whole pass, not once per display**, and getting either
+     * wrong looks like tidy refactoring:
+     *
+     *  - **`addressWatch.retain`** takes the union of browsers visible on *any* display. Called per
+     *    display it would evict a browser visible on the other one, and eviction hands back a fresh
+     *    settling grace — so a missing `url_bar` resolves to "not yet" (allow) instead of "not ever"
+     *    (block), and **website blocking silently stops firing, on the phone too, the moment a monitor
+     *    is connected.**
+     *  - **`noteSignals`** takes the union, per its own KDoc. Per display it would still be correct — a
+     *    union of a union — but would pay the [SignalCanary] confirm throttle twice.
+     *
+     * [InstagramSurface.targetForWindows] is called **once per display**, on that display's own
+     * per-window signal list. Flattening across displays would let `explorePreview` pair a
+     * `context_menu` on the monitor with an `explore_action_bar` on the phone and manufacture a block —
+     * over-blocking, so the safe direction, but a false block nobody could explain. Per-display costs
+     * nothing real: a `PopupWindow` is anchored to its host window and can never land on a different
+     * display from its own grid.
+     *
+     * Node budgets are spent **per display**, deliberately. A shared budget's failure mode is
+     * starvation, and a starved walk reads as "free surface" — fail-open.
+     *
+     * **Single display: one iteration, the identical body, the same accumulators over the same window
+     * set.** Identical to what this did before.
      */
-    private fun resolveForeground(): Foreground {
-        var packageTarget: Target? = null
+    private fun scanDisplays(): Map<Int, Foreground> {
+        lastIgWindowCount = 0
+        lastIgNodeCount = 0
+        lastOmniboxRead.clear()
+        val byDisplay = windowsByDisplay()
+        val enumerated = enumeratedDisplayIds()
+        lastActiveDisplayId = activeDisplayId(byDisplay)
+        val visibleBrowsers = HashSet<String>()
+        val allSignals = HashSet<String>()
+        var sawInstagram = false
+        val out = LinkedHashMap<Int, Foreground>(byDisplay.size)
+        val census = ArrayList<DisplayCensus.Display>(byDisplay.size + 1)
+        for (displayId in DisplayCensus.order(byDisplay.keys + enumerated)) {
+            val windows = byDisplay[displayId]
+            if (windows == null) {
+                // DisplayManager lists it, accessibility gave us no window list for it. `untracked=` in
+                // the census is what names this, and on DeX it is the answer to whether the detection
+                // half works on this hardware at all.
+                census.add(DisplayCensus.Display(displayId, enumerated = true, windowCount = null))
+                continue
+            }
+            val scan = resolveDisplay(displayId, windows, visibleBrowsers, allSignals)
+            out[displayId] = scan.foreground
+            if (scan.foreground.instagramVisible) sawInstagram = true
+            census.add(
+                DisplayCensus.Display(
+                    id = displayId,
+                    enumerated = displayId in enumerated,
+                    windowCount = windows.size,
+                    topPackage = scan.topPackage?.substringAfterLast('.'),
+                    target = scan.foreground.target?.key,
+                    carriesCause = scan.foreground.blockable,
+                ),
+            )
+        }
+        lastCensus = census
+        lastSignals = allSignals
+        // Once for the whole pass — see the KDoc. A per-display call here is a silent website-blocking
+        // bypass, and a per-display noteSignals double-pays the canary throttle.
+        addressWatch.retain(visibleBrowsers)
+        if (sawInstagram) noteSignals(allSignals)
+        return out
+    }
+
+    /** One display's scan result, plus the two log-only facts the census needs from it. */
+    private class DisplayScan(val foreground: Foreground, val topPackage: String?)
+
+    /**
+     * One display's foreground, resolving three things from that display's own windows: the budgeted
+     * [Target] (a whole-app TikTok/X in any pane wins, else Instagram's reel surface), whether Instagram
+     * is visible, and the website decision (an allowlisted browser on a blocked URL, or any
+     * non-allowlisted browser at all).
+     *
+     * The body is what [scanDisplays] used to be in full; [visibleBrowsers] and [allSignals] are the two
+     * cross-display accumulators it must contribute to rather than act on.
+     */
+    private fun resolveDisplay(
+        displayId: Int,
+        windowList: List<AccessibilityWindowInfo>,
+        visibleBrowsers: MutableSet<String>,
+        allSignals: MutableSet<String>,
+    ): DisplayScan {
+        // Every distinct package owning a visible window, in getWindows() order (topmost first) — not
+        // the first one that happened to match a target. This used to be a single `packageTarget` var
+        // filled by the first hit, which meant exactly one budgeted app reached the engine however many
+        // were on screen, and a second app in the other split-screen pane was neither gated nor metered.
+        // See AppTargets.foregroundTargets, which owns the mapping and the reasoning.
+        val onScreenPackages = LinkedHashSet<String>(4)
         // Every Instagram window, not the first one. A reel's long-press menu is a second window owned
         // by com.instagram.android, and getWindows() offers it first (topmost). Taking only the first
         // meant reading a 28-node context menu instead of the reel player under it. See
@@ -639,10 +1073,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         var omnibox: BrowserTargets.Omnibox? = null   // diagnostics only — what the address bar said
         // Every allowlisted browser *on screen*, which is wider than the one we read: only the first
         // browser window gets an omnibox read, but a second one in the other split-screen pane is still
-        // present and its watch must survive the pass. See AddressWatch.retain.
-        val visibleBrowsers = HashSet<String>()
+        // present and its watch must survive the pass. Accumulated ACROSS displays — see AddressWatch.retain.
         val browsers = browserPackages()
-        val windowList = visibleWindows()
         for (window in windowList) {
             // Isolate each window. A live tree churns under the walk (a playing reel especially), so
             // reading it can throw on a recycled / not-sealed node. One bad window must never collapse
@@ -651,7 +1083,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             runCatching {
                 val root = window.root ?: return@runCatching
                 val pkg = root.packageName?.toString() ?: return@runCatching
-                if (packageTarget == null) AppTargets.targetFor(pkg, activeTargets())?.let { packageTarget = it }
+                onScreenPackages.add(pkg)
                 if (pkg == InstagramSurface.PACKAGE) instagramRoots.add(root)
                 if (BrowserTargets.isAllowlisted(pkg)) visibleBrowsers.add(pkg)
                 if (webBlock == null &&
@@ -675,82 +1107,104 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        // Retire the watch of any browser that isn't on screen any more, so its next appearance is read
-        // as the fresh tree it is: full grace, and no earlier successful read still vouching for it.
-        // Done after the loop, so a browser we just read is never evicted by its own pass.
-        addressWatch.retain(visibleBrowsers)
-        // One signal set per Instagram window, sharing a single node budget so a cheap popup cannot
-        // starve the walk of the window that actually matters.
+        // One signal set per Instagram window, sharing this DISPLAY's node budget so a cheap popup
+        // cannot starve the walk of the window that actually matters.
         val perWindowSignals = collectInstagramSignals(instagramRoots)
-        // Union — for the canary and the log only. The *decision* is per-window (see below).
-        val signals = if (instagramRoots.isEmpty()) null else perWindowSignals.flatten().toSet()
-        if (signals != null && InstagramSurface.REEL_PAGER in signals) noteReelSignal()
-        // Both, not either. `packageTarget` used to win outright, which made the surface target
+        // Union — for the canary and the log only, and accumulated across displays by the caller. The
+        // *decision* is per-window within this display (see below).
+        perWindowSignals.forEach { allSignals.addAll(it) }
+        // Both, not either. The package match used to win outright, which made the surface target
         // unreachable whenever a package also matched — and for Instagram a package now always
         // matches (its whole-app closing hours), so the reels budget would have gone dark.
         // Strictest-wins across windows, never on the union: a share sheet carrying a sender field
-        // must not exempt a firehose reel playing in a different window.
+        // must not exempt a firehose reel playing in a different window. Per DISPLAY, so a preview card
+        // on one screen cannot pair with a grid on the other.
         val surfaceTarget = InstagramSurface.targetForWindows(perWindowSignals)
-        val targets = listOfNotNull(packageTarget, surfaceTarget).distinct()
-        val target = targets.firstOrNull()
-        val read =
-            Foreground(targets, instagramRoots.isNotEmpty(), browserVisible, webBlock, webHost, browserPkg)
-        val effective = holdThroughOcclusion(read)
-        diagnose(
-            windowList.size, packageTarget, instagramRoots.isNotEmpty(), signals, target, effective.target,
-            browserPkg, omnibox, webBlock, effective.webBlock,
+        // The mapping itself is pure and tested; this side only supplies what it saw. Order matters —
+        // the engine gates every target here but accrues to the first, so topmost must stay first.
+        // Hoisted: read once so the target list and the package set below cannot be resolved against
+        // two different rule snapshots, which would let the hold be justified by a package that did not
+        // produce a target on this same pass.
+        val active = activeTargets()
+        val topmost = onScreenPackages.toList()
+        val targets = AppTargets.foregroundTargets(topmost, active, surfaceTarget)
+        // Instagram is added explicitly when only the *surface* matched: a reels/Explore block can exist
+        // with no package target at all (it did before RULES_VERSION 5 made Instagram one), and without
+        // this the hold for a reel would be justified by nothing and drop on the first event.
+        val budgeted =
+            if (surfaceTarget != null) {
+                AppTargets.budgetedPackages(topmost, active) + InstagramSurface.PACKAGE
+            } else {
+                AppTargets.budgetedPackages(topmost, active)
+            }
+        omnibox?.let { lastOmniboxRead[displayId] = it }
+        return DisplayScan(
+            Foreground(
+                targets,
+                instagramRoots.isNotEmpty(),
+                browserVisible,
+                webBlock,
+                webHost,
+                browserPkg,
+                budgeted,
+            ),
+            topPackage = onScreenPackages.firstOrNull(),
         )
-        return effective
     }
 
     /**
-     * Keep blocking while our own overlay is what's hiding the evidence.
+     * The visible windows **per logical display**, or an empty map if the system refuses them (never
+     * throw out of a scan).
      *
-     * Measured on the S25 (Gate B, 2026-07-23): the instant the block overlay goes up, the framework
-     * prunes the occluded app's accessibility tree to its bare root — Instagram drops from 692 nodes to
-     * 1–2. The reel signal vanishes, the target resolves to null, the overlay comes down, the tree comes
-     * back, and the whole thing oscillates about once a second. A browser's `url_bar` reads empty the
-     * same way, so website blocking (Batch 3) would flicker identically. Package-matched targets
-     * (TikTok, X) are immune — `root.packageName` survives the pruning, which is why this never showed
-     * up before Instagram.
+     * Needs **no** new `accessibility_service_config.xml` flag: `getWindowsOnAllDisplays()`'s
+     * requirements are character-for-character `getWindows()`' — `canRetrieveWindowContent` plus
+     * `flagRetrieveInteractiveWindows` — and both are already declared. Worth saying out loud, because
+     * silently-failing declared config is this project's recurring theme.
      *
-     * How far the pruning goes depends on how opaque the overlay is: at 95% alpha Instagram stayed
-     * enumerated with its tree cut to 1–2 nodes; fully opaque, it is dropped from `getWindows()`
-     * altogether (`windows=1` — only our own overlay left). So "is the blocked app still on screen?"
-     * is not a usable release condition; we blinded ourselves by blocking.
+     * It also costs nothing extra: `getWindows()` is literally `getWindowsOnAllDisplays().get(0)`, one
+     * binder call served from the same accessibility cache. Only the node walking that follows scales
+     * with the number of displays.
      *
-     * The hold used to be unconditional while the overlay was up, on the reasoning that behind a
-     * full-screen overlay the user can't navigate anyway. That reasoning was wrong: Home still works
-     * behind an overlay, so the block screen would follow the user to the launcher and stay there,
-     * leaving the overlay's own Close button as the only way out. [OcclusionHold] adds the two release
-     * conditions — the event stream reporting a different foreground package, and a one-minute backstop
-     * for when those events don't come — while keeping the failure direction right: a blocker must
-     * never talk itself out of blocking.
-     *
-     * The backstop is conditional on that stream having gone quiet from the start (C-1, Gate F Phase 3):
-     * firing it unconditionally dropped the overlay for ~0.2 s every 60 s, leaving the blocked page
-     * unobstructed and tappable each time. [noteForegroundPackage] is what stands it down.
-     *
-     * The engine's other exits are untouched either way, since the hold freezes only *foreground
-     * resolution* and never the allow/block decision: Close ([hideOverlay] + [exitOverlay]), a granted
-     * exception, the 4am reset.
+     * ⚠️ **INVARIANT: display 0's list is never worse than it is today.** That a one-display device
+     * returns a single entry keyed 0 is inference from AOSP, not something measured on this phone, so it
+     * is enforced here as a rule rather than assumed elsewhere: if the all-displays read comes back
+     * empty, or without key 0, key 0 is refilled from the legacy call that has always worked.
      */
-    private fun holdThroughOcclusion(read: Foreground): Foreground {
-        if (overlayView == null) {
-            occlusionHold.release()
-            return read
+    private fun windowsByDisplay(): Map<Int, List<AccessibilityWindowInfo>> {
+        val out = LinkedHashMap<Int, List<AccessibilityWindowInfo>>(2)
+        if (multiDisplay) {
+            runCatching { windowsOnAllDisplays }.getOrNull()?.let { sparse ->
+                for (i in 0 until sparse.size()) out[sparse.keyAt(i)] = sparse.valueAt(i).orEmpty()
+            }
         }
-        val now = SystemClock.elapsedRealtime()
-        if (read.target != null || read.webBlock != null) {   // a real read got through; refresh the hold
-            occlusionHold.arm(read, lastWindowPackage, now)
-            return read
+        lastAllDisplaysApi = out.isNotEmpty()
+        if (DisplayCensus.mustBackfillDefault(out.keys)) {
+            out[DisplayCensus.DEFAULT_DISPLAY] = runCatching { windows }.getOrNull().orEmpty()
         }
-        return occlusionHold.sustain(lastWindowPackage, now) ?: read
+        return out
     }
 
-    /** The visible windows, or an empty list if the system refuses them (never throw out of a scan). */
-    private fun visibleWindows(): List<android.view.accessibility.AccessibilityWindowInfo> =
-        runCatching { windows }.getOrNull().orEmpty()
+    /**
+     * The display holding the active window — where an injected HOME key will land.
+     *
+     * `AccessibilityWindowInfo.isActive` is API 21, so no guard is needed; on a single-display device
+     * this is 0 or null and [DisplayCoverage.homeFallback]'s third clause coincides with its second.
+     */
+    private fun activeDisplayId(byDisplay: Map<Int, List<AccessibilityWindowInfo>>): Int? =
+        byDisplay.entries.firstOrNull { (_, windows) ->
+            windows.any { runCatching { it.isActive }.getOrDefault(false) }
+        }?.key
+
+    /**
+     * What `DisplayManager` lists for this uid. Another app's private virtual display — a screen
+     * recorder's, a cast's — is never returned, which is one of the three independent layers that keep
+     * us off screens we have no business covering.
+     *
+     * Feeds [DisplayHolds.retain] (unioned with the window-map keys) and the census's `dm=` field.
+     * **Never a policy input:** coverage follows the window map, never enumeration.
+     */
+    private fun enumeratedDisplayIds(): Set<Int> =
+        runCatching { displayManager.displays.map { it.displayId }.toSet() }.getOrDefault(emptySet())
 
     /**
      * Why a decision came out the way it did, on QA builds only, logged once per distinct state so
@@ -761,19 +1215,25 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * can't reach its prefs), which makes BuildConfig.DEBUG false — and debugFast is precisely the
      * build the phone gates are run on. The signed release logs nothing.
      */
-    private fun diagnose(
-        windowCount: Int,
-        packageTarget: Target?,
-        instagramVisible: Boolean,
-        signals: Set<String>?,
-        target: Target?,
-        effectiveTarget: Target?,
-        browserPkg: String?,
-        omnibox: BrowserTargets.Omnibox?,
-        webBlock: BrowserPolicy.WebBlock?,
-        effectiveWeb: BrowserPolicy.WebBlock?,
-    ) {
+    private fun diagnose(raw: Map<Int, Foreground>, effective: Map<Int, Foreground>) {
         if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        // The main line is DISPLAY 0's, character-for-character what it has always been. Other displays
+        // are appended by DisplayCensus.blocks(), which returns the empty string when there is only one
+        // — so on a phone with no monitor this line does not change at all, and every existing log note
+        // and grep in the repo stays valid.
+        val default = DisplayCensus.DEFAULT_DISPLAY
+        val rawRead = raw[default]
+        val effectiveRead = effective[default]
+        val windowCount = lastCensus.firstOrNull { it.id == default }?.windowCount ?: 0
+        val targets = rawRead?.targets.orEmpty()
+        val instagramVisible = rawRead?.instagramVisible == true
+        val signals = if (instagramVisible) lastSignals else null
+        val target = rawRead?.target
+        val effectiveTarget = effectiveRead?.target
+        val browserPkg = rawRead?.webPkg
+        val omnibox = lastOmniboxRead[default]
+        val webBlock = rawRead?.webBlock
+        val effectiveWeb = effectiveRead?.webBlock
         // Report the hold for *either* kind of block. Comparing only targets hid it entirely for
         // websites (both sides are null there), so Gate D's log showed HELD zero times while the hold
         // was in fact doing its job — an instrument that lies about the thing it exists to measure.
@@ -798,14 +1258,91 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         }
         val web = if (browserPkg == null) "" else
             " browser=${browserPkg.substringAfterLast('.')} addr=$addr web=$webBlock"
-        val line = "windows=$windowCount pkgTarget=$packageTarget ig=$instagramVisible " +
+        // `targets=` replaced the old `pkgTarget=` (2026-08-30). The single value could not show the
+        // defect it was most needed for: a second budgeted app on screen being dropped. The winner is
+        // still printed separately as `target=`, so nothing is lost and the list is what shows a miss.
+        val line = "windows=$windowCount targets=$targets ig=$instagramVisible " +
             "igWindows=$lastIgWindowCount igNodes=$lastIgNodeCount " +
             "igSignals=${signals?.map { it.substringAfterLast('/') }} " +
-            "target=$target overlay=${overlayView != null}$held$web"
+            "target=$target overlay=${default in overlays.covered()}$held$web" +
+            DisplayCensus.blocks(censusNow())
         if (line == lastDiagLine) return
         lastDiagLine = line
         android.util.Log.d(DIAG_TAG, line)
     }
+
+    /**
+     * [lastCensus] with the two facts that are only known *after* the fold and the reconcile — whether a
+     * hold is sustaining that display, and whether our overlay is actually on it.
+     */
+    private fun censusNow(): List<DisplayCensus.Display> {
+        val covered = overlays.covered()
+        val failed = overlays.failed()
+        return lastCensus.map { display ->
+            display.copy(
+                held = holds.isArmed(display.id),
+                overlay = when {
+                    display.id in covered -> DisplayCensus.Overlay.UP
+                    display.id in failed -> DisplayCensus.Overlay.FAILED
+                    else -> DisplayCensus.Overlay.NONE
+                },
+            )
+        }
+    }
+
+    /**
+     * The per-display census, on its own tag so `-s AppBlockDsp` isolates it from the per-frame
+     * foreground chatter. Emitted from every scan **and** from every [DisplayManager.DisplayListener]
+     * callback, so plugging a monitor in produces a line even when nothing is blocked. Deduplicated per
+     * distinct state and gated exactly like [diagnose] — the signed release logs nothing.
+     *
+     * `untracked=[…]` is the load-bearing field: what `DisplayManager` listed that accessibility gave no
+     * window list for. It answers the one question this change cannot answer from source.
+     */
+    private fun diagnoseDisplays() {
+        if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        val line = DisplayCensus.line(
+            displays = censusNow(),
+            allDisplaysApi = lastAllDisplaysApi,
+            cover = lastCover,
+            covered = overlays.covered(),
+            holds = holds.describe(),
+            crossCheck = crossCheckAnnotation(),
+            dexDisplays = dexAnnotation(),
+        )
+        if (line == lastDspDiagLine) return
+        lastDspDiagLine = line
+        android.util.Log.d(DSP_TAG, line)
+    }
+
+    /**
+     * Each window's own `getDisplayId()` cross-checked against the map key it arrived under.
+     * `MISMATCH` means the two authorities disagree, and the key is the one to trust.
+     *
+     * `AccessibilityWindowInfo.getDisplayId()` is API 30 and the check is written explicitly rather than
+     * left to an enclosing branch. Diagnostics only — never a scan input.
+     */
+    private fun crossCheckAnnotation(): String? {
+        if (Build.VERSION.SDK_INT < MULTI_DISPLAY_SDK) return null
+        return runCatching {
+            val byDisplay = windowsByDisplay()
+            val agree = byDisplay.all { (id, windows) ->
+                windows.all { runCatching { it.displayId }.getOrDefault(id) == id }
+            }
+            if (agree) "ok" else "MISMATCH"
+        }.getOrNull()
+    }
+
+    /**
+     * Whether a display appears in Samsung's DESKTOP display category.
+     *
+     * ⚠️ **Annotation only, never a mechanism.** Depending on an OEM category string to decide anything
+     * would be a fail-open dependency of exactly the kind the threat model forbids — one rename and the
+     * blocker goes quiet. Coverage follows the window map, always.
+     */
+    private fun dexAnnotation(): List<Int>? = runCatching {
+        displayManager.getDisplays(DEX_DISPLAY_CATEGORY).map { it.displayId }.takeIf { it.isNotEmpty() }
+    }.getOrNull()
 
     /**
      * Depth-first collect only the Instagram resource-ids the surface rule cares about
@@ -818,15 +1355,18 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * the DM sender field shares a window with the pager. Flattening here would throw that away.
      */
     private fun collectInstagramSignals(roots: List<AccessibilityNodeInfo>): List<Set<String>> {
-        lastIgWindowCount = roots.size
-        if (roots.isEmpty()) {
-            lastIgNodeCount = 0
-            return emptyList()
-        }
-        // One budget for the whole pass, not one per window, so N windows can't cost N × the walk.
-        // A reel's popup menu is ~28 nodes against a 1_200 budget, so in the case this fix exists for
-        // the second walk is nearly free. `igWindows` in the diagnostic line is what would show a
+        // Accumulated across displays within one pass, and reset at the start of scanDisplays() — this
+        // is now called once per display, so clobbering would report only the last one.
+        lastIgWindowCount += roots.size
+        if (roots.isEmpty()) return emptyList()
+        // One budget per DISPLAY, shared by that display's windows, so N windows can't cost N × the
+        // walk. A reel's popup menu is ~28 nodes against a 1_200 budget, so in the case this fix exists
+        // for the second walk is nearly free. `igWindows` in the diagnostic line is what would show a
         // future Instagram spending the budget before the player is reached.
+        //
+        // Per display rather than per pass, deliberately: a shared budget's failure mode is starvation,
+        // and a starved walk reads as "free surface" — the fail-open direction. Worst case doubles to
+        // 2 × 1_200 against a measured real cost of 99 + 28 nodes for the case this exists for.
         var budget = IG_NODE_BUDGET
         var walked = 0
         val perWindow = ArrayList<Set<String>>(roots.size)
@@ -845,22 +1385,32 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             }
             perWindow.add(found)
         }
-        lastIgNodeCount = walked
+        lastIgNodeCount += walked
         return perWindow
     }
 
     /**
-     * Record that the reel pager was really seen, which is what re-confirms [SignalCanary] against the
-     * installed Instagram version. Throttled hard: the scan runs a couple of times a second while
-     * Instagram is open, and each confirmation is a PackageManager lookup plus a prefs write, whereas
+     * Record which of Instagram's ids were really seen, which is what re-confirms [SignalCanary]
+     * against the installed Instagram version.
+     *
+     * Judged on the **union** across windows, unlike every rule in [InstagramSurface]: a sighting is a
+     * sighting wherever it came from, and the per-window discipline exists to stop one window's signal
+     * *exempting* something in another — a concern this has no counterpart to.
+     *
+     * Only [InstagramSurface.WITNESSED_IDS] are confirmed, and which ids those are is decided there,
+     * with the reasoning. Throttled hard and per id: the scan runs a couple of times a second while
+     * Instagram is open and each confirmation is a PackageManager lookup plus a prefs write, whereas
      * one sighting an hour carries exactly the same information.
      */
-    private fun noteReelSignal() {
+    private fun noteSignals(seen: Set<String>) {
         val now = SystemClock.elapsedRealtime()
-        val last = lastSignalConfirmElapsedMs
-        if (last != null && now - last < SIGNAL_CONFIRM_THROTTLE_MS) return
-        lastSignalConfirmElapsedMs = now
-        runCatching { witnessStore.confirm(clock.wallClockMs()) }
+        for (id in InstagramSurface.WITNESSED_IDS) {
+            if (id !in seen) continue
+            val last = lastSignalConfirmElapsedMs[id]
+            if (last != null && now - last < SIGNAL_CONFIRM_THROTTLE_MS) continue
+            lastSignalConfirmElapsedMs[id] = now
+            runCatching { witnessStore.confirm(id, clock.wallClockMs()) }
+        }
     }
 
     /** [node]'s resource-id, or null if the node died under us mid-walk. */
@@ -986,54 +1536,77 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Apply the combined decision. A website/browser block ([webBlock]) takes precedence — a browser is
-     * never itself a budgeted target, so the two don't really collide, but web-first is the clear rule.
+     * Apply the decision to **every display**: work out which ones must be covered and why, build each
+     * one's block screen, reconcile the overlays, and kick Home when the coverage could not be achieved.
+     *
+     * A website/browser block takes precedence over a target block — a browser is never itself a
+     * budgeted target, so the two don't really collide, but web-first is the clear rule, and it is now
+     * applied **per display** because the phone can be blocked for one reason while the monitor is
+     * blocked for the other.
+     *
+     * **Single display:** [DisplayCoverage.causes] yields at most `{0 → WEB|TARGET}` by that same
+     * web-first precedence, producing the same message, and [DisplayCoverage.homeFallback] reduces to
+     * `covered.isEmpty()` — i.e. exactly today's `if (!showOverlay(...)) performGlobalAction(HOME)`.
      */
-    private fun applyDecision(
-        decision: Decision,
-        webBlock: BrowserPolicy.WebBlock?,
-        webHost: String?,
-        webPkg: String?,
-    ) {
-        val message: CharSequence?
-        val key: String?
-        val facts: BlockFacts.Facts?
-        when {
-            webBlock != null -> {
-                message = webMessage(webBlock, webHost)
-                key = "w:$webBlock:${webHost ?: ""}"
-                facts = BlockFacts.forWeb(webBlock)
-                // Only a blocked *site* steers the browser; a non-allowlisted browser is an app block.
-                overlayExitBrowserPkg =
-                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE) webPkg else null
-            }
-            decision.access == Access.BLOCK && decision.target != null -> {
-                message = blockMessage(decision.target, decision.reason)
-                key = "t:${decision.target}:${decision.reason}"
-                facts = BlockFacts.forTarget(
-                    reason = decision.reason,
-                    schedule = scheduleFor(decision.target),
-                    alwaysBlocked = decision.target in AppTargets.alwaysBlockedTargets,
-                    now = clock.nowLocal(),
-                    exceptionWaitMs = ActiveRules.exceptionWaitMs,
-                )
-                overlayExitBrowserPkg = null
-            }
-            else -> {
-                message = null
-                key = null
-                facts = null
-            }
+    private fun applyDecision(decision: Decision, effective: Map<Int, Foreground>) {
+        val cover = DisplayCoverage.causes(
+            webBlocked = effective.filterValues { it.webBlock != null }.keys,
+            targetsOn = effective.filterValues { it.targets.isNotEmpty() }.keys,
+            engineBlocking = decision.access == Access.BLOCK && decision.target != null,
+        )
+        val want = cover.mapNotNull { (displayId, cause) ->
+            contentFor(cause, decision, effective[displayId])?.let { displayId to it }
+        }.toMap()
+        // What we actually asked for, not what `causes` proposed: a display whose content could not be
+        // built is never going to be covered, and recording it here would pin `sat=false` forever.
+        lastCover = want.keys
+        val covered = overlays.reconcile(want)
+        if (DisplayCoverage.homeFallback(want.keys, covered, lastActiveDisplayId)) {
+            // Overlay permission revoked or addView failed: blocking must not silently vanish.
+            // Home, not the browser-steering exit - this fires every tick, and re-issuing a
+            // navigation intent at 5s intervals would be its own kind of loop.
+            performGlobalAction(GLOBAL_ACTION_HOME)
         }
-        if (message != null && key != null && facts != null) {
-            if (!showOverlay(message, key, facts)) {
-                // Overlay permission revoked or addView failed: blocking must not silently vanish.
-                // Home, not the browser-steering exit - this fires every tick, and re-issuing a
-                // navigation intent at 5s intervals would be its own kind of loop.
-                performGlobalAction(GLOBAL_ACTION_HOME)
-            }
-        } else {
-            hideOverlay()
+    }
+
+    /**
+     * What one display's block screen says, and where its Close button steers.
+     *
+     * The three branches are the ones [applyDecision] used to hold inline, unchanged apart from reading
+     * the web half from **that display's own** read rather than from a single service-wide value.
+     */
+    private fun contentFor(
+        cause: DisplayCoverage.Cause,
+        decision: Decision,
+        read: Foreground?,
+    ): DisplayOverlays.Content<FactRows>? = when (cause) {
+        DisplayCoverage.Cause.WEB -> {
+            val webBlock = read?.webBlock
+            if (webBlock == null) null else DisplayOverlays.Content(
+                message = webMessage(webBlock, read.webHost),
+                key = "w:$webBlock:${read.webHost ?: ""}",
+                facts = render(BlockFacts.forWeb(webBlock)),
+                // Only a blocked *site* steers the browser; a non-allowlisted browser is an app block.
+                exitBrowserPkg =
+                    if (webBlock == BrowserPolicy.WebBlock.BLOCKED_SITE) read.webPkg else null,
+            )
+        }
+        DisplayCoverage.Cause.TARGET -> {
+            val target = decision.target
+            if (target == null) null else DisplayOverlays.Content(
+                message = blockMessage(target, decision.reason),
+                key = "t:$target:${decision.reason}",
+                facts = render(
+                    BlockFacts.forTarget(
+                        reason = decision.reason,
+                        schedule = scheduleFor(target),
+                        alwaysBlocked = target in AppTargets.alwaysBlockedTargets,
+                        now = clock.nowLocal(),
+                        exceptionWaitMs = ActiveRules.exceptionWaitMs,
+                    ),
+                ),
+                exitBrowserPkg = null,
+            )
         }
     }
 
@@ -1055,19 +1628,29 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * it needs no network and no third-party page, and it leaves the tab in a state that won't
      * re-block on the next launch. Falls back to Home if the browser refuses the intent.
      */
-    private fun exitOverlay() {
-        val pkg = overlayExitBrowserPkg
-        if (pkg != null && navigateToNeutral(pkg)) return
+    private fun exitOverlay(displayId: Int) {
+        val pkg = overlays.contentOn(displayId)?.exitBrowserPkg
+        if (pkg != null && navigateToNeutral(pkg, displayId)) return
         performGlobalAction(GLOBAL_ACTION_HOME)
     }
 
-    /** Point [pkg] at [NEUTRAL_URL]; false if it wouldn't take the intent (caller falls back to Home). */
-    private fun navigateToNeutral(pkg: String): Boolean = runCatching {
-        startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(NEUTRAL_URL))
-                .setPackage(pkg)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+    /**
+     * Point [pkg] at [NEUTRAL_URL] **on [displayId]**; false if it wouldn't take the intent (caller
+     * falls back to Home).
+     *
+     * Display 0 passes no `ActivityOptions` at all, so its behaviour is byte-identical to before. A
+     * secondary display asks for the launch to land there — without it, Close on the monitor's blocked
+     * browser yanks Chrome onto the phone instead of steering the tab that is actually blocked.
+     */
+    private fun navigateToNeutral(pkg: String, displayId: Int): Boolean = runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(NEUTRAL_URL))
+            .setPackage(pkg)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (displayId == DisplayCensus.DEFAULT_DISPLAY) {
+            startActivity(intent)
+        } else {
+            startActivity(intent, ActivityOptions.makeBasic().setLaunchDisplayId(displayId).toBundle())
+        }
         true
     }.getOrDefault(false)
 
@@ -1083,50 +1666,76 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Show (or refresh in place) the block overlay with [message] and [facts]; [key] identifies what's
-     * currently shown, so a changed cause updates the text instead of leaving a stale one. Returns true
-     * when the overlay is up (already or newly added).
+     * The block overlay's layout params — identical on every display, deliberately.
      *
-     * The message is gated on [key] and the fact rows deliberately are not: their cause hasn't changed
-     * but their *numbers* have, and "in 8 h 48 m" left alone for eight hours is worse than no countdown
-     * at all. [applyFacts] compares before it writes, so the 5-second tick costs nothing until a
-     * rendered minute actually rolls over.
+     * ⚠️ **No `FLAG_NOT_FOCUSABLE`, and that matters more on DeX than on the phone.** Samsung's own
+     * multi-display sample sets it, but that sample is a decorative overlay and this is a *barrier*: a
+     * non-focusable overlay would let a DeX hardware keyboard's keystrokes reach the blocked app
+     * underneath. Consequence accepted: a focusable overlay can take that display's input focus, so a
+     * physical keyboard may stop typing into the phone while the monitor is blocked — an annoyance,
+     * not a bypass.
+     */
+    private fun overlayParams() = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.OPAQUE,
+    )
+
+    /**
+     * The window manager for a **secondary** display — `createDisplayContext(display)`, deliberately
+     * **not** `createWindowContext`.
+     *
+     * ⚠️ TODO.md's DeX sketch named `createWindowContext(display, TYPE_APPLICATION_OVERLAY, null)`. That
+     * overload is **API 31, not 30**, and the API-30 call it would be mistaken for —
+     * `createWindowContext(int, Bundle)` — is documented to throw `UnsupportedOperationException` on a
+     * `Context` that does not attach to a display, *"such as Application or Service"*. This **is** a
+     * Service. Under the `runCatching` this path needs anyway, that throw becomes a **silent
+     * no-overlay**: the blocker reports healthy and covers nothing.
+     *
+     * `createDisplayContext` is API 17, needs no guard at minSdk 26, and is what Samsung's own DeX
+     * documentation prescribes for drawing with `TYPE_APPLICATION_OVERLAY` on the DeX display.
+     *
+     * Nothing is cached: DeX display ids are reported regenerated per session, and a cached context for
+     * a recycled id would `addView` onto a dead display.
+     */
+    private fun secondaryWindowManager(displayId: Int): WindowManager? = runCatching {
+        val display = displayManager.getDisplay(displayId) ?: return null
+        createDisplayContext(display).getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    }.getOrNull()
+
+    /**
+     * Build one display's block screen.
+     *
+     * Display 0 inflates from the service context — byte-identical to what it has always done. A
+     * secondary display inflates from **its own** display context, so the monitor gets display-correct
+     * density instead of phone metrics: at phone density the block screen renders oversized and the
+     * Close button can land off-screen, which turns a block into a lock-out with no visible exit.
+     *
+     * But a render nicety is never traded for a missing overlay: if the display context throws, this
+     * falls back to the service context and still produces a view.
      */
     // InflateParams: the inflated view has no parent by design — it is handed to WindowManager.
     @SuppressLint("InflateParams")
-    private fun showOverlay(message: CharSequence, key: String, facts: BlockFacts.Facts): Boolean {
-        overlayView?.let { view ->
-            if (key != overlayKey) {
-                view.findViewById<TextView>(R.id.block_message).text = message
-                overlayKey = key
+    private fun inflateOverlay(displayId: Int, content: DisplayOverlays.Content<FactRows>): View? {
+        val context =
+            if (displayId == DisplayCensus.DEFAULT_DISPLAY) this
+            else runCatching { displayManager.getDisplay(displayId)?.let(::createDisplayContext) }
+                .getOrNull() ?: this
+        return runCatching { LayoutInflater.from(context).inflate(R.layout.overlay_block, null) }
+            .recoverCatching { LayoutInflater.from(this).inflate(R.layout.overlay_block, null) }
+            .getOrNull()
+            ?.also { view ->
+                view.findViewById<TextView>(R.id.block_message).text = content.message
+                writeFactRows(view, content.facts)
+                view.findViewById<Button>(R.id.block_close).setOnClickListener {
+                    // Per display, never global: tearing down every overlay on one Close would hand
+                    // back a repeatable free window on the other display.
+                    overlays.hideOn(displayId)
+                    exitOverlay(displayId)
+                }
             }
-            applyFacts(view, facts)
-            return true
-        }
-        if (!Settings.canDrawOverlays(this)) return false
-
-        val view = LayoutInflater.from(this).inflate(R.layout.overlay_block, null)
-        view.findViewById<TextView>(R.id.block_message).text = message
-        applyFacts(view, facts)
-        view.findViewById<Button>(R.id.block_close).setOnClickListener {
-            hideOverlay()
-            exitOverlay()
-        }
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.OPAQUE
-        )
-
-        runCatching { windowManager.addView(view, params) }
-            .onSuccess {
-                overlayView = view
-                overlayKey = key
-            }
-        return overlayView != null
     }
 
     /** The overlay's explanation, matched to why the engine blocked a budgeted target. */
@@ -1156,24 +1765,20 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun scheduleFor(target: Target): Schedule? =
         ruleSource.rules().firstOrNull { it.target == target }?.schedule
 
-    /** The four strings the two fact rows are showing — cached so an unchanged tick writes nothing. */
-    private data class FactRows(
-        val whenLabel: String,
-        val whenValue: String,
-        val routeLabel: String,
-        val routeValue: String,
-    )
-
-    private var overlayFacts: FactRows? = null
-
-    private fun applyFacts(view: View, facts: BlockFacts.Facts) {
-        val rows = render(facts)
-        if (rows == overlayFacts) return
+    /**
+     * Write the four fact-row strings into one overlay's view.
+     *
+     * ⚠️ It only **writes**. The "has anything changed?" comparison that used to live here against a
+     * single service-wide `overlayFacts` now lives **per attachment** inside [DisplayOverlays] — with
+     * one shared cache the first display's write populates it, the second display's rows compare equal,
+     * the write is skipped, and the second block screen renders the layout's placeholder rows forever.
+     * Those placeholders quote a wrong price, twice in the loosening direction.
+     */
+    private fun writeFactRows(view: View, rows: FactRows) {
         view.findViewById<TextView>(R.id.block_fact_when_label).text = rows.whenLabel
         view.findViewById<TextView>(R.id.block_fact_when_value).text = rows.whenValue
         view.findViewById<TextView>(R.id.block_fact_route_label).text = rows.routeLabel
         view.findViewById<TextView>(R.id.block_fact_route_value).text = rows.routeValue
-        overlayFacts = rows
     }
 
     /**
@@ -1216,17 +1821,6 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         return FactRows(getString(whenLabel), whenValue, getString(routeLabel), routeValue)
     }
 
-    private fun hideOverlay() {
-        overlayView?.let { view ->
-            runCatching { windowManager.removeView(view) }
-            overlayView = null
-            overlayKey = null
-            // The cache belongs to the view that just went away; keeping it would leave the next
-            // overlay showing the inflated placeholder rows whenever the facts happened to match.
-            overlayFacts = null
-        }
-    }
-
     /** Built-in names are curated; a user-added app borrows its own launcher label. */
     private fun labelFor(target: Target): String = when (target) {
         Target.TIKTOK -> "TikTok"
@@ -1248,13 +1842,25 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         liveness.destroyed(this)
         clockSettingsWatch?.stop()
         clockSettingsWatch = null
+        runCatching { displayListener?.let { displayManager.unregisterDisplayListener(it) } }
+        displayListener = null
         stopTicking()
-        hideOverlay()
+        overlays.removeAll()
         super.onDestroy()
     }
 
     companion object {
         private const val TICK_MS = 5_000L
+        /** `getWindowsOnAllDisplays()` is API 30 — the detection half's only guard. */
+        private const val MULTI_DISPLAY_SDK = 30
+        /** `AccessibilityRecord.getDisplayId()` is API 33 — the attribution guard. Below it every event
+         *  files under display 0, which is exactly what every line of this service assumed before DeX. */
+        private const val EVENT_DISPLAY_SDK = 33
+        /** Min gap between DisplayListener-driven pumps — see [scheduleDisplayPump]. */
+        private const val DISPLAY_PUMP_THROTTLE_MS = 1_000L
+        /** Samsung's DeX display category. **Annotation only** — see [dexAnnotation]. */
+        private const val DEX_DISPLAY_CATEGORY =
+            "com.samsung.android.hardware.display.category.DESKTOP"
         /** Settings-watch text walk. Raised with flagIncludeNotImportantViews (more nodes per screen)
          *  so a deep Settings page can't exhaust the budget before the App-Block text is reached -
          *  running out early would make the self-defense fail open. */
@@ -1281,7 +1887,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
          *  binder reads per interval, only while Settings is up; short enough that a flipped toggle
          *  is nagged about before the user leaves the page. */
         private const val HEALTH_CHECK_THROTTLE_MS = 15_000L
-        /** Min gap between reel-pager confirmations — see [noteReelSignal]. */
+        /** Min gap between Instagram signal confirmations, per id — see [noteSignals]. */
         private const val SIGNAL_CONFIRM_THROTTLE_MS = 60L * 60 * 1_000
         /** Min gap between omnibox confirmations, per browser — see [noteOmniboxRead]. Shorter than the
          *  reel throttle because a readable omnibox is the ordinary case, so it costs a write far more
@@ -1295,6 +1901,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** Settings-watch diagnostic — see [diagnoseSelfDefense]. Its own tag so `-s AppBlockWatch`
          *  isolates it from the per-frame foreground chatter on [DIAG_TAG]. */
         private const val WATCH_TAG = "AppBlockWatch"
+        /** Per-display census — see [diagnoseDisplays]. Its own tag so `-s AppBlockDsp` isolates it. */
+        private const val DSP_TAG = "AppBlockDsp"
+        private const val EVT_TAG = "AppBlockEvt"
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
          *  as a VIEW intent and lands on a blank page. No network, no third-party site, and nothing a
          *  redirect can bounce off. See [exitOverlay]. */

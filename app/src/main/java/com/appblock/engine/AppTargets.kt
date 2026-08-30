@@ -34,7 +34,7 @@ object AppTargets {
         // the reels cap per CONSTRAINTS §1 — but it does say everything about the closing hours,
         // which are app-wide by intent (user's call 2026-08-06: mornings are protected, DMs
         // included). The reels budget continues to arrive from surface detection, and both targets
-        // apply at once; see targetsFor.
+        // apply at once; see foregroundTargets.
         "com.instagram.android" to Target.INSTAGRAM_APP,
         //
         // Instagram *Lite* is mapped, and deliberately as a whole-app target: InstagramSurface keys
@@ -94,22 +94,83 @@ object AppTargets {
             ?: Target.forPackage(packageName).takeIf { it in activeTargets }
 
     /**
-     * Every target this package answers to, strictest-wins (the caller blocks if *any* of them does).
+     * Every target the **whole foreground** answers to, strictest-wins downstream (the engine blocks if
+     * *any* of them does — `BudgetCoordinator.decideCurrent`).
      *
-     * **Why a list.** One package can carry more than one limit, and Instagram is the case that forced
-     * it: `com.instagram.android` has both an app-wide schedule ([Target.INSTAGRAM_APP]) and a
-     * surface-scoped budget ([Target.INSTAGRAM_REELS_EXPLORE], contributed separately by
-     * [InstagramSurface] since no package can imply it). While this returned a single target, the
-     * package match won unconditionally and **the surface target became dead code** — still listed on
-     * the Apps tab, never firing. That turned adding an app, a *tightening* gesture, into a net
-     * loosening of the reels cap, which is the one direction this project forbids.
+     * [packagesTopmostFirst] is every distinct package owning a visible window, in the order
+     * `getWindows()` offered them, which is topmost first. [surfaceTarget] is the one target no package
+     * can imply — Instagram's reel surface, contributed by [InstagramSurface] after reading the tree.
+     *
+     * ## Why a list, part one: one package, two limits
+     *
+     * `com.instagram.android` carries both an app-wide schedule ([Target.INSTAGRAM_APP]) and a
+     * surface-scoped budget ([Target.INSTAGRAM_REELS_EXPLORE]). While the resolution returned a single
+     * target the package match won unconditionally and **the surface target became dead code** — still
+     * listed on the Apps tab, never firing. That turned adding an app, a *tightening* gesture, into a
+     * net loosening of the reels cap.
+     *
+     * ## Why a list, part two: one screen, two apps (fixed 2026-08-30)
+     *
+     * 🔴 The service used to keep a single `packageTarget` var and fill it with the **first** match in
+     * the window loop — `if (packageTarget == null) …`. So exactly one package target ever reached the
+     * engine, however many budgeted apps were on screen, and the second was neither gated nor metered.
+     * Split-screen and Samsung App Pairs make that trivially reachable: put X in one pane and any other
+     * budgeted app in the other, tap the other pane to raise it, and X is free. Since
+     * `RULES_VERSION 5` Instagram is *itself* a package target, so an Instagram + TikTok pair is two
+     * package targets by construction rather than by contrivance.
+     *
+     * The engine was never the problem — `onForegroundTargets` and `decideCurrent` have been plural and
+     * correct throughout, and the class KDoc on the service claimed this already worked ("a budgeted app
+     * counts as foreground if it occupies ANY visible window"). The whole loss was in the adapter, which
+     * is exactly why this now lives here, where it can be tested: the service has no tests.
+     *
+     * ## Order is load-bearing
+     *
+     * Topmost first, and the surface target last. `BudgetCoordinator.onForegroundTargets` gates every
+     * target in this list but accrues to the **first** non-schedule-only one, so the order decides which
+     * app's budget the minutes come out of when two are visible at once. Topmost is the app the user
+     * raised, and metering both would charge one minute of wall-clock to two budgets.
      *
      * Built-ins still win over a picker-added whole-app target for the same package (a curated target
      * keeps its special handling rather than degrading), and a user-added package contributes at most
      * itself.
      */
-    fun targetsFor(packageName: String, activeTargets: Set<Target>): List<Target> =
-        listOfNotNull(targetFor(packageName, activeTargets))
+    fun foregroundTargets(
+        packagesTopmostFirst: List<String>,
+        activeTargets: Set<Target>,
+        surfaceTarget: Target? = null,
+    ): List<Target> {
+        val targets = LinkedHashSet<Target>(4)
+        for (packageName in packagesTopmostFirst) {
+            targetFor(packageName, activeTargets)?.let { targets.add(it) }
+        }
+        surfaceTarget?.let { targets.add(it) }
+        return targets.toList()
+    }
+
+    /**
+     * The subset of [packagesTopmostFirst] that something actually budgets — i.e. the packages whose
+     * continued presence on screen justifies keeping a block up.
+     *
+     * Deliberately **packages, not targets**: `Target` carries a key, and only user-added ones carry a
+     * package (`Target.userPackage`), so a list of targets cannot answer "is the app that is still on
+     * screen one of the ones we blocked?" for any built-in. That question is what
+     * `OcclusionHold.sustain` asks once per pass.
+     *
+     * Same traversal and the same `targetFor` as [foregroundTargets], so the two cannot drift into
+     * disagreeing about what counts as budgeted — the pairing a caller depends on is that every package
+     * here contributed a target there.
+     */
+    fun budgetedPackages(
+        packagesTopmostFirst: List<String>,
+        activeTargets: Set<Target>,
+    ): Set<String> {
+        val out = LinkedHashSet<String>(4)
+        for (packageName in packagesTopmostFirst) {
+            if (targetFor(packageName, activeTargets) != null) out.add(packageName)
+        }
+        return out
+    }
 
     /**
      * Packages the picker must never offer, because something already enforces them.

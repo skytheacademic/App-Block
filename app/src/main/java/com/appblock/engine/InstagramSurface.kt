@@ -98,6 +98,34 @@ object InstagramSurface {
     val SIGNAL_IDS: Set<String> = setOf(REEL_PAGER, DM_SENDER, CONTEXT_MENU, EXPLORE_ACTION_BAR)
 
     /**
+     * The ids whose continued existence [SignalCanary] tracks — a strict subset of [SIGNAL_IDS], and
+     * the two left out are left out for **opposite** reasons.
+     *
+     * The canary's design (read its KDoc first) turns on one point: a *missing* sighting is evidence
+     * only when a sighting was near-certain to happen anyway. Witness an id nobody exercises and the
+     * prompt fires hardest at the user the blocker is working for, which is the exact inversion the
+     * whole class exists to avoid.
+     *
+     *  - [REEL_PAGER] — **witnessed.** On screen the instant any reel plays, which is the budgeted
+     *    behaviour itself. A fortnight of Instagram use with no sighting is real evidence it moved.
+     *  - [EXPLORE_ACTION_BAR] — **witnessed** (added 2026-08-29 with the rule that reads it). On screen
+     *    whenever the Explore *grid* is, i.e. during ordinary free browsing, so it is exercised at least
+     *    as often as the pager. Its drift kills the Explore-preview rule, which fails **open**.
+     *  - [CONTEXT_MENU] — **deliberately not witnessed, and this is the uncomfortable one.** Its drift
+     *    also fails open, but the only thing that ever puts it on screen is the press-and-hold *bypass*.
+     *    Witnessing it would prompt loudest at the user who stopped doing the thing being blocked. So
+     *    the pair rule is covered through one of its two halves, and the gap is written down here
+     *    rather than left to be discovered.
+     *  - [DM_SENDER] — not witnessed, for the opposite reason: it is the only *exempting* id in this
+     *    file, so its drift fails **closed** (a reel a real person sent starts being blocked). That is
+     *    the safe direction; an alarm there would be an alarm about being too strict.
+     *
+     * `InstagramSurfaceTest` asserts this partition is total, so a fifth id cannot be added without
+     * someone deciding out loud which side of it that id falls on.
+     */
+    val WITNESSED_IDS: Set<String> = setOf(REEL_PAGER, EXPLORE_ACTION_BAR)
+
+    /**
      * The budgeted [Target] for the Instagram surface described by [resourceIds] (the set of
      * `viewIdResourceName`s visible in the Instagram window), or null when the surface is free.
      */

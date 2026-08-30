@@ -47,7 +47,12 @@ class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(contex
         val ctx = applicationContext
         if (!Watchdog.setupCompleted(ctx)) return Result.success()  // don't nag before first setup
         Watchdog.report(ctx, Watchdog.currentHealth(ctx))
-        Watchdog.reportSignalDrift(ctx, SignalWitnessStore(ctx).refresh(System.currentTimeMillis()))
+        // installedHealth owns "which signal ids count", the same way its omnibox twin below owns
+        // "which browsers count" — the Lock protection row asks the identical question.
+        Watchdog.reportSignalDrift(
+            ctx,
+            SignalWitnessStore(ctx).installedHealth(System.currentTimeMillis()),
+        )
         // installedHealth owns "which browsers count" — shared with the Lock protection row, which asks
         // the identical question and must not answer it differently.
         Watchdog.reportOmniboxDrift(

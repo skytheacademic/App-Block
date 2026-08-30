@@ -122,7 +122,7 @@ fun AppRoot(
     var omniboxHealth by remember { mutableStateOf(SignalCanary.Health.NO_APP) }
     var rulesWereCorrupt by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        signalHealth = SignalWitnessStore(context).refresh(System.currentTimeMillis())
+        signalHealth = SignalWitnessStore(context).installedHealth(System.currentTimeMillis())
         omniboxHealth = OmniboxWitnessStore(context).installedHealth(System.currentTimeMillis())
         // The draft's first load() is what detects and quarantines an unreadable config, so it has
         // to have run before the flag is read — asking first would always come back clean on a cold

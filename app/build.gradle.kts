@@ -36,6 +36,19 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 8 / 0.8.0: the split-screen P0 and the multi-display rewrite. `resolveForeground()` kept a
+        // single `packageTarget` filled by the first match in the window loop, so exactly ONE package
+        // target ever reached the engine however many budgeted apps were on screen — park TikTok in an
+        // unfocused split-screen pane under Instagram and it was neither blocked nor metered. The engine
+        // was never wrong; the whole loss was in the untested service adapter, whose own KDoc claimed
+        // the opposite. Fixed by `AppTargets.foregroundTargets(...)`, replacing `targetsFor`, which was
+        // dead code two KDocs pointed at as the mechanism. Same build carries the DeX/multi-display work:
+        // detection, the settings-watch and the overlay were all single-display, so a Settings page about
+        // App-Block opened on a monitor reached no rule at all. ⚠️ Eleven assumptions in that half are
+        // unverified on hardware and A1 fails OPEN — `AppBlockDsp`'s `untracked=` answers it on the first
+        // plug-in. Display 0 is protected by construction (key 0 is refilled from the legacy call), so
+        // the phone cannot be worse than 0.7.0; that is what gate G0 exists to confirm.
+        //
         // 7 / 0.7.0: the Explore press-and-hold preview. Holding a thumbnail in the Explore grid plays
         // the reel in a preview card with **no reel pager anywhere on screen**, so the pager rule never
         // fired — a live bypass, reproduced over the cap for three minutes and confirmed as one already
@@ -53,8 +66,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 7
-        versionName = "0.7.0"
+        versionCode = 8
+        versionName = "0.8.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

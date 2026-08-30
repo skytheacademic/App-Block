@@ -31,7 +31,7 @@ data class Target(val key: String) {
          * It exists **beside** [INSTAGRAM_REELS_EXPLORE] rather than replacing it, because the two
          * limits want different scopes: closing hours are app-wide (they cover DMs), while the budget
          * is surface-scoped (reels only). Both resolve on `com.instagram.android` and the strictest
-         * answer wins — see [AppTargets.targetsFor] and `BudgetCoordinator.decideCurrent`.
+         * answer wins — see [AppTargets.foregroundTargets] and `BudgetCoordinator.decideCurrent`.
          *
          * Making it a second target is what keeps the cap honest. Folding the schedule onto the
          * existing target would have meant one rule carrying both, and a whole-app *cap* is the thing

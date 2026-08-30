@@ -109,16 +109,14 @@ class OmniboxWitnessStore(context: Context) {
     fun installedHealth(nowMs: Long): SignalCanary.Health =
         worstHealth(BrowserTargets.allowlist.filter { installedVersion(it) != null }, nowMs)
 
-    /** The worst verdict across the allowlisted browsers that are actually installed. */
-    fun worstHealth(packages: Collection<String>, nowMs: Long): SignalCanary.Health {
-        val healths = packages.map { refresh(it, nowMs) }
-        return when {
-            healths.any { it == SignalCanary.Health.STALE } -> SignalCanary.Health.STALE
-            healths.any { it == SignalCanary.Health.PENDING } -> SignalCanary.Health.PENDING
-            healths.any { it == SignalCanary.Health.CONFIRMED } -> SignalCanary.Health.CONFIRMED
-            else -> SignalCanary.Health.NO_APP
-        }
-    }
+    /**
+     * The worst verdict across the allowlisted browsers that are actually installed.
+     *
+     * The fold itself is [SignalCanary.worst] rather than a local `when`, because the reel canary now
+     * asks the same question across its own signal ids and the precedence must not be written twice.
+     */
+    fun worstHealth(packages: Collection<String>, nowMs: Long): SignalCanary.Health =
+        SignalCanary.worst(packages.map { refresh(it, nowMs) })
 
     companion object {
         /**

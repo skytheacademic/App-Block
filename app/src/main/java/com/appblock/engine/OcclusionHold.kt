@@ -16,9 +16,15 @@ package com.appblock.engine
  * gets them out. Two independent ways out, both erring toward staying blocked:
  *
  *  1. **The foreground moved.** Window-state events keep arriving even while `getWindows()` is pruned,
- *     and they carry a package name. A state change from a package other than the one we armed on means
- *     the user left — release. Costs at worst a brief flicker if it misfires (the read comes back
- *     blockable and the overlay returns within a frame or two).
+ *     and they carry a package name. A state change from a package that is **not one of the packages
+ *     this block is about** means the user left — release. Costs at worst a brief flicker if it misfires
+ *     (the read comes back blockable and the overlay returns within a frame or two).
+ *
+ *     ⚠️ **"Not one of them", not "different from the one we armed on"** — see [heldPackages]. The
+ *     singleton phrasing was this class's own wording until 2026-08-30 and it was measurably wrong the
+ *     moment two budgeted apps shared a screen: each pane's events released the other pane's hold, so
+ *     the "at worst a brief flicker" above stopped being a misfire and became the steady state, ~120 ms
+ *     every 2–3 s for as long as split-screen was open.
  *  2. **[holdLimitMs] since the last real read, but only while (1) has never been seen to work.** A
  *     backstop for "the events never came", which is the *only* thing it was ever for. See below — it
  *     used to run unconditionally, and that was a defect.
@@ -61,7 +67,28 @@ class OcclusionHold<T : Any>(
 ) {
 
     private var held: T? = null
-    private var heldPackage: String? = null
+
+    /**
+     * The packages whose presence justifies this hold — every budgeted app that was on screen when the
+     * read was taken, plus the browser whose URL was blocked.
+     *
+     * ⚠️ **A SET, not the single package the event stream last named — and that was a measured defect,
+     * not a refinement.** It used to be one `String?`, filled from `DisplayHolds.lastPackage`, so the
+     * moved-on test really asked *"has the last-named foreground package changed since we armed?"* In
+     * split-screen that is the wrong question and it answers itself: both panes emit window-state events
+     * continuously, so whichever one the hold armed on, the **other** one's next event reads as *"the
+     * user left"*, the hold releases, and the overlay drops until the next pass puts it back.
+     *
+     * Measured on hardware 2026-08-30 (S25 FE, One UI 8, Instagram + TikTok in split-screen): the block
+     * screen dropped for **~120 ms every 2–3 s, indefinitely, and was visible to the naked eye** — a ~5 %
+     * duty cycle against C-1's 0.33 %, and C-1 is on this repo's record as a bypass rather than a
+     * nuisance.
+     *
+     * 💡 **The split-screen P0 fix is what made it pathological.** Before `AppTargets.foregroundTargets`,
+     * the second budgeted app was not a target at all, so it never got far enough to fight over the hold.
+     * Closing one hole is what made this one bite — which is the argument for shipping them together.
+     */
+    private var heldPackages: Set<String> = emptySet()
     private var heldSinceMs = 0L
 
     /**
@@ -96,12 +123,18 @@ class OcclusionHold<T : Any>(
 
     /**
      * A real read got through the pruning: (re)arm on it and restart the [holdLimitMs] countdown.
-     * [foregroundPackage] is the package the *event stream* last reported, which may legitimately be
-     * null — we then have no basis for the moved-on test and only the timeout can release.
+     *
+     * [justifiedBy] is every package whose presence on screen justifies keeping this block up — the
+     * budgeted apps the read found, plus the blocked browser. It may legitimately be **empty**, and an
+     * empty set deliberately means *"no basis to hold against a named package"*: the first named
+     * foreground releases. That is the safe direction — releasing when we should not have costs a frame
+     * of flicker and the next read puts the overlay straight back, whereas holding when we should not
+     * have is a block screen that follows the user out of the app with no exit but the 60 s backstop,
+     * and the backstop is stood down for good once the event channel has proven itself.
      */
-    fun arm(value: T, foregroundPackage: String?, nowMs: Long) {
+    fun arm(value: T, justifiedBy: Set<String>, nowMs: Long) {
         held = value
-        heldPackage = foregroundPackage
+        heldPackages = justifiedBy
         heldSinceMs = nowMs
     }
 
@@ -112,14 +145,14 @@ class OcclusionHold<T : Any>(
      * the held one. Re-arming on that would refresh the countdown off held data and the timeout would
      * never fire. So the clock always measures time since the last read that genuinely got through.
      */
-    fun seed(value: T, foregroundPackage: String?, nowMs: Long) {
-        if (held == null) arm(value, foregroundPackage, nowMs)
+    fun seed(value: T, justifiedBy: Set<String>, nowMs: Long) {
+        if (held == null) arm(value, justifiedBy, nowMs)
     }
 
     /** Drop the hold — the overlay came down, or the engine allowed the target. */
     fun release() {
         held = null
-        heldPackage = null
+        heldPackages = emptySet()
         heldSinceMs = 0L
     }
 
@@ -132,8 +165,11 @@ class OcclusionHold<T : Any>(
         // Order matters for the reasoning even though both branches release: the moved-on test is the
         // real exit and is asked first, so the backstop is only ever consulted about a case it alone
         // can answer.
-        val armedOn = heldPackage
-        if (armedOn != null && foregroundPackage != null && foregroundPackage != armedOn) {
+        //
+        // "Not one of the packages this block is about" — NOT "different from the one we armed on".
+        // With one budgeted app on screen the two are identical, which is why the singleton version
+        // survived every test and only split-screen exposed it. See [heldPackages].
+        if (foregroundPackage != null && foregroundPackage !in heldPackages) {
             release()
             return null
         }
