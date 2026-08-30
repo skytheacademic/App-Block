@@ -36,18 +36,25 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
-        // 6 / 0.6.0: the first build off a merged `main` — audit Batches A and B, the N-2 second
-        // channel, the Instagram popup-window fix, and the two P0s from the third cable session, all in
-        // one tree. It exists because 0.5.0 was built on a branch that did NOT carry the popup-window
-        // fix, and merging everything would have left two different binaries answering to "0.5.0" —
-        // which is the exact confusion the versionCode is here to prevent.
+        // 7 / 0.7.0: the Explore press-and-hold preview. Holding a thumbnail in the Explore grid plays
+        // the reel in a preview card with **no reel pager anywhere on screen**, so the pager rule never
+        // fired — a live bypass, reproduced over the cap for three minutes and confirmed as one already
+        // used. The new rule is the cross-window pair `context_menu` + `explore_action_bar`; a held-open
+        // photo is budgeted the same, by the owner's call, because Instagram's menu is identical for the
+        // two. ⚠️ This is the first build whose newest rule has never fired on hardware — one input
+        // (`explore_action_bar` surviving in the grid window while the popup has focus) is unverifiable
+        // from the shell. Check `igSignals=` on debugFast before trusting it.
         //
-        // 5 / 0.5.0: the accessibility-button picker (rule 3) + repair mode; superseded before it was
-        // ever installed. 4 / 0.4.0: the N-2 second channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch
-        // A. Bumped per batch so App info on the phone says which build is installed; installs go in
-        // ascending order because a release build can't be downgraded.
-        versionCode = 6
-        versionName = "0.6.0"
+        // 6 / 0.6.0: the first build off a merged `main` (audit Batches A and B, the N-2 second channel,
+        // the Instagram popup-window fix, the third cable's two P0s) — it exists because 0.5.0 was built
+        // on a branch that did NOT carry the popup-window fix, and two binaries answering to "0.5.0" is
+        // the exact confusion the versionCode prevents. 5 / 0.5.0: the accessibility-button picker
+        // (rule 3) + repair mode; superseded before it was ever installed. 4 / 0.4.0: the N-2 second
+        // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
+        // phone says which build is installed; installs go in ascending order because a release build
+        // can't be downgraded.
+        versionCode = 7
+        versionName = "0.7.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
