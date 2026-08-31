@@ -69,6 +69,37 @@ one build and you find out at the phone.
 - **capture any state you'd hate to re-enter before phase 1** — if the app can export its config,
   that export is both a checklist item and the session's insurance
 
+## Post-install: undo the shortcuts the OS grants itself
+
+**Installing an accessibility service can hand it privileges nobody asked for, and the ones that
+matter are the ones that switch it *off*.** On One UI 8 the install alone adds the service to
+`accessibility_button_targets`; with gesture navigation the system then forces
+`accessibility_button_mode=1` and draws a floating pill on the screen edge. Long-press that pill →
+Edit → untick the service, and `enabled_accessibility_services` is empty: four taps, no key, no
+computer, and nothing notices, because the watchdog runs inside the service that just died.
+`accessibility_gesture_targets` is claimed the same way. (Measured on the S25, 2026-08-29.)
+
+So a device install is not finished when the APK lands. Clear both targets:
+
+```bash
+adb shell "settings put secure accessibility_button_targets ''"
+adb shell "settings put secure accessibility_gesture_targets ''"
+```
+
+Note the quoting: the empty argument has to survive the *local* shell, so the whole command is
+quoted for the device. `adb shell settings put secure accessibility_button_targets ""` loses it and
+fails with `Bad arguments` — while still looking like it ran.
+
+Three things generalize past this app:
+- **The OS's defaults are part of the threat model.** Nothing in the manifest asked for the pill.
+  It was found by reading the device back (`settings get secure …`, `dumpsys accessibility`), and
+  the code comment it replaced had asserted the opposite, in good faith, for weeks.
+- **Don't disarm the declaration to fix the state.** `flagRequestAccessibilityButton` is *why* every
+  soft shortcut becomes a no-op callback instead of toggling the service off. Dropping it to lose
+  the pill re-opens the volume-key chord — a worse door, reachable in two seconds.
+- **Re-run it after every install.** The installer makes the claim, so the claim comes back. This
+  belongs on the post-install checklist beside the permission grants, not in someone's memory.
+
 ## Docs split
 - **Repo (public):** README (what + how to build), code, this playbook. Nothing personal.
 - **Private planning folder (synced, outside git):** STATUS (current state, lean) · TODO (the gated

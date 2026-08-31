@@ -68,8 +68,12 @@
      So N-1 traded a chord for a pill. The pill's picker is now bounced by SettingsWatch's checkable
      rule (see Screen.checkables - our label sits ON the CheckBox there, where every list puts a bare
      switch beside a label), and the Lock tab names the claim out loud, because clearing the target
-     itself needs `adb shell settings put secure accessibility_button_targets ""` and comes back on the
-     next install. Removing this flag is NOT the fix: it reopens the chord, which is worse. -->
+     itself needs `adb shell "settings put secure accessibility_button_targets ''"` and comes back on
+     the next install. Quote it exactly like that: the empty argument has to survive the LOCAL shell,
+     and `adb shell settings put ... ""` instead fails with "Bad arguments" while still looking like
+     it ran (verified 2026-08-30). One UI claims `accessibility_gesture_targets` the same way on
+     install, so that key needs the same line.
+     Removing this flag is NOT the fix: it reopens the chord, which is worse. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"

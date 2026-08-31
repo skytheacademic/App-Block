@@ -1735,6 +1735,17 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                     overlays.hideOn(displayId)
                     exitOverlay(displayId)
                 }
+                // The only channel that can tell us the window went away without us asking, and the
+                // reason `overlays.covered()` is a fact rather than a memory of one. Registered at
+                // inflate so it is in place before `addView` — a listener added after the add would
+                // miss a same-frame teardown, which is exactly the case worth catching.
+                //
+                // Our own removals reach here too: `hideOn` drops the record BEFORE calling
+                // `removeView`, so this finds nothing and is a no-op. See DisplayOverlays.noteDetached.
+                view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+                    override fun onViewAttachedToWindow(v: View) = Unit
+                    override fun onViewDetachedFromWindow(v: View) = overlays.noteDetached(displayId, v)
+                })
             }
     }
 

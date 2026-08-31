@@ -52,6 +52,28 @@ package com.appblock.engine
  * The default is `{ false }`, which reproduces the pre-2026-08-03 behaviour exactly — so every test
  * written against the old rule still means what it meant.
  *
+ * ## Two windows of one browser (audit 2026-08-21, answered 2026-08-30)
+ *
+ * The audit asked whether per-**package** keying is too coarse now that split-screen is real: Chrome
+ * window A reads its omnibox fine, Chrome window B's is absent, and A's read vouches for B.
+ *
+ * It does — and the answer is that it costs nothing, because **the outcome is identical to the
+ * single-window case that is already accepted.** One Chrome window scrolled down on a blocked page is
+ * an absent omnibox that must not be called [BrowserTargets.Omnibox.Unreadable]; that is the false
+ * block fixed above, deliberately. Adding a second window beside it reaches the same place by a longer
+ * route and buys nothing a second tab does not.
+ *
+ * The reason it cannot get worse than that is what the vouch is *about*. A read proves the **id is
+ * still the one we look for**, and the id is a property of the installed browser — one APK, one id, so
+ * two windows of it cannot disagree. For the vouch to be wrong the id must have moved, and that is a
+ * browser *update*, which moves it in every window at once and is what [idsVouched]'s version key
+ * catches.
+ *
+ * ⚠️ **Where it would stop holding: a second package.** A cloned or repackaged browser is a different
+ * package name and is keyed separately here, which is correct — and is also why the per-package key
+ * must not be widened to something like "any browser". The open App Cloner gap (TODO, allowlist
+ * decision) is a *detection* problem upstream of this class, not a reason to loosen the keying.
+ *
  * Pure and time-injected like [OcclusionHold]: the service supplies the raw read (it needs an
  * `AccessibilityNodeInfo` to take one), the clock, and the durable vouch, and this owns the state that
  * spans passes.
