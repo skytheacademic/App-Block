@@ -36,6 +36,21 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 10 / 0.9.0: the accessibility button that came back after a restart. 0.5.0 shut the picker
+        // (the four-tap off switch behind the floating pill) and the Lock tab named the claim, with
+        // one adb command to clear it. From the phone, 2026-09-08: the command works and a REBOOT
+        // undoes it, the button returning as a tab on the screen edge. `accessibility_button_targets`
+        // is derived, not stored-once - an enabled service that requests the accessibility button is
+        // re-added every time the framework reads its accessibility config, and boot is one of those
+        // reads - so no one-shot write can hold. `service/ShortcutTargetGuard` removes the entry on
+        // every service connect, on every change to the setting, and on the watchdog's 15-minute pass,
+        // which needs `WRITE_SECURE_SETTINGS` (adb, once). Without that grant the build behaves exactly
+        // like 0.8.1 and the Lock row carries the command, so this version is worth installing either
+        // way: the shortcut read it also fixes was blind to the short flattening Samsung sometimes
+        // writes (`pkg/.service.Foo`), i.e. the row could have said "no shortcut" with the button on
+        // screen. Written as 9 / 0.9.0 off a `main` without 0.8.1, which also claimed 9; renumbered
+        // to 10 when it was rebased onto 0.8.1, so no two binaries answer to one versionCode.
+        //
         // 9 / 0.8.1: the three audit findings that had been carried as "reported, not verified" since
         // 2026-08-21, taken to a verdict each. Only one was real. `DisplayOverlays.covered()` — the set
         // that `DisplayCoverage.satisfied` and the kick-to-home fallback both answer from — was a
@@ -82,8 +97,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 9
-        versionName = "0.8.1"
+        versionCode = 10
+        versionName = "0.9.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

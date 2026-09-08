@@ -65,15 +65,27 @@
      key, no computer, and nothing notices because the watchdog runs inside the service that just died.
      Confirmed twice.
 
-     So N-1 traded a chord for a pill. The pill's picker is now bounced by SettingsWatch's checkable
+     So N-1 traded a chord for a pill. The pill's picker is bounced by SettingsWatch's checkable
      rule (see Screen.checkables - our label sits ON the CheckBox there, where every list puts a bare
-     switch beside a label), and the Lock tab names the claim out loud, because clearing the target
-     itself needs `adb shell "settings put secure accessibility_button_targets ''"` and comes back on
-     the next install. Quote it exactly like that: the empty argument has to survive the LOCAL shell,
-     and `adb shell settings put ... ""` instead fails with "Bad arguments" while still looking like
-     it ran (verified 2026-08-30). One UI claims `accessibility_gesture_targets` the same way on
-     install, so that key needs the same line.
-     Removing this flag is NOT the fix: it reopens the chord, which is worse. -->
+     switch beside a label), and the Lock tab names the claim out loud. Removing this flag is NOT the
+     fix: it reopens the chord, which is worse.
+
+     Clearing the target by hand needs `adb shell "settings put secure accessibility_button_targets ''"`.
+     Quote it exactly like that: the empty argument has to survive the LOCAL shell, and
+     `adb shell settings put ... ""` instead fails with "Bad arguments" while still looking like it
+     ran (verified 2026-08-30). One UI claims `accessibility_gesture_targets` the same way on install,
+     so that key needs the same line.
+
+     2026-09-08, from the phone: clearing the button target did clear the pill, and a RESTART brought
+     it back, docked as a tab on the edge of the screen. The earlier note said "comes back on the next
+     install" and was understating it. That setting is derived, not stored-once: the service is
+     enabled and requests the accessibility button, so every time the framework reads its
+     accessibility configuration it concludes we belong in that list and writes us back, and boot is
+     one of those reads. No number of one-shot writes beats something that re-derives its answer. The
+     fix is service/ShortcutTargetGuard, which removes the entry on every service connect (i.e. every
+     boot), on every change to the setting, and on the watchdog's 15-minute pass. It needs
+     `WRITE_SECURE_SETTINGS`, granted once over adb; without it nothing changes and the Lock tab
+     carries the command. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"

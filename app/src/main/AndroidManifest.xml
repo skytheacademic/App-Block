@@ -12,6 +12,26 @@
     <!-- Scanning the stashed key QR at unlock time. Runtime permission — the scan screen asks on
          first use; typing the code stays as the no-camera fallback. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Lets the app take itself back out of `accessibility_button_targets`, which is the only way
+         that clearing the floating button survives a restart: Android re-derives that setting from
+         "enabled service + requests the accessibility button" on every accessibility config read, so
+         it rewrites the entry at every boot and a one-shot `settings put` from the cable is undone by
+         the next one (reported from the phone 2026-09-08). See service/ShortcutTargetGuard.
+
+         signature|privileged, so it is NOT granted by installing and cannot be reached from any
+         Settings screen. It is given once, over adb, and survives reboots and in-place updates:
+
+             adb shell pm grant com.appblock android.permission.WRITE_SECURE_SETTINGS
+
+         Declaring it is what makes that command work at all — `pm grant` refuses a permission the
+         package never requested — and declaring it changes nothing on a phone that never runs it:
+         every sweep reads NO_PERMISSION and the app behaves as it did before, with the Lock tab
+         naming the claim and carrying the command. Lint's ProtectedPermissions warns that normal apps
+         cannot hold this; a sideloaded blocker granted it by hand from its owner's laptop is the case
+         it does not know about. -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <uses-feature
         android:name="android.hardware.camera.any"
         android:required="false" />

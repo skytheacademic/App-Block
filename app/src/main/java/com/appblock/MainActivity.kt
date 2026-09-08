@@ -9,12 +9,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.mutableStateOf
+import com.appblock.service.ShortcutTargetGuard
 import com.appblock.service.Watchdog
 import com.appblock.ui.AppRoot
 import com.appblock.ui.theme.AppBlockTheme
 import com.appblock.util.accessibilitySettingsIntent
 import com.appblock.util.areNotificationsEnabled
 import com.appblock.util.batteryExemptionIntent
+import com.appblock.util.canWriteSecureSettings
 import com.appblock.util.deviceAdminActivationIntent
 import com.appblock.util.isAccessibilityServiceEnabled
 import com.appblock.util.isAccessibilityShortcutTarget
@@ -37,6 +39,10 @@ class MainActivity : ComponentActivity() {
     // Not a grant at all — the opposite. True while Android has an accessibility shortcut pointed at
     // the service, which it does from the moment the app is installed. See isAccessibilityShortcutTarget.
     private val shortcutClaimed = mutableStateOf(false)
+    // Whether the app can clear that claim itself, i.e. whether WRITE_SECURE_SETTINGS was granted
+    // over adb. Only chooses which of two true sentences the shortcut row prints; see
+    // ShortcutTargetGuard for why a laptop is the whole mechanism.
+    private val shortcutSelfClearing = mutableStateOf(false)
 
     // The watchdog's "blocking died" notification needs this on Android 13+; a denial just means no
     // nag — which the Lock tab now says out loud. Re-read on the result so the row flips at once.
@@ -60,6 +66,7 @@ class MainActivity : ComponentActivity() {
                     batteryExempt = batteryExempt.value,
                     notificationsEnabled = notificationsEnabled.value,
                     shortcutClaimed = shortcutClaimed.value,
+                    shortcutSelfClearing = shortcutSelfClearing.value,
                     onOpenAccessibility = { startActivity(accessibilitySettingsIntent()) },
                     onOpenOverlay = { startActivity(overlayPermissionIntent(this)) },
                     onOpenDateSettings = { startActivity(Intent(Settings.ACTION_DATE_SETTINGS)) },
@@ -81,7 +88,12 @@ class MainActivity : ComponentActivity() {
         adminActive.value = isDeviceAdminActive(this)
         batteryExempt.value = isBatteryExempt(this)
         notificationsEnabled.value = areNotificationsEnabled(this)
+        // Sweep before the read, so opening the app clears a floating button the user is looking at
+        // rather than reporting it. A no-op without the adb grant, and a no-op when nothing is
+        // claimed, which is the steady state once the grant is given.
+        runCatching { ShortcutTargetGuard.sweepOnce(this) }
         shortcutClaimed.value = isAccessibilityShortcutTarget(this)
+        shortcutSelfClearing.value = canWriteSecureSettings(this)
         if (accessibilityEnabled.value && overlayGranted.value) {
             // Both special permissions seen granted once → the watchdog may nag if they ever lapse.
             Watchdog.markSetupCompleted(this)

@@ -45,6 +45,12 @@ class WatchdogWorker(context: Context, params: WorkerParameters) : Worker(contex
 
     override fun doWork(): Result {
         val ctx = applicationContext
+        // Before the setup gate on purpose: this one is a tightening, not a nag, and the floating
+        // button is unwanted from the moment Android draws it — which is before any permission has
+        // been granted. It is also the only sweep channel that runs when the accessibility service
+        // is dead, and the slow retry after ShortcutTargetSweep's per-hour budget has been spent.
+        // No-ops in a few microseconds on the phone that never got the adb grant.
+        runCatching { ShortcutTargetGuard.sweepOnce(ctx) }
         if (!Watchdog.setupCompleted(ctx)) return Result.success()  // don't nag before first setup
         Watchdog.report(ctx, Watchdog.currentHealth(ctx))
         // installedHealth owns "which signal ids count", the same way its omnibox twin below owns
