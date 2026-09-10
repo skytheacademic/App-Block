@@ -15,6 +15,7 @@ import android.os.Process
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import com.appblock.R
+import com.appblock.engine.ShortcutTargets
 import com.appblock.service.AppBlockDeviceAdminReceiver
 import com.appblock.service.AppBlockerAccessibilityService
 
@@ -52,15 +53,6 @@ fun accessibilitySettingsIntent(): Intent =
     Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
 
 /**
- * The two Secure settings that point an accessibility *shortcut* at a service: the floating
- * button / gesture (`accessibility_button_targets`) and the volume-key chord
- * (`accessibility_shortcut_target_service`). Both are `@hide` constants in the framework, so the keys
- * are written out — the *values* are what matter and those are stable, colon-separated component lists.
- */
-private val shortcutTargetKeys =
-    listOf("accessibility_button_targets", "accessibility_shortcut_target_service")
-
-/**
  * True while some accessibility shortcut is pointed at this service — measured on the S25 (One UI 8,
  * 2026-08-29) and **not** something the user has to have asked for: installing the app is enough.
  *
@@ -75,32 +67,53 @@ private val shortcutTargetKeys =
  *     `enabled_accessibility_services`** — measured twice, four taps, no key, no computer, and nothing
  *     noticed because the watchdog runs inside the service that just died.
  *
- * Step 3 is now bounced by [com.appblock.engine.SettingsWatch]'s checkable rule, which is the actual
- * fix. This read is what makes the door *visible*: it feeds the Lock tab's protection list, so "there
- * is a pill on my screen that points at App-Block" is a stated fact rather than something discovered
- * during an audit.
+ * Step 3 is bounced by [com.appblock.engine.SettingsWatch]'s checkable rule, which is what shut the
+ * door. Step 1 is now answered by [com.appblock.service.ShortcutTargetGuard], which removes the entry
+ * every time Android writes it, including at every boot — because a one-shot `settings put secure` on
+ * the cable is undone by the next restart, which is the whole 2026-09-08 finding. This read is what
+ * remains after both: whether, right now, anything still points at us.
  *
- * Deliberately **not** a watchdog notification. There is nothing the phone can do about it — clearing
- * the target needs `adb shell "settings put secure accessibility_button_targets ''"` (quoted exactly
- * so, or the empty argument is eaten by the local shell and `settings` fails with "Bad arguments"
- * while still looking like it ran — verified 2026-08-30), and the one on-device route is the picker
- * we now guard — and a permanent, unactionable nag is exactly what teaches the user to ignore the
+ * Reads the button target and the chord, and reports either. The guard *writes* the first (and the
+ * gesture's twin of it, which this row does not read — see [ShortcutTargets.READ_KEYS]) but never the
+ * chord: that is a choice a person made on the shortcut screen, it cannot switch the service off (N-1
+ * turns every shortcut into a no-op button click), and silently undoing it would be a different kind
+ * of act from removing an entry nobody asked for.
+ *
+ * Deliberately **not** a watchdog notification. Where the guard can act it needs no telling, and
+ * where it cannot the remedy is a laptop — `adb shell "settings put secure
+ * accessibility_button_targets ''"`, quoted exactly so, or the empty argument is eaten by the local
+ * shell and `settings` fails with "Bad arguments" while still looking like it ran (verified
+ * 2026-08-30). A permanent, unactionable nag is exactly what teaches the user to ignore the
  * notification whose whole job is to be believed (see [com.appblock.service.Watchdog.report]).
  *
- * Matches on the component's own string rather than parsing, because Samsung writes these entries in
- * more than one shape (flattened short form, flattened long form) and all of them contain the class
- * name. False positives are impossible in practice: no other package is called `com.appblock`.
+ * Matching is [ShortcutTargets.claims], which knows both shapes Samsung writes these entries in. The
+ * substring test that used to stand here read `ComponentName.getClassName()`, i.e. the fully-qualified
+ * name, and so matched the long form `pkg/com.appblock.service.…` while missing the short form
+ * `pkg/.service.…` that flattens the class relative to its package — a false *negative*, on a row
+ * whose whole job is to say the button is there.
  */
 fun isAccessibilityShortcutTarget(context: Context): Boolean {
     val service = ComponentName(context, AppBlockerAccessibilityService::class.java)
-    val needle = service.className
-    return shortcutTargetKeys.any { key ->
+    return ShortcutTargets.READ_KEYS.any { key ->
         val value = runCatching {
             Settings.Secure.getString(context.contentResolver, key)
         }.getOrNull()
-        value != null && value.contains(needle, ignoreCase = true)
+        ShortcutTargets.claims(value, service.packageName, service.className)
     }
 }
+
+/**
+ * Whether the app can clear its own accessibility-button claim, i.e. whether
+ * `WRITE_SECURE_SETTINGS` was granted over adb (see [com.appblock.service.ShortcutTargetGuard] for
+ * the command and for why the permission is the only route).
+ *
+ * The one grant in this file that is *not* offered as a one-tap repair, because there is no screen to
+ * send anyone to: it is signature|privileged and a laptop is the whole mechanism. The Lock tab reads
+ * this only to choose which of two true sentences to print about a claimed shortcut.
+ */
+fun canWriteSecureSettings(context: Context): Boolean =
+    context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) ==
+        PackageManager.PERMISSION_GRANTED
 
 /**
  * Whether "Appear on top" is actually held — asked of **two** sources, because on hardware the usual

@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.appblock.R
@@ -624,6 +625,8 @@ fun protectionItems(
     notificationsEnabled: Boolean,
     /** Whether an accessibility shortcut (the floating button, the volume chord) points at us. */
     shortcutClaimed: Boolean,
+    /** Whether the app holds the adb-granted permission that lets it clear that claim itself. */
+    shortcutSelfClearing: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit,
     onOpenDateSettings: () -> Unit,
@@ -760,20 +763,41 @@ fun protectionItems(
         )
     }
     if (shortcutClaimed) {
-        // The pill on the right-hand edge of the screen, and why it is there. Android adds App-Block
-        // to `accessibility_button_targets` **on install**, unasked, because the service requests the
+        // The pill on the edge of the screen, and why it is there. Android adds App-Block to
+        // `accessibility_button_targets` **on install**, unasked, because the service requests the
         // accessibility button (which is what stops a shortcut from toggling it off — N-1). On the S25
         // that pill's Edit list was a four-tap, keyless off switch: untick "App-Block detection" and
         // `enabled_accessibility_services` empties. That screen is now bounced, so this row is not a
         // warning about an open door — it is the door being named, because the alternative is finding
-        // it again in an audit. There is no action button on purpose: the phone cannot clear a Secure
-        // setting, and the one on-device route to it is the screen we just guarded.
+        // it again in an audit. Still no action button, for the same reason as before: clearing a
+        // Secure setting is not something a tap can do, and the one on-device route to it is the
+        // screen we just guarded.
+        //
+        // Two bodies, because as of 2026-09-08 there are two ways to be standing here and only one of
+        // them has an instruction attached. Without the adb grant the app cannot clear the button and
+        // the row carries the one command that changes that. With it, the button is already being
+        // cleared at every boot, so a claim still standing is almost certainly the volume chord or the
+        // Quick Settings tile — a shortcut somebody chose, which ShortcutTargets deliberately leaves
+        // alone and which N-1 has already made harmless. Printing the grant command in that case would
+        // send the user to a laptop to fix something that is not broken.
+        //
+        // "Most likely", not "is", and the hedge is load-bearing: a spent sweep budget or a write that
+        // threw lands the *button's* claim in this branch too. What the sentence asserts outright is
+        // only what is true in every case — that the app clears the button's claim at every restart,
+        // and that no shortcut of any kind can switch detection off.
         add(
             ProtectionItem(
                 title = stringResource(R.string.protection_shortcut),
                 okLabel = "",
                 ok = false,
-                consequence = stringResource(R.string.protection_shortcut_body),
+                consequence = if (shortcutSelfClearing) {
+                    stringResource(R.string.protection_shortcut_body_self_clearing)
+                } else {
+                    stringResource(
+                        R.string.protection_shortcut_body,
+                        LocalContext.current.packageName,
+                    )
+                },
             ),
         )
     }

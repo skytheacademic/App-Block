@@ -36,6 +36,29 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 11 / 0.9.1: the gesture's twin of the button list. The 0.9.0 phone session (2026-09-10)
+        // verified the button guard across two restarts — no tab after either, and the button key's
+        // last write after boot is ours — and the same restarts showed `accessibility_gesture_targets`
+        // rewritten by the system at boot, ours again after the second. It draws nothing while the
+        // button is the floating menu, but it is one Settings change from live and its Edit list is
+        // the same picker, so `ShortcutTargetGuard` now sweeps it too, with its own budget. Bumped
+        // because 0.9.0 was installed on the phone: two builds never answer to one versionCode.
+        //
+        // 10 / 0.9.0: the accessibility button that came back after a restart. 0.5.0 shut the picker
+        // (the four-tap off switch behind the floating pill) and the Lock tab named the claim, with
+        // one adb command to clear it. From the phone, 2026-09-08: the command works and a REBOOT
+        // undoes it, the button returning as a tab on the screen edge. `accessibility_button_targets`
+        // is derived, not stored-once - an enabled service that requests the accessibility button is
+        // re-added every time the framework reads its accessibility config, and boot is one of those
+        // reads - so no one-shot write can hold. `service/ShortcutTargetGuard` removes the entry on
+        // every service connect, on every change to the setting, and on the watchdog's 15-minute pass,
+        // which needs `WRITE_SECURE_SETTINGS` (adb, once). Without that grant the build behaves exactly
+        // like 0.8.1 and the Lock row carries the command, so this version is worth installing either
+        // way: the shortcut read it also fixes was blind to the short flattening Samsung sometimes
+        // writes (`pkg/.service.Foo`), i.e. the row could have said "no shortcut" with the button on
+        // screen. Written as 9 / 0.9.0 off a `main` without 0.8.1, which also claimed 9; renumbered
+        // to 10 when it was rebased onto 0.8.1, so no two binaries answer to one versionCode.
+        //
         // 9 / 0.8.1: the three audit findings that had been carried as "reported, not verified" since
         // 2026-08-21, taken to a verdict each. Only one was real. `DisplayOverlays.covered()` — the set
         // that `DisplayCoverage.satisfied` and the kick-to-home fallback both answer from — was a
@@ -82,8 +105,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 9
-        versionName = "0.8.1"
+        versionCode = 11
+        versionName = "0.9.1"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

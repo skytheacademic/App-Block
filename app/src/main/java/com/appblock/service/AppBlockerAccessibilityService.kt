@@ -123,6 +123,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     /** Latches the tamper guard the moment automatic date/time or time zone is switched off. */
     private var clockSettingsWatch: ClockSettingsWatch? = null
+
+    /** Takes the app back out of `accessibility_button_targets` every time Android puts it back —
+     *  which it does at every boot, so the floating button returns after a restart however many
+     *  times it is cleared from the cable. See [ShortcutTargetGuard]. */
+    private var shortcutGuard: ShortcutTargetGuard? = null
     private lateinit var ruleSource: RuleSource
     private lateinit var unlockController: DurableUnlockController
     private lateinit var blocklistStore: BlocklistStore
@@ -251,6 +256,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         clockSettingsWatch = ClockSettingsWatch(this) {
             runCatching { coordinator.onClockSettingChanged() }
         }.also { it.start() }
+        // The boot path for the accessibility button: the system binds an enabled accessibility
+        // service on every start, so this is where "every start" is reachable from. start() sweeps
+        // once and then keeps watching, because our connect and the framework's own write to
+        // `accessibility_button_targets` happen during the same config read and nothing orders them.
+        shortcutGuard?.stop()
+        shortcutGuard = ShortcutTargetGuard(this).also { it.start() }
         registerDisplayListener()
     }
 
@@ -1853,6 +1864,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         liveness.destroyed(this)
         clockSettingsWatch?.stop()
         clockSettingsWatch = null
+        shortcutGuard?.stop()
+        shortcutGuard = null
         runCatching { displayListener?.let { displayManager.unregisterDisplayListener(it) } }
         displayListener = null
         stopTicking()

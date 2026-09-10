@@ -77,6 +77,7 @@ class AppRootScreenTest {
         adminActive: Boolean = true,
         batteryExempt: Boolean = true,
         shortcutClaimed: Boolean = false,
+        shortcutSelfClearing: Boolean = false,
     ) {
         compose.setContent {
             AppBlockTheme {
@@ -87,6 +88,7 @@ class AppRootScreenTest {
                     batteryExempt = batteryExempt,
                     notificationsEnabled = true,
                     shortcutClaimed = shortcutClaimed,
+                    shortcutSelfClearing = shortcutSelfClearing,
                     onOpenAccessibility = {},
                     onOpenOverlay = {},
                     onOpenDateSettings = {},
@@ -125,7 +127,7 @@ class AppRootScreenTest {
      * install, which draws the floating pill whose Edit list unticked detection in four taps. That
      * screen is bounced now, so this row is not a warning to act on — it is the pill being *named*,
      * because it is otherwise invisible until an audit finds it. No action button: clearing a Secure
-     * setting needs the computer.
+     * setting is not something a tap can do.
      */
     @Test
     fun `a claimed accessibility shortcut is named on the Lock tab`() {
@@ -139,6 +141,29 @@ class AppRootScreenTest {
         show()
         goTo("Lock")
         compose.onNodeWithText("Accessibility shortcut").assertDoesNotExist()
+    }
+
+    /**
+     * The row carries the adb grant only while the grant would change something (2026-09-08). Without
+     * it the app cannot clear the floating button and Android rewrites it at every restart, so the one
+     * command that ends that is the whole point of the row. With it the button is already being
+     * cleared, and a claim still standing is the volume chord or a Quick Settings tile — somebody's
+     * own choice, which the sweep leaves alone and N-1 has already made harmless. Printing the command
+     * there would send the user to a laptop to fix nothing.
+     */
+    @Test
+    fun `a claim the app cannot clear carries the one command that changes that`() {
+        show(shortcutClaimed = true, shortcutSelfClearing = false)
+        goTo("Lock")
+        compose.onNodeWithText("pm grant", substring = true).assertExists()
+    }
+
+    @Test
+    fun `a claim the app already clears does not send anyone to a laptop`() {
+        show(shortcutClaimed = true, shortcutSelfClearing = true)
+        goTo("Lock")
+        compose.onNodeWithText("Accessibility shortcut").assertExists()
+        compose.onNodeWithText("pm grant", substring = true).assertDoesNotExist()
     }
 
     /** Tabs are found by their icon's description — "Apps" is also the screen's own title. */

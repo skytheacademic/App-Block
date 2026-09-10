@@ -112,6 +112,13 @@ class AccessibilityConfigTest {
      * whose Edit list unticks the service out of existence in four taps. That door is closed by
      * [com.appblock.engine.SettingsWatch]'s checkable rule, not by dropping this flag, which would
      * simply hand the chord back.
+     *
+     * The pill's own return after a reboot (2026-09-08) is not a reason to drop it either. It is the
+     * same trade re-priced: the flag is what makes every shortcut harmless, and the entry Android
+     * writes in exchange is now taken back out on every boot by
+     * [com.appblock.service.ShortcutTargetGuard]. Nothing here asserts the absence of that entry
+     * because the setting is the framework's, not ours; [com.appblock.service.ShortcutTargetGuardTest]
+     * asserts what the app does about it.
      */
     @Test
     fun cannotBeToggledOffByAnAccessibilityShortcut() {

@@ -10,7 +10,7 @@ Kotlin + Jetpack Compose · compileSdk/targetSdk 36, minSdk 26 · daily driver i
 - **Website blocking:** a domain blocklist read from the address bar of allowlisted browsers (Chrome, Brave); every other browser is blocked as an app; WebAPKs are caught by package prefix. A version-keyed "vouch" keeps an unreadable address bar from blocking ordinary browsing, and a drift canary says when a browser update has made it unreadable for a week.
 - **Clock tamper guard:** turning automatic date/time or time zone off latches a block-everything state the moment it happens (a ContentObserver, not the next tick), and it clears only once both are back on *and* the clock agrees with where the OS last had it — so toggle-off / change / toggle-on between two passes gains nothing. Within a boot the logical day can't advance faster than uptime, whatever the wall clock says; a date rollback re-keys onto the larger of the two days' counts.
 - **Durable-change lock:** rules are editable but asymmetric — tightening is always free; loosening needs the stashed QR key → a wait (2 h for apps, 72 h for websites) → a 15-minute single-use window that buys exactly **one** change. A target's caps and hours are guarded whether or not its switch is on. Only a salted hash of the key is stored.
-- **Self-defense:** Settings screens *about* App-Block (its Accessibility toggle, App info, the per-app overlay page, the device-admin page, the uninstall dialog, wireless-debugging pairing) bounce to Home unless the change window is open; lists that merely contain the app's name are left alone. The service requests the accessibility button so no accessibility shortcut can toggle it off.
+- **Self-defense:** Settings screens *about* App-Block (its Accessibility toggle, App info, the per-app overlay page, the device-admin page, the uninstall dialog, wireless-debugging pairing) bounce to Home unless the change window is open; lists that merely contain the app's name are left alone. The service requests the accessibility button so no accessibility shortcut can toggle it off; the floating button Android draws in exchange is removed again at every boot, given the one-time `WRITE_SECURE_SETTINGS` grant below.
 - **Device admin with zero policies:** being an active admin is what stops One UI Modes suspending the package. Activation is offered in-app; deactivation is bounced and, if it happens anyway, nagged about.
 - **Block screen:** `SYSTEM_ALERT_WINDOW` overlay with reason-aware messages; kick-to-home fallback if the overlay permission is revoked.
 - **Watchdog:** a 15-minute worker (re-run on demand while Settings is on screen) reports the service being disabled or dead, the overlay gone, the device admin deactivated, the battery exemption removed — each as an ongoing notification withdrawn when fixed — and the Lock tab lists every one of those plus notifications themselves, each with a one-tap repair.
@@ -30,13 +30,14 @@ Still the software-friction tier: safe mode, a factory reset and adb from a comp
 - Variants: `debug` (`com.appblock.debug`, debuggable, what CI publishes) · `debugFast` (`com.appblock.fast`, 1-minute caps for QA, non-debuggable) · `release` (`com.appblock`, R8-minified, the daily driver).
 - Release: `./gradlew assembleRelease` signs only if `keystore.properties` + the `.jks` are present at
   the repo root (both gitignored — private keystore, deliberately with no synced copy); without them the release APK builds unsigned.
-- Tests: `./gradlew testDebugUnitTest --rerun` — pass `--rerun`, because an up-to-date run reports success without executing anything. 640 JVM tests (engine + Robolectric screens/stores/workers) at the time of writing.
+- Tests: `./gradlew testDebugUnitTest --rerun` — pass `--rerun`, because an up-to-date run reports success without executing anything. 693 JVM tests (engine + Robolectric screens/stores/workers) at the time of writing.
 
 ## Install (sideload)
 1. Install the APK (`adb install -r`, or Android Studio Run).
 2. Android 13+ blocks Accessibility for sideloaded apps: Settings → Apps → App-Block → ⋮ → "Allow restricted settings".
 3. In the app's Lock tab: grant Accessibility + "Display over other apps", activate the protection admin, grant the battery exemption, allow notifications — every row shows its own repair button until it is green.
-4. Create the lock key only once the rules are right: it is one-shot, and there is no in-app re-key.
+4. Optional, needs the cable once: `adb shell pm grant com.appblock android.permission.WRITE_SECURE_SETTINGS`. Requesting the accessibility button (the thing that stops any shortcut switching detection off) makes Android point the floating accessibility button at App-Block, unasked, and rewrite that setting at every restart — so clearing it by hand lasts until the next reboot. With this grant the app removes itself from `accessibility_button_targets` on every boot instead. Without it nothing else changes and the Lock tab carries the command. The grant survives reboots and in-place updates; a fresh install needs it again.
+5. Create the lock key only once the rules are right: it is one-shot, and there is no in-app re-key.
 
 ## Layout
 - `app/src/main/java/com/appblock/`
@@ -45,10 +46,12 @@ Still the software-friction tier: safe mode, a factory reset and adb from a comp
   - `ActiveRules.kt` — picks real caps vs the `debugFast` variant's fast QA values
   - `engine/` — pure-Kotlin engine (policy, usage, exceptions, schedules, day boundary, tamper-guard
     inputs, durable-change gate + unlock state machines, settings-watch decision, browser policy,
-    Instagram surface, address watch, drift canaries, codec, store interfaces) — no Android imports
+    Instagram surface, address watch, drift canaries, shortcut-target rules, codec, store
+    interfaces) — no Android imports
   - `security/` — Android side of the lock: key hashing + storage, QR render, unlock controller, blocklist store
   - `service/` — the live blocker: accessibility service + overlay + settings-watch, the device-admin
-    receiver, real clocks (`AndroidEngineClock`, `AndroidClockIntegrity`), watchdog + unlock-window workers
+    receiver, the accessibility-button guard, real clocks (`AndroidEngineClock`, `AndroidClockIntegrity`),
+    watchdog + unlock-window workers
   - `data/` — SharedPreferences-backed stores (engine state, durable rules, installed apps, the canaries' witnesses)
   - `util/Permissions.kt` — reads + repair intents for every special grant
 - `app/src/test/` — the JVM suite; screen tests run in the `debug` variant only
