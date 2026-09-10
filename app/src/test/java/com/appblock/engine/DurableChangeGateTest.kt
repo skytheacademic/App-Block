@@ -147,6 +147,52 @@ class DurableChangeGateTest {
         assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(hoursOnly, budget))
     }
 
+    /**
+     * ⚠️ **A KNOWN, ACCEPTED GAP — pinned so it cannot be widened by accident (audit 2026-08-21,
+     * verified 2026-08-30).** Across a `scheduleOnly` flip the three cap comparisons are skipped
+     * entirely, so a cap raised *in the same edit* is never named in the receipt.
+     *
+     * **Why it is not the G-1 shape it was reported as.** G-1 was a free loosening; this is not,
+     * because the flip that hides the raise is itself classified LOOSEN and gated. The user pays the
+     * same one window either way, and paying it honestly (raise the cap directly) is strictly cheaper
+     * than the two-step. Nothing is bought here that the window does not already buy.
+     *
+     * **Why it is nonetheless a real gap.** The receipt is what the future impulsive self is made to
+     * read before spending the window, and it says "daily caps removed (closing hours only)" while a
+     * tripled weekday cap rides along unnamed — then comes back on the free TIGHTEN flip.
+     *
+     * 🔒 **What actually closes it today is reachability, not this code:** `RulesDraft` exposes
+     * `setEnabled`, `setSchedule` and the three cap setters and has **no `setScheduleOnly`**; nothing
+     * under `ui/` writes the field, and `LimitsSheet` hides the cap steppers whenever it is set. The
+     * flip happens only on a `RULES_VERSION` re-seed, which is a rebuild-and-install at the desk and
+     * is gated by nothing in the first place.
+     *
+     * 🚨 **The tripwire: the day `RulesDraft` gains a `setScheduleOnly`, this test is the thing to
+     * come back to.** `fields()` must then diff the caps across the flip — comparing only the columns
+     * schedule-only does not zero — or the receipt starts lying in the loosening direction.
+     */
+    @Test fun `a cap raised across a schedule-only flip is unreported, but the flip is still gated`() {
+        val capped = DurableSettings(1, mapOf(Target.TIKTOK to TargetSettings(true, 30, 30, 60, sched(TimeWindow.ALL_DAY))), 60)
+        // The same edit drops to schedule-only AND triples the stored weekday cap.
+        val hidden = DurableSettings(1, mapOf(Target.TIKTOK to TargetSettings(true, 180, 30, 60, sched(TimeWindow.ALL_DAY), scheduleOnly = true)), 60)
+
+        val changes = DurableChangeGate.changes(capped, hidden)
+        assertEquals("the raise is invisible in the receipt — that is the gap", 1, changes.size)
+        assertTrue(changes[0].detail.contains("daily caps removed"))
+
+        // But it costs a window, which is why the gap is a receipt defect and not a bypass.
+        assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(capped, hidden))
+
+        // And the free half of the round trip really is free — the reason the receipt has to be honest.
+        assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(hidden, capped.raiseTikTokWeekday(180)))
+    }
+
+    /** The state the round trip lands in: caps back on, at the value nothing ever announced. */
+    private fun DurableSettings.raiseTikTokWeekday(minutes: Int): DurableSettings {
+        val t = targets.getValue(Target.TIKTOK)
+        return copy(targets = targets + (Target.TIKTOK to t.copy(weekdayMinutes = minutes)))
+    }
+
     @Test fun `a longer exception window is loosening, shorter is tightening`() {
         assertEquals(ChangeDirection.LOOSEN, DurableChangeGate.classify(settings(window = 60), settings(window = 120)))
         assertEquals(ChangeDirection.TIGHTEN, DurableChangeGate.classify(settings(window = 60), settings(window = 30)))

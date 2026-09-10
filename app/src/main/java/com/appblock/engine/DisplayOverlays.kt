@@ -33,6 +33,10 @@ package com.appblock.engine
  *     direction. A block screen that lies about the price is a documented past P1 here.
  *  4. **Remove before add**, so a display id that is simultaneously removed and re-added (a DeX mode
  *     switch) cannot end up holding two views.
+ *  5. **[covered] is corrected by [noteDetached], never inferred.** A successful `addView` is evidence
+ *     about the moment it returned, and nothing more. Left uncorrected, this class answers "is that
+ *     display covered?" from a memory of a past success — and every caller that matters
+ *     ([DisplayCoverage.satisfied], [DisplayCoverage.homeFallback]) believes it.
  *
  * A failed add is **remembered, not forgotten**: the id stays out of [covered], so
  * [DisplayCoverage.satisfied] is false, the census prints `ov=FAIL`, and the next tick puts the id back
@@ -82,9 +86,48 @@ class DisplayOverlays<W : Any, V : Any, F : Any>(
     private val attached = LinkedHashMap<Int, Attached<W, V, F>>()
     private val failedIds = LinkedHashSet<Int>()
 
+    /**
+     * The displays that hold one of our views **right now**.
+     *
+     * This is a record of successful adds kept honest by [noteDetached], not an inference from one. The
+     * distinction is the whole of finding [P1] 2026-08-30: without the detach channel this set is a
+     * *memory* of adds that once worked, and `satisfied()` / `homeFallback()` — the kick-to-home
+     * fallback — are then answering from that memory. A window taken down underneath us would leave the
+     * engine convinced it was blocking while the reel played.
+     */
     fun covered(): Set<Int> = attached.keys.toSet()
 
+    /** Displays we wanted to cover and could not — including ones detached out from under us. */
     fun failed(): Set<Int> = failedIds.toSet()
+
+    /**
+     * The platform detached [view] from [displayId] **without us asking**: drop the record, so the id
+     * stops counting as covered, `ov=FAIL` prints it, and the next [reconcile] puts it back in
+     * `plan.add` and re-attaches. Self-healing, with no extra state.
+     *
+     * ## Why an event and not a check
+     *
+     * The obvious shape is to re-validate in [reconcile] — `isAttachedToWindow` on each kept view. That
+     * is **wrong here, and wrong in the direction this project keeps paying for.** `addView` does not
+     * attach synchronously; the attach is dispatched on the next traversal, so a view added this tick
+     * reads as *not attached* on the next one. Re-validation would detach and re-add it every pass —
+     * the ~120 ms overlay flicker of 2026-08-30, rebuilt deliberately. An event fires only when
+     * something really happened and has no first-frame to be wrong about.
+     *
+     * ## Why the identity check is load-bearing
+     *
+     * Our own [hideOn] removes the record *before* calling `remove`, so the detach it causes finds no
+     * record and returns here. But if the platform dispatches the detach **asynchronously**, a new view
+     * may already be attached for that id by the time it lands — and dropping *that* record on the old
+     * view's echo would take down a live, correct overlay. So the record only goes if it is still about
+     * this exact view.
+     */
+    fun noteDetached(displayId: Int, view: V) {
+        val a = attached[displayId] ?: return
+        if (a.view !== view) return
+        attached.remove(displayId)
+        failedIds.add(displayId)
+    }
 
     /** What [displayId]'s overlay is currently showing — the Close button's steering comes from here. */
     fun contentOn(displayId: Int): Content<F>? = attached[displayId]?.content

@@ -81,10 +81,11 @@ private val shortcutTargetKeys =
  * during an audit.
  *
  * Deliberately **not** a watchdog notification. There is nothing the phone can do about it — clearing
- * the target needs `adb shell settings put secure accessibility_button_targets ""`, and the one
- * on-device route is the picker we now guard — and a permanent, unactionable nag is exactly what
- * teaches the user to ignore the notification whose whole job is to be believed (see
- * [com.appblock.service.Watchdog.report]).
+ * the target needs `adb shell "settings put secure accessibility_button_targets ''"` (quoted exactly
+ * so, or the empty argument is eaten by the local shell and `settings` fails with "Bad arguments"
+ * while still looking like it ran — verified 2026-08-30), and the one on-device route is the picker
+ * we now guard — and a permanent, unactionable nag is exactly what teaches the user to ignore the
+ * notification whose whole job is to be believed (see [com.appblock.service.Watchdog.report]).
  *
  * Matches on the component's own string rather than parsing, because Samsung writes these entries in
  * more than one shape (flattened short form, flattened long form) and all of them contain the class

@@ -36,6 +36,22 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 9 / 0.8.1: the three audit findings that had been carried as "reported, not verified" since
+        // 2026-08-21, taken to a verdict each. Only one was real. `DisplayOverlays.covered()` — the set
+        // that `DisplayCoverage.satisfied` and the kick-to-home fallback both answer from — was a
+        // *memory* of adds that had once returned true, never re-read, so a window taken down underneath
+        // us (a revoked "Appear on top", a teardown we did not see) left the engine certain it was
+        // blocking while the reel played. Corrected by `noteDetached`, fed by an
+        // `OnAttachStateChangeListener` the service registers at inflate. Deliberately an EVENT and not
+        // a re-validating check: `addView` does not attach synchronously, so `isAttachedToWindow` reads
+        // false for a view added the same tick and re-validation would detach-and-re-add every pass —
+        // the ~120 ms flicker of 2026-08-30, rebuilt on purpose. The other two findings are closed as
+        // not-defects, with the reasoning written where it will be found: the `DurableChangeGate`
+        // schedule-only gap is real but unreachable (no `setScheduleOnly` exists on `RulesDraft`) and
+        // both halves now carry a tripwire, and `AddressWatch`'s per-package key costs nothing because
+        // two windows of one browser cannot disagree about an id. ⚠️ Desk-verified only — 652 tests,
+        // five mutations biting, nothing on hardware.
+        //
         // 8 / 0.8.0: the split-screen P0 and the multi-display rewrite. `resolveForeground()` kept a
         // single `packageTarget` filled by the first match in the window loop, so exactly ONE package
         // target ever reached the engine however many budgeted apps were on screen — park TikTok in an
@@ -66,8 +82,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 8
-        versionName = "0.8.0"
+        versionCode = 9
+        versionName = "0.8.1"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
