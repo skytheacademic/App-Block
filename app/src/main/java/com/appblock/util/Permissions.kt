@@ -73,8 +73,9 @@ fun accessibilitySettingsIntent(): Intent =
  * the cable is undone by the next restart, which is the whole 2026-09-08 finding. This read is what
  * remains after both: whether, right now, anything still points at us.
  *
- * Reads the button target and the chord, and reports either. The guard only ever *writes* the first:
- * the chord is a choice a person made on the shortcut screen, it cannot switch the service off (N-1
+ * Reads the button target and the chord, and reports either. The guard *writes* the first (and the
+ * gesture's twin of it, which this row does not read — see [ShortcutTargets.READ_KEYS]) but never the
+ * chord: that is a choice a person made on the shortcut screen, it cannot switch the service off (N-1
  * turns every shortcut into a no-op button click), and silently undoing it would be a different kind
  * of act from removing an entry nobody asked for.
  *

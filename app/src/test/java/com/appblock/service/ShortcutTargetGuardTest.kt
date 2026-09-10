@@ -50,6 +50,13 @@ class ShortcutTargetGuardTest {
         Settings.Secure.putString(app.contentResolver, ShortcutTargets.BUTTON_TARGETS, value)
     }
 
+    private fun gestureTargets(): String? =
+        Settings.Secure.getString(app.contentResolver, ShortcutTargets.GESTURE_TARGETS)
+
+    private fun setGestureTargets(value: String?) {
+        Settings.Secure.putString(app.contentResolver, ShortcutTargets.GESTURE_TARGETS, value)
+    }
+
     private fun grant() =
         shadowOf(app).grantPermissions(Manifest.permission.WRITE_SECURE_SETTINGS)
 
@@ -61,6 +68,7 @@ class ShortcutTargetGuardTest {
         elapsed = 0L
         revoke()
         setButtonTargets(null)
+        setGestureTargets(null)
     }
 
     /**
@@ -203,6 +211,109 @@ class ShortcutTargetGuardTest {
         guard.start()
         assertEquals("", buttonTargets())
         guard.stop()
+    }
+
+    /**
+     * The gesture's list, which the S25 rewrote at both restarts on 2026-09-10 and filled with us
+     * after the second. Invisible in button mode 1, one Settings change from live, and its Edit list
+     * is the picker that used to switch detection off.
+     */
+    @Test
+    fun `the gesture target is cleared too`() {
+        grant()
+        setGestureTargets(ours)
+        assertEquals(ShortcutTargetGuard.Outcome.CLEARED, guard().sweepNow())
+        assertEquals("", gestureTargets())
+    }
+
+    /** What the phone looked like after the second restart before the guard ran: both lists name us. */
+    @Test
+    fun `both claims go in one sweep`() {
+        grant()
+        setButtonTargets(ours)
+        setGestureTargets(ours)
+        assertEquals(ShortcutTargetGuard.Outcome.CLEARED, guard().sweepNow())
+        assertEquals("", buttonTargets())
+        assertEquals("", gestureTargets())
+    }
+
+    @Test
+    fun `without the grant neither list is written`() {
+        setButtonTargets(ours)
+        setGestureTargets(ours)
+        assertEquals(ShortcutTargetGuard.Outcome.NO_PERMISSION, guard().sweepNow())
+        assertEquals(ours, buttonTargets())
+        assertEquals(ours, gestureTargets())
+    }
+
+    @Test
+    fun `another accessibility tool keeps the gesture`() {
+        grant()
+        setGestureTargets("$other:$ours")
+        assertEquals(ShortcutTargetGuard.Outcome.CLEARED, guard().sweepNow())
+        assertEquals(other, gestureTargets())
+    }
+
+    /**
+     * One budget per list. If they shared one, something fighting over the button would spend the
+     * clears the gesture needs, and the gesture claim would stand for the rest of the hour for no
+     * reason of its own.
+     */
+    @Test
+    fun `a fight over one list does not spend the other's budget`() {
+        grant()
+        val guard = guard()
+        repeat(ShortcutTargetSweep.MAX_CLEARS_PER_WINDOW) {
+            setButtonTargets(ours)
+            guard.sweepNow()
+        }
+        setGestureTargets(ours)
+        guard.sweepNow()
+        assertEquals("", gestureTargets())
+    }
+
+    /**
+     * The worse of the two outcomes is the one reported. A claim still standing on the button must
+     * not be hidden by a clean clear of the gesture in the same pass.
+     */
+    @Test
+    fun `a claim left standing is reported over a clear on the other list`() {
+        grant()
+        val guard = guard()
+        repeat(ShortcutTargetSweep.MAX_CLEARS_PER_WINDOW) {
+            setButtonTargets(ours)
+            guard.sweepNow()
+        }
+        setButtonTargets(ours)
+        setGestureTargets(ours)
+        assertEquals(ShortcutTargetGuard.Outcome.BUDGET_SPENT, guard.sweepNow())
+        assertEquals(ours, buttonTargets())
+        assertEquals("", gestureTargets())
+    }
+
+    /**
+     * The observer is the channel that catches a re-add after the sweep at connect, and it has to be
+     * listening on both lists. A key the guard sweeps but does not watch would only be cleared by the
+     * next connect or the next fifteen-minute pass.
+     */
+    @Test
+    fun `start watches both lists`() {
+        val guard = guard()
+        guard.start()
+        val resolver = shadowOf(app.contentResolver)
+        for (key in ShortcutTargets.WRITE_KEYS) {
+            assertTrue(
+                "no observer on $key",
+                resolver.getContentObservers(Settings.Secure.getUriFor(key)).isNotEmpty(),
+            )
+        }
+        guard.stop()
+        for (key in ShortcutTargets.WRITE_KEYS) {
+            assertTrue(
+                "observer left behind on $key",
+                resolver.getContentObservers(Settings.Secure.getUriFor(key)).isEmpty(),
+            )
+        }
     }
 
     /** stop() twice, start() on a phone with nothing set: neither may throw out of the service. */

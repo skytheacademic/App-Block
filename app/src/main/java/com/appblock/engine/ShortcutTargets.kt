@@ -35,6 +35,32 @@ object ShortcutTargets {
     const val BUTTON_TARGETS = "accessibility_button_targets"
 
     /**
+     * The accessibility *gesture*'s target: the two-finger swipe up that stands in for the button
+     * when One UI's accessibility button is set to "gesture" instead of the floating menu. Filled in
+     * for us the same way as [BUTTON_TARGETS] and just as unasked, which the 2026-08-30 cable session
+     * noticed and nothing then acted on.
+     *
+     * Measured on the S25 2026-09-10, across two restarts with the button already guarded: the system
+     * (`pkg:android` in `dumpsys settings`) wrote this key at both boots — empty after the first and
+     * **ours again** after the second. So it is re-derived like the button key, not stored once.
+     *
+     * Invisible today, because this phone's button mode is `1` (the floating menu), and in that mode
+     * the gesture draws nothing. It is swept anyway because it is one Settings change from being live:
+     * switch the button to "gesture" and a swipe points at us, and its Edit list is the same picker
+     * that was the four-tap off switch. That picker is bounced, so this is not an open door; it is a
+     * second handle on a guarded one, and a claim nobody asked for. Written, not read — see
+     * [READ_KEYS] for why the Lock tab does not name it.
+     */
+    const val GESTURE_TARGETS = "accessibility_gesture_targets"
+
+    /**
+     * The keys [com.appblock.service.ShortcutTargetGuard] takes us back out of: the two that Android
+     * fills in because the service requests the accessibility button. Never the chord — see
+     * [CHORD_TARGET].
+     */
+    val WRITE_KEYS: List<String> = listOf(BUTTON_TARGETS, GESTURE_TARGETS)
+
+    /**
      * The volume-key chord's target. Read, never written: nothing puts a service here without someone
      * choosing it on the shortcut screen, and quietly undoing a choice a person made is a different
      * act from removing one they were never asked about. It also cannot hurt us, because N-1 means the
@@ -43,7 +69,14 @@ object ShortcutTargets {
      */
     const val CHORD_TARGET = "accessibility_shortcut_target_service"
 
-    /** Both keys, for the read that feeds the Lock tab's protection row. */
+    /**
+     * The keys the Lock tab's protection row reads.
+     *
+     * Not [GESTURE_TARGETS]. The row's whole text is about the pill on the edge of the screen, and in
+     * button mode `1` a gesture claim puts nothing on screen, so naming it would describe a button
+     * that is not there. On a phone with the adb grant the guard clears it anyway; on one without,
+     * the button claim, which does show, already carries the one command that fixes both.
+     */
     val READ_KEYS: List<String> = listOf(BUTTON_TARGETS, CHORD_TARGET)
 
     /**
@@ -59,8 +92,8 @@ object ShortcutTargets {
         entries(value).any { namesUs(it, packageName, className) }
 
     /**
-     * The value [BUTTON_TARGETS] should hold once our entries are gone, or null when there is nothing
-     * of ours in it and therefore nothing to write.
+     * The value a [WRITE_KEYS] setting should hold once our entries are gone, or null when there is
+     * nothing of ours in it and therefore nothing to write.
      *
      * Other services' entries survive: this removes one claim, it does not clear the shortcut. A real
      * accessibility tool sharing the button keeps it, and the button keeps pointing at that tool. The
@@ -100,8 +133,9 @@ object ShortcutTargets {
 }
 
 /**
- * How many times the app will take itself back out of [ShortcutTargets.BUTTON_TARGETS] before it
- * stops and leaves the claim standing.
+ * How many times the app will take itself back out of one [ShortcutTargets.WRITE_KEYS] setting before
+ * it stops and leaves the claim standing. One instance per key, so a fight over one cannot spend the
+ * clears the other needs.
  *
  * There is a version of this loop that never ends. We remove the entry; the framework notices the
  * setting changed, re-reads its accessibility configuration, decides an enabled service that requests
@@ -109,6 +143,11 @@ object ShortcutTargets {
  * UI actually closes that circle is **not verified from here** and cannot be without the phone, so
  * this is written as though it does. A budget is the difference between "the fix did not take" and a
  * pair of processes writing a Secure setting at each other for as long as the phone is on.
+ *
+ * ✅ **Answered on the S25 2026-09-10: One UI does not close it.** With the grant held, the button
+ * target was written back by hand and App-Block took it out within 58 ms — one write, and the
+ * setting's row id had not moved five seconds later. The budget stays as insurance for a One UI that
+ * does, which costs nothing while no fight happens.
  *
  * Five per hour, on the monotonic clock rather than the wall clock, because the wall clock is the one
  * this app already assumes is being lied to (see [com.appblock.engine.DayCorroboration]). One clear
@@ -128,7 +167,7 @@ class ShortcutTargetSweep(
 
     /** What the caller should do about [value] right now. */
     sealed interface Decision {
-        /** Write this back to [ShortcutTargets.BUTTON_TARGETS]; ours are gone, everyone else's stay. */
+        /** Write this back to the key being swept; ours are gone, everyone else's stay. */
         data class Clear(val value: String) : Decision
 
         /** Nothing of ours in the setting. The common case, and the one that ends the loop. */

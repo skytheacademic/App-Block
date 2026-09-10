@@ -16,7 +16,14 @@ import com.appblock.engine.ShortcutTargetSweep
 /**
  * Takes App-Block back out of `accessibility_button_targets` whenever Android puts it there, which
  * is what turns "clear the floating button" from a thing done once on a cable into a thing that
- * holds across a restart.
+ * holds across a restart. The same for `accessibility_gesture_targets`, the gesture's twin of that
+ * list, which Android fills in the same way (see [ShortcutTargets.GESTURE_TARGETS]).
+ *
+ * ✅ **Verified on the S25 2026-09-10 (0.9.0):** two restarts, no tab on the edge after either,
+ * checked by eye before the app was opened. Across the second, `dumpsys settings` shows the button
+ * key rewritten during boot and the last write to it made by `com.appblock` — the re-add and the
+ * removal this class exists for, both observed. The gesture key was rewritten by the system at both
+ * boots and ours after the second, which is why it is swept too.
  *
  * ## The bug this closes
  *
@@ -56,8 +63,9 @@ import com.appblock.engine.ShortcutTargetSweep
  * never sees a cable is no worse off than it was.
  *
  * The grant is also *narrower* than it looks from the permission's name, in the direction that
- * matters: it is only ever used to remove our own entry from one list. Other services' entries are
- * carried through untouched by [ShortcutTargets.withoutSelf], and no other Secure setting is written.
+ * matters: it is only ever used to remove our own entry from the two [ShortcutTargets.WRITE_KEYS]
+ * lists. Other services' entries are carried through untouched by [ShortcutTargets.withoutSelf], and
+ * no other Secure setting is written.
  */
 class ShortcutTargetGuard(
     context: Context,
@@ -67,7 +75,8 @@ class ShortcutTargetGuard(
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
     private val component = ComponentName(appContext, AppBlockerAccessibilityService::class.java)
-    private val sweep = ShortcutTargetSweep()
+    /** One budget per key: a fight over one list must not spend the clears the other one needs. */
+    private val sweeps = ShortcutTargets.WRITE_KEYS.associateWith { ShortcutTargetSweep() }
 
     /**
      * The main looper, matching [ClockSettingsWatch] and the service's own callbacks: the guard holds
@@ -84,32 +93,36 @@ class ShortcutTargetGuard(
         }
     }
 
-    /** What one sweep did. Returned rather than logged, so the tests can state the whole behaviour. */
+    /**
+     * What one sweep did. Returned rather than logged, so the tests can state the whole behaviour.
+     *
+     * Declared worst first, because a sweep covers two keys and reports the worse of the two: a claim
+     * left standing on either one is the thing worth hearing about, and a clean clear of the other
+     * must not hide it.
+     */
     enum class Outcome {
+        /** The write was allowed and threw anyway. Left to the next channel. */
+        FAILED,
+
+        /** [ShortcutTargetSweep]'s budget for this window is gone. */
+        BUDGET_SPENT,
+
+        /** The adb grant was never given. Expected, and not a failure of anything. */
+        NO_PERMISSION,
+
         /** Our entry was there and is not any more. */
         CLEARED,
 
         /** Nothing of ours in the setting. The steady state, and what every re-entrant sweep sees. */
         ALREADY_CLEAR,
-
-        /** The adb grant was never given. Expected, and not a failure of anything. */
-        NO_PERMISSION,
-
-        /** [ShortcutTargetSweep]'s budget for this window is gone. */
-        BUDGET_SPENT,
-
-        /** The write was allowed and threw anyway. Left to the next channel. */
-        FAILED,
     }
 
-    /** Registers the observer and sweeps once, in that order, so a write during the sweep is caught. */
+    /** Registers the observers and sweeps once, in that order, so a write during the sweep is caught. */
     fun start() {
-        runCatching {
-            resolver.registerContentObserver(
-                Settings.Secure.getUriFor(ShortcutTargets.BUTTON_TARGETS),
-                false,
-                observer,
-            )
+        for (key in ShortcutTargets.WRITE_KEYS) {
+            runCatching {
+                resolver.registerContentObserver(Settings.Secure.getUriFor(key), false, observer)
+            }
         }
         sweepNow()
     }
@@ -119,22 +132,26 @@ class ShortcutTargetGuard(
     }
 
     /**
-     * Reads the setting, decides, and writes at most one value back.
+     * Reads each key, decides, and writes at most one value back per key. Reports the worst of the
+     * two outcomes (see [Outcome]).
      *
      * Our own write re-fires the observer, and that re-entry is the loop's floor rather than its
-     * start: the value no longer names us, so the second pass returns [Outcome.ALREADY_CLEAR] having
+     * start: the values no longer name us, so the second pass returns [Outcome.ALREADY_CLEAR] having
      * written nothing and spent nothing.
      *
-     * Wrapped end to end because the service calls it from [start], and `onServiceConnected` must
-     * never throw: a throw there kills the service, and the watchdog would not notice for fifteen
-     * minutes.
+     * Wrapped end to end, per key, because the service calls it from [start], and
+     * `onServiceConnected` must never throw: a throw there kills the service, and the watchdog would
+     * not notice for fifteen minutes. Per key so that one key's throw cannot stop the other's clear.
      */
-    fun sweepNow(): Outcome = runCatching { sweepInner() }.getOrDefault(Outcome.FAILED)
+    fun sweepNow(): Outcome =
+        sweeps.entries
+            .map { (key, sweep) ->
+                runCatching { sweepKey(key, sweep) }.getOrDefault(Outcome.FAILED)
+            }
+            .minOrNull() ?: Outcome.ALREADY_CLEAR
 
-    private fun sweepInner(): Outcome {
-        val current = runCatching {
-            Settings.Secure.getString(resolver, ShortcutTargets.BUTTON_TARGETS)
-        }.getOrNull()
+    private fun sweepKey(key: String, sweep: ShortcutTargetSweep): Outcome {
+        val current = runCatching { Settings.Secure.getString(resolver, key) }.getOrNull()
         // Asked before the permission, so a phone with no claim on it never reports a missing grant
         // it has no use for. The Lock tab reads the same order.
         if (!ShortcutTargets.claims(current, component.packageName, component.className)) {
@@ -152,11 +169,7 @@ class ShortcutTargetGuard(
             is ShortcutTargetSweep.Decision.Spent -> Outcome.BUDGET_SPENT
             is ShortcutTargetSweep.Decision.Clear -> {
                 val wrote = runCatching {
-                    Settings.Secure.putString(
-                        resolver,
-                        ShortcutTargets.BUTTON_TARGETS,
-                        decision.value,
-                    )
+                    Settings.Secure.putString(resolver, key, decision.value)
                 }.getOrDefault(false)
                 if (wrote) Outcome.CLEARED else Outcome.FAILED
             }

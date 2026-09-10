@@ -113,14 +113,29 @@ class ShortcutTargetsTest {
         assertEquals(other, ShortcutTargets.withoutSelf(":  $longForm : $other :", pkg, cls))
     }
 
-    /** The chord is read, never swept. Stated here so the day it changes, this test says so. */
+    /**
+     * The two lists Android fills in for us are written; the chord, a choice a person made, is only
+     * ever read. Stated here so the day either list changes, this test says so.
+     */
     @Test
-    fun `only the button target is a written key`() {
+    fun `the button and gesture targets are written, and the chord never is`() {
+        assertEquals(
+            listOf("accessibility_button_targets", "accessibility_gesture_targets"),
+            ShortcutTargets.WRITE_KEYS,
+        )
+        assertFalse(ShortcutTargets.WRITE_KEYS.contains(ShortcutTargets.CHORD_TARGET))
+    }
+
+    /**
+     * The Lock row reads the button and the chord, not the gesture: its text is about a pill on the
+     * screen, and a gesture claim in button mode 1 draws nothing. See [ShortcutTargets.READ_KEYS].
+     */
+    @Test
+    fun `the Lock row reads the button and the chord`() {
         assertEquals(
             listOf("accessibility_button_targets", "accessibility_shortcut_target_service"),
             ShortcutTargets.READ_KEYS,
         )
-        assertEquals("accessibility_button_targets", ShortcutTargets.BUTTON_TARGETS)
     }
 }
 

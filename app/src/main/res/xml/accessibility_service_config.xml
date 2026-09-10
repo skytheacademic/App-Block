@@ -85,7 +85,14 @@
      fix is service/ShortcutTargetGuard, which removes the entry on every service connect (i.e. every
      boot), on every change to the setting, and on the watchdog's 15-minute pass. It needs
      `WRITE_SECURE_SETTINGS`, granted once over adb; without it nothing changes and the Lock tab
-     carries the command. -->
+     carries the command.
+
+     2026-09-10, on the S25 (0.9.0): verified across two restarts - no tab after either, and the
+     button key's last write after boot is App-Block's. The same two restarts showed the system
+     rewriting `accessibility_gesture_targets` at boot as well (ours again after the second), so the
+     guard sweeps that key too. It draws nothing while the button is the floating menu, but it is
+     one Settings change from live, and its Edit list is the same picker. -->
+
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"

@@ -36,6 +36,14 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 11 / 0.9.1: the gesture's twin of the button list. The 0.9.0 phone session (2026-09-10)
+        // verified the button guard across two restarts — no tab after either, and the button key's
+        // last write after boot is ours — and the same restarts showed `accessibility_gesture_targets`
+        // rewritten by the system at boot, ours again after the second. It draws nothing while the
+        // button is the floating menu, but it is one Settings change from live and its Edit list is
+        // the same picker, so `ShortcutTargetGuard` now sweeps it too, with its own budget. Bumped
+        // because 0.9.0 was installed on the phone: two builds never answer to one versionCode.
+        //
         // 10 / 0.9.0: the accessibility button that came back after a restart. 0.5.0 shut the picker
         // (the four-tap off switch behind the floating pill) and the Lock tab named the claim, with
         // one adb command to clear it. From the phone, 2026-09-08: the command works and a REBOOT
@@ -97,8 +105,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 10
-        versionName = "0.9.0"
+        versionCode = 11
+        versionName = "0.9.1"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
