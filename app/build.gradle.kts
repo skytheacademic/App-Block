@@ -47,6 +47,15 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 17 / 0.10.1: the block lands faster. Owner, 2026-10-01: a blocked app is visible before the
+        // block screen. Measured with 10 adb launches of a blocked app per build: the overlay's first
+        // frame at ~210 ms after launch, the app's own at ~60. Two causes, two fixes:
+        // `notificationTimeout` 100 -> 0 (the framework was holding every event 100 ms), and one pass
+        // per burst of window events instead of one per event (`requestPump` — ~10 inline scans per
+        // launch kept the main thread too busy to draw the overlay they had just added). Result: first
+        // frame 162 ms. 13-16 were experiment builds installed on the phone that afternoon (one per
+        // step, plus a leading-edge throttle that measured slower and was dropped); none was released.
+        //
         // 12 / 0.10.0: the seed file (`engine/SeedFile.kt`). A gitignored `seed.txt` at the repo root
         // — blocked sites and picker-style apps — compiled into release builds only, so a reinstall
         // comes up with them instead of a config rebuilt from screenshots (the 2026-08-04 request).
@@ -122,8 +131,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 12
-        versionName = "0.10.0"
+        versionCode = 17
+        versionName = "0.10.1"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
