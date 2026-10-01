@@ -76,11 +76,13 @@ class DisplayHolds<T : Any>(
      *
      * > *An event says WHEN to look, never WHERE.*
      *
-     * Accessibility event coalescing is keyed by `eventType` **alone**, with no display dimension, and
-     * this service declares `notificationTimeout="100"`. Two window-state changes 100 ms apart on two
-     * displays collapse into one delivered event and the older is recycled and dropped — which is
-     * *routine* the moment a monitor is plugged in, because both launchers settle together. So there is
-     * no parameter here naming the display an event came from. The rule is unstateable wrongly.
+     * Accessibility event coalescing is keyed by `eventType` **alone**, with no display dimension. Under
+     * the old `notificationTimeout="100"`, two window-state changes 100 ms apart on two displays
+     * collapsed into one delivered event and the older was dropped — *routine* the moment a monitor is
+     * plugged in, because both launchers settle together. The timeout is 0 since 0.10.1, but the
+     * service's own pass throttle (`requestPump`) now merges events the same way, and no display
+     * dimension there either. So there is no parameter here naming the display an event came from.
+     * The rule is unstateable wrongly.
      *
      * Folds `reads.keys ∪ holds.keys`, ascending with the default display first. The union half is
      * load-bearing: **a fully covered display is dropped from its own window list**, so iterating reads

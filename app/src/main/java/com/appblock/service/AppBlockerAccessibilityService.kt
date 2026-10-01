@@ -236,6 +236,39 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * One pass for a whole burst of events, instead of one pass per event.
+     *
+     * Opening an app delivers ~10 window events within ~100 ms (measured 2026-10-01, 0.10.1 probe on the
+     * S25). Pumping inline ran ten full scans back to back on the main thread, and the block overlay —
+     * added by the FIRST of them — could not lay out or draw until the main thread came free: added at
+     * +133 ms after launch, first laid out at +204. The pass the overlay needed had already run; the
+     * other nine only kept it from appearing.
+     *
+     * Posting the pass puts it behind the events already queued on the main looper, and the flag turns
+     * every one of those into a no-op, so the burst costs one scan. Nothing is lost by deferring: every
+     * event's own bookkeeping ([noteForegroundPackage], [selfDefense]) still runs inline, and the pass
+     * re-reads the whole screen from scratch, so the newest state is the only one that matters.
+     *
+     * Measured on the S25 (10 adb launches of a blocked app per build, median time from launch to the
+     * overlay's first frame): one pass per event ~210 ms · this, 162 ms · a leading-edge pass inline plus
+     * a 50 ms trailing throttle, 180 ms (two runs, 179 and 180). ⚠️ The leading edge is the trap: the
+     * first event of a launch usually lands BEFORE the app's window is in the list, so that inline pass
+     * finds nothing to block, and the throttle then holds back the pass that would have, for up to 50 ms.
+     * Waiting for the queue to drain is what lets the one pass see the app.
+     */
+    private var pumpPending = false
+    private val pumpRunnable = Runnable {
+        pumpPending = false
+        runCatching { pump() }
+    }
+
+    private fun requestPump() {
+        if (pumpPending) return
+        pumpPending = true
+        handler.post(pumpRunnable)
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         liveness.connected(this)
@@ -350,7 +383,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) noteForegroundPackage(event)
         if (selfDefense(event)) return
         if (windowEvent) {
-            pump()
+            requestPump()
             return
         }
         // Content-changed: Instagram (reel↔feed flips) and allowlisted browsers (navigating to a new URL)
@@ -360,7 +393,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             val now = SystemClock.elapsedRealtime()
             if (now - lastContentPumpElapsedMs >= CONTENT_THROTTLE_MS) {
                 lastContentPumpElapsedMs = now
-                pump()
+                requestPump()
             }
         }
     }
@@ -1869,13 +1902,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         runCatching { displayListener?.let { displayManager.unregisterDisplayListener(it) } }
         displayListener = null
         stopTicking()
+        handler.removeCallbacks(pumpRunnable)
         overlays.removeAll()
         super.onDestroy()
     }
 
     companion object {
-        private const val TICK_MS = 5_000L
-        /** `getWindowsOnAllDisplays()` is API 30 — the detection half's only guard. */
+        private const val TICK_MS = 5_000L        /** `getWindowsOnAllDisplays()` is API 30 — the detection half's only guard. */
         private const val MULTI_DISPLAY_SDK = 30
         /** `AccessibilityRecord.getDisplayId()` is API 33 — the attribution guard. Below it every event
          *  files under display 0, which is exactly what every line of this service assumed before DeX. */

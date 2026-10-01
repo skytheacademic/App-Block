@@ -91,7 +91,15 @@
      button key's last write after boot is App-Block's. The same two restarts showed the system
      rewriting `accessibility_gesture_targets` at boot as well (ours again after the second), so the
      guard sweeps that key too. It draws nothing while the button is the floating menu, but it is
-     one Settings change from live, and its Edit list is the same picker. -->
+     one Settings change from live, and its Edit list is the same picker.
+
+     notificationTimeout is 0, not 100 (0.10.1). The framework holds every event this long before
+     delivering it, so 100 put a floor of ~100 ms under every block. Measured 2026-10-01 on the S25,
+     10 adb launches of a blocked app (Survival Manual): the overlay was ADDED at a median 222 ms
+     after launch with 100, 116 ms with 0. Nothing relied on the batching: content events are dropped
+     for every package but Instagram, the allowlisted browsers and the watched Settings pages, and
+     the passes they trigger are throttled in the service (AppBlockerAccessibilityService.requestPump,
+     CONTENT_THROTTLE_MS). The bursts the timeout used to merge are now merged there instead. -->
 
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged"
@@ -99,5 +107,5 @@
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds|flagRequestAccessibilityButton"
     android:canRetrieveWindowContent="true"
     android:isAccessibilityTool="true"
-    android:notificationTimeout="100"
+    android:notificationTimeout="0"
     android:description="@string/accessibility_description" />
