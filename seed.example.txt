@@ -1,0 +1,13 @@
+# App-Block seed file — copy to `seed.txt` (gitignored) and edit.
+#
+# Read by Gradle and compiled into RELEASE builds only (engine/SeedFile.kt). Never read on the phone.
+# Each line takes effect once per install: added if absent, then never re-added, never overwritten,
+# never removed. Adding a line + rebuilding + `adb install -r` therefore only ever tightens.
+#
+# site <domain>                                    whole domain, subdomains included
+# app <package> <weekday> <weekend> <ceiling>      minutes per day, 0–1440; ceiling = max an exception can raise to
+#
+# Built-in targets (TikTok, Instagram, X) live in DefaultRules.kt and can't be listed here.
+
+site example.com
+app com.example.app 30 30 60

@@ -36,7 +36,6 @@ import com.appblock.engine.TargetSettings
 import com.appblock.engine.TargetStatus
 import com.appblock.engine.UnlockCategory
 import com.appblock.engine.UsageTracker
-import com.appblock.security.BlocklistStore
 import com.appblock.security.DurableUnlockController
 import com.appblock.security.LockStore
 import com.appblock.service.AndroidClockIntegrity
@@ -77,7 +76,7 @@ fun AppRoot(
     val rules = remember { RulesDraft(ruleStore) }
     val lockStore = remember { LockStore(context) }
     val unlockController = remember { DurableUnlockController(context) }
-    val blocklistStore = remember { BlocklistStore(context) }
+    val blocklistStore = remember { ActiveRules.blocklistStore(context) }
     // The UI's own coordinator over the same prefs store the service writes to — one process, so
     // that store is the live value. It never calls onForeground, so it only reads usage and
     // advances/edits exceptions; the service stays the only thing that accrues time.

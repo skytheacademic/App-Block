@@ -4,6 +4,8 @@ import android.content.Context
 import com.appblock.engine.DurableSettings
 import com.appblock.engine.EngineCodec
 import com.appblock.engine.RuleStore
+import com.appblock.engine.Target
+import com.appblock.engine.TargetSettings
 
 /**
  * SharedPreferences-backed [RuleStore] for the durable config. Owns three things the pure engine can't:
@@ -45,6 +47,12 @@ import com.appblock.engine.RuleStore
 class PrefsRuleStore(
     context: Context,
     private val seed: DurableSettings,
+    /**
+     * Apps from the gitignored seed file ([com.appblock.engine.SeedFile]) — added **once each**, on
+     * top of whatever [load] would otherwise return, and never over an entry already present. See
+     * [withSeedApps].
+     */
+    private val seedApps: Map<Target, TargetSettings> = emptyMap(),
 ) : RuleStore {
 
     private val prefs =
@@ -52,12 +60,14 @@ class PrefsRuleStore(
 
     override fun load(): DurableSettings {
         val raw = prefs.getString(KEY_RULES, null)
-            ?: return seed.also { save(it) }             // nothing stored yet — a real first launch
+            ?: return withSeedApps(seed.also { save(it) })   // nothing stored yet — a real first launch
 
         val stored = EngineCodec.decodeDurable(raw)
         if (stored == null) {
             quarantine(raw)
-            return seed.also { save(it) }
+            // Every seed app, applied or not: this is the fallback that enforces instead of a config
+            // we can no longer read, and the seed file is the best record of it there is.
+            return withSeedApps(seed.also { save(it) }, all = true)
         }
         if (stored.version != seed.version) {
             // Authorized re-seed from source — for the built-ins. A `pkg:` target can never be in
@@ -65,9 +75,37 @@ class PrefsRuleStore(
             // about it and replacing the whole blob just deleted it: two config reconstructions
             // before this carried them across. They come through with their settings intact.
             val picked = stored.targets.filterKeys { it.userPackage != null && it !in seed.targets }
-            return seed.copy(targets = seed.targets + picked).also { save(it) }
+            return withSeedApps(seed.copy(targets = seed.targets + picked).also { save(it) })
         }
-        return stored
+        return withSeedApps(stored)
+    }
+
+    /**
+     * Adds each seed-file app not yet applied on this install, then records it as applied.
+     *
+     * - **Never overwrites.** An app already in [settings] keeps its own caps — the phone may have
+     *   tightened it, and a seed that put the file's numbers back would be a loosening nobody gated.
+     * - **Never re-adds.** An app removed through a change window stays removed; the file does not
+     *   get to undo a gated decision on every launch.
+     * - **So it only ever adds a target**, which [com.appblock.engine.DurableChangeGate] classifies as
+     *   a tightening: free and instant, the same as picking the app by hand.
+     *
+     * Runs on every [load] (the engine re-reads rules each pass), so the common case — nothing new —
+     * must cost one prefs read and no write.
+     *
+     * @param all apply every seed app regardless of the record (the corrupt-config fallback).
+     */
+    private fun withSeedApps(settings: DurableSettings, all: Boolean = false): DurableSettings {
+        if (seedApps.isEmpty()) return settings
+        val applied = prefs.getStringSet(KEY_SEEDED_APPS, emptySet()).orEmpty()
+        val fresh = if (all) seedApps else seedApps.filterKeys { it.key !in applied }
+        if (fresh.isEmpty()) return settings
+
+        val added = fresh.filterKeys { it !in settings.targets }
+        val result = if (added.isEmpty()) settings else settings.copy(targets = settings.targets + added)
+        if (added.isNotEmpty()) save(result)
+        prefs.edit().putStringSet(KEY_SEEDED_APPS, HashSet(applied + fresh.keys.map { it.key })).apply()
+        return result
     }
 
     override fun save(settings: DurableSettings) {
@@ -100,5 +138,6 @@ class PrefsRuleStore(
         const val PREFS = "appblock_rules"
         const val KEY_RULES = "durable_settings"
         const val KEY_CORRUPT = "durable_settings_unreadable"
+        const val KEY_SEEDED_APPS = "seed_apps_applied"
     }
 }

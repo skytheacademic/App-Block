@@ -159,4 +159,85 @@ class PrefsRuleStoreTest {
         store.load()
         assertTrue("an empty value was stored, so something wrote it", store.corruptBlob() != null)
     }
+
+    // ---- the seed file's apps (engine/SeedFile.kt): add once, never overwrite, never re-add ----
+
+    private val youtube = Target.forPackage("com.google.android.youtube")
+    private val seedApps = mapOf(
+        reddit to TargetSettings(true, 20, 30, 40),
+        youtube to TargetSettings(true, 10, 10, 20),
+    )
+
+    private fun seededStore(apps: Map<Target, TargetSettings> = seedApps) = PrefsRuleStore(app, seed, apps)
+
+    @Test fun `a fresh install comes up with the seed file's apps`() {
+        assertEquals(seed.targets + seedApps, seededStore().load().targets)
+        assertEquals("and persists them", seed.targets + seedApps, store().load().targets)
+    }
+
+    /** The case that made the file worth having: an install that already has a config gains the app. */
+    @Test fun `an existing config gains a seed app it does not have`() {
+        store().save(seed)
+        assertEquals(seedApps[reddit], seededStore().load().targets[reddit])
+    }
+
+    /**
+     * Never overwrites. The phone may have tightened the app since; putting the file's numbers back
+     * would be a loosening nobody gated.
+     */
+    @Test fun `an app already configured keeps its own settings`() {
+        store().save(configured)                                  // reddit at 15/15/30
+        assertEquals(TargetSettings(true, 15, 15, 30), seededStore().load().targets[reddit])
+    }
+
+    /** Never re-adds. An app removed through a change window must not come back on the next launch. */
+    @Test fun `a seed app removed later stays removed`() {
+        seededStore().load()
+        store().save(seed)                                        // the gated removal
+        repeat(3) { seededStore().load() }
+        assertTrue(reddit !in seededStore().load().targets)
+    }
+
+    /** One line added to the file later is applied — without dragging back the one that was removed. */
+    @Test fun `a new seed line is applied on its own`() {
+        seededStore(mapOf(reddit to seedApps.getValue(reddit))).load()
+        store().save(seed)                                        // reddit removed through a window
+        val loaded = seededStore().load()                         // a build that also seeds youtube
+        assertTrue(reddit !in loaded.targets)
+        assertEquals(seedApps[youtube], loaded.targets[youtube])
+    }
+
+    /** The common case is every engine pass: nothing new, so nothing may be written. */
+    @Test fun `an applied seed costs no write`() {
+        val first = seededStore().load()
+        val before = prefs().getString("durable_settings", null)
+        repeat(3) { assertEquals(first, seededStore().load()) }
+        assertEquals(before, prefs().getString("durable_settings", null))
+    }
+
+    @Test fun `a version bump keeps seed apps with the settings the phone has`() {
+        seededStore().load()
+        val tightened = TargetSettings(true, 5, 5, 10)
+        store().save(store().load().let { it.copy(version = 99, targets = it.targets + (reddit to tightened)) })
+        val loaded = seededStore().load()
+        assertEquals(seed.version, loaded.version)
+        assertEquals(tightened, loaded.targets[reddit])
+    }
+
+    /**
+     * The corrupt fallback is the one place a seed app is applied regardless of the record: the config
+     * it replaces can no longer be read, and the seed file is the best record of it there is.
+     */
+    @Test fun `the corrupt fallback includes every seed app`() {
+        seededStore().load()
+        writeRaw("nope")
+        val store = seededStore()
+        assertEquals(seed.targets + seedApps, store.load().targets)
+        assertNotNull(store.corruptBlob())
+    }
+
+    @Test fun `no seed apps changes nothing`() {
+        store().save(configured)
+        assertEquals(configured, seededStore(emptyMap()).load())
+    }
 }
