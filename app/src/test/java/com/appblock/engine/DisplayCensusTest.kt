@@ -165,4 +165,67 @@ class DisplayCensusTest {
         val twice = DisplayCensus.line(displays, true, setOf(monitor), setOf(monitor), "3=HELD")
         assertEquals(once, twice)
     }
+
+    // ---- the plug-in and unplug transients (2026-10-01) ----
+
+    /**
+     * BITE. The attach frame: a monitor that only just appeared and has no window list yet must NOT read
+     * `untracked=[3]` — that is the A1 stop-condition, and it resolved 22 ms later on the S25.
+     */
+    @Test fun `a display that only just appeared reads as settling, not untracked`() {
+        val displays = listOf(display(phone), display(monitor, windowCount = null))
+        val line = DisplayCensus.line(displays, true, emptySet(), emptySet(), "", settling = setOf(monitor))
+        assertTrue(line, line.contains("untracked=[] "))
+        assertTrue(line, line.contains("settling=[3]"))
+    }
+
+    /** GUARD. Once settled, a display that is still blind says so in the field the stop-condition reads. */
+    @Test fun `a settled display that is still blind is untracked`() {
+        val displays = listOf(display(phone), display(monitor, windowCount = null))
+        val line = DisplayCensus.line(displays, true, emptySet(), emptySet(), "", settling = emptySet())
+        assertTrue(line, line.contains("untracked=[3]"))
+        assertFalse(line, line.contains("settling="))
+    }
+
+    /** GUARD. Settling is only ever said about a blind display; a tracked one has nothing to explain. */
+    @Test fun `a settling display that is already tracked adds no field`() {
+        val displays = listOf(display(phone), display(monitor, windowCount = 2))
+        val line = DisplayCensus.line(displays, true, emptySet(), emptySet(), "", settling = setOf(monitor))
+        assertFalse(line, line.contains("settling="))
+    }
+
+    /** BITE. The detach frame: a covered id that no longer exists is named, so `sat=false` has a reason. */
+    @Test fun `a covered display that is gone is named`() {
+        val line = DisplayCensus.line(listOf(display(phone)), true, setOf(monitor), emptySet(), "")
+        assertTrue(line, line.contains("cover=[3]"))
+        assertTrue(line, line.contains("gone=[3]"))
+    }
+
+    @Test fun `no gone field while every covered display exists`() {
+        val displays = listOf(display(phone), display(monitor, windowCount = 2))
+        val line = DisplayCensus.line(displays, true, setOf(monitor), setOf(monitor), "")
+        assertFalse(line, line.contains("gone="))
+    }
+
+    /** GUARD. A display present when the service starts was not "just plugged in" — blind from boot shows. */
+    @Test fun `displays present at the first observation never settle`() {
+        val arrivals = DisplayCensus.Arrivals(settleMs = 250)
+        assertEquals(emptySet<Int>(), arrivals.observe(setOf(phone, monitor), nowMs = 1_000))
+    }
+
+    @Test fun `a display that appears later settles for the settle time, then stops`() {
+        val arrivals = DisplayCensus.Arrivals(settleMs = 250)
+        arrivals.observe(setOf(phone), nowMs = 1_000)
+        assertEquals(setOf(monitor), arrivals.observe(setOf(phone, monitor), nowMs = 2_000))
+        assertEquals(setOf(monitor), arrivals.observe(setOf(phone, monitor), nowMs = 2_249))
+        assertEquals(emptySet<Int>(), arrivals.observe(setOf(phone, monitor), nowMs = 2_250))
+    }
+
+    /** A monitor unplugged and plugged back in is new again — its window list starts from nothing too. */
+    @Test fun `a re-plugged display settles again`() {
+        val arrivals = DisplayCensus.Arrivals(settleMs = 250)
+        arrivals.observe(setOf(phone, monitor), nowMs = 1_000)
+        arrivals.observe(setOf(phone), nowMs = 2_000)
+        assertEquals(setOf(monitor), arrivals.observe(setOf(phone, monitor), nowMs = 3_000))
+    }
 }

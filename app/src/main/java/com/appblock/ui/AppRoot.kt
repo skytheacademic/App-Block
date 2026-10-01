@@ -41,7 +41,9 @@ import com.appblock.security.LockStore
 import com.appblock.service.AndroidClockIntegrity
 import com.appblock.service.AndroidEngineClock
 import com.appblock.service.AppBlockerAccessibilityService
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import kotlinx.coroutines.delay
 
 /**
@@ -67,6 +69,10 @@ fun AppRoot(
     onActivateAdmin: () -> Unit,
     onRequestExemption: () -> Unit,
     onAllowNotifications: () -> Unit,
+    /** A tab a notification asked to open on (MainActivity.lockTabIntent); null = choose as usual. */
+    requestedTab: AppTab? = null,
+    /** Called once [requestedTab] has been switched to, so the request is not replayed. */
+    onRequestedTabShown: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val clock = remember { AndroidEngineClock() }
@@ -92,8 +98,16 @@ fun AppRoot(
 
     var tab by rememberSaveable {
         mutableStateOf(
-            if (unlockController.state() is DurableUnlockState.Locked) AppTab.TODAY else AppTab.LOCK,
+            requestedTab
+                ?: if (unlockController.state() is DurableUnlockState.Locked) AppTab.TODAY else AppTab.LOCK,
         )
+    }
+    // Also covers a tap while the app is already open, which arrives through onNewIntent.
+    LaunchedEffect(requestedTab) {
+        requestedTab?.let {
+            tab = it
+            onRequestedTabShown()
+        }
     }
     var message by remember { mutableStateOf<String?>(null) }
     var receipt by remember { mutableStateOf<LockReceipt?>(null) }
@@ -169,6 +183,12 @@ fun AppRoot(
     val statusesByTarget = statuses.associateBy { it.target }
     val logicalDay = DayBoundary.logicalDay(now)
     val countdown = formatHmsFromMs(unlockRemainingMs)
+    val today = now.toLocalDate()
+    val keySetDay = remember(keyConfigured, today) {
+        lockStore.keySetAtMs()?.let { ms ->
+            formatKeySetDay(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()).toLocalDate(), today)
+        }
+    }
 
     // No key means no window can ever open — `LockStore.verify` refuses everything while nothing is
     // stored — so a keyless phone is *stricter* than a locked one, not looser. Quoting the 2 h price
@@ -311,6 +331,7 @@ fun AppRoot(
                     onAllowNotifications = onAllowNotifications,
                 ),
                 keyConfigured = keyConfigured,
+                keySetDay = keySetDay,
                 onCreateKey = { showKeySetup = true },
                 onStartWindow = { startCategory = UnlockCategory.APPS },
                 onCancelWindow = { unlockController.cancel(); message = windowCancelledMessage },

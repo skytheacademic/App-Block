@@ -29,6 +29,7 @@ import com.appblock.MainActivity
 import com.appblock.R
 import com.appblock.data.InstalledApps
 import com.appblock.data.OmniboxWitnessStore
+import com.appblock.data.WindowKindStore
 import com.appblock.data.PrefsEngineStore
 import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
@@ -157,6 +158,14 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var lastWatchDiagLine: String? = null
     /** Last line emitted by [diagnoseDisplays] — same once-per-distinct-state rule as [lastDiagLine]. */
     private var lastDspDiagLine: String? = null
+    /** Which displays only just appeared — `settling=` in the census line. Diagnostics only. */
+    private val displayArrivals = DisplayCensus.Arrivals()
+    /**
+     * One more pass once a settling display's time is up, so the census line states a verdict on it
+     * (`untracked=` or not) instead of leaving `settling=` as the last word. Posted only from the
+     * QA-gated [diagnoseDisplays], so the release build never runs it.
+     */
+    private val settleRecheck = Runnable { requestPump() }
     /** Whether the last window read used `getWindowsOnAllDisplays()`. `api=legacy` on an Android 16
      *  phone means the SDK guard is inverted and the multi-display path never ran. */
     private var lastAllDisplaysApi = false
@@ -197,6 +206,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
     private val windowKinds = WindowKindMemo()
+    /** Where [windowKinds] is saved, so a reboot does not bring the volume-press flicker back. Null
+     *  until connected; nothing is noted before then. */
+    private var windowKindStore: WindowKindStore? = null
     /** Cached overlay readings — see [readOverlayGrant]. */
     private var overlayGranted = true to true
     private var overlayGrantedAtMs = 0L
@@ -285,6 +297,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         blocklistStore = ActiveRules.blocklistStore(this)
         witnessStore = SignalWitnessStore(this)
         omniboxWitnessStore = OmniboxWitnessStore(this)
+        windowKindStore = WindowKindStore(this).also { windowKinds.restore(it.load()) }
         clockSettingsWatch?.stop()
         clockSettingsWatch = ClockSettingsWatch(this) {
             runCatching { coordinator.onClockSettingChanged() }
@@ -435,7 +448,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // obvious `type != TYPE_APPLICATION` test, which was built, measured, and broke the exit outright
         // (0/5 Home presses released, because a pruned launcher window has no readable type either).
         val type = changedWindowType(event)
-        windowKinds.note(pkg, type, AccessibilityWindowInfo.TYPE_APPLICATION)
+        if (windowKinds.note(pkg, type, AccessibilityWindowInfo.TYPE_APPLICATION)) {
+            windowKindStore?.save(windowKinds.snapshot())
+        }
         if (BuildConfig.FAST_CAPS) {
             android.util.Log.d(
                 EVT_TAG,
@@ -1345,15 +1360,25 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      */
     private fun diagnoseDisplays() {
         if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        val census = censusNow()
+        val settling = displayArrivals.observe(
+            census.filter { it.enumerated }.map { it.id }.toSet(),
+            SystemClock.uptimeMillis(),
+        )
         val line = DisplayCensus.line(
-            displays = censusNow(),
+            displays = census,
             allDisplaysApi = lastAllDisplaysApi,
             cover = lastCover,
             covered = overlays.covered(),
             holds = holds.describe(),
             crossCheck = crossCheckAnnotation(),
             dexDisplays = dexAnnotation(),
+            settling = settling,
         )
+        if (settling.isNotEmpty()) {
+            handler.removeCallbacks(settleRecheck)
+            handler.postDelayed(settleRecheck, DisplayCensus.SETTLE_MS)
+        }
         if (line == lastDspDiagLine) return
         lastDspDiagLine = line
         android.util.Log.d(DSP_TAG, line)
@@ -1903,6 +1928,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         displayListener = null
         stopTicking()
         handler.removeCallbacks(pumpRunnable)
+        handler.removeCallbacks(settleRecheck)
         overlays.removeAll()
         super.onDestroy()
     }

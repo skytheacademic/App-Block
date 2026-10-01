@@ -158,11 +158,16 @@ object DisplayCensus {
         crossCheck: String? = null,
         /** Ids Samsung's DESKTOP display category names. **Annotation only, never a mechanism.** */
         dexDisplays: List<Int>? = null,
+        /** Displays that appeared too recently to judge — see [Arrivals]. */
+        settling: Set<Int> = emptySet(),
     ): String {
         val enumerated = order(displays.filter { it.enumerated }.map { it.id })
+        val blind = untracked(displays)
         val head = "api=${if (allDisplaysApi) "all" else "legacy"} dm=$enumerated " +
-            "untracked=${untracked(displays)} cover=${order(cover)} covered=${order(covered)} " +
+            "untracked=${blind.filter { it !in settling }} cover=${order(cover)} covered=${order(covered)} " +
             "sat=${covered.containsAll(cover)} holds=$holds" +
+            settlingField(blind, settling) +
+            goneField(displays, cover) +
             (crossCheck?.let { " xdisp=$it" } ?: "") +
             (dexDisplays?.let { " dex=${order(it)}" } ?: "")
         val rows = order(displays.map { it.id }).mapNotNull { id ->
@@ -172,6 +177,61 @@ object DisplayCensus {
         }
         return (listOf(head) + rows).joinToString(" | ")
     }
+
+    /**
+     * ` settling=[N]`: untracked, but only just enumerated — the attach frame, not a verdict.
+     *
+     * Measured 2026-08-30 on a simulated DeX display: the first line after a plug-in read
+     * `untracked=[67]` and the next, 22 ms later, `untracked=[]`. That first line is word for word the
+     * A1 stop-condition ("detection is blind on this hardware"), so it moves out of `untracked=` into a
+     * field of its own until [Arrivals] says the display has had time to get its window list. A display
+     * that is *still* untracked after that lands in `untracked=` like any other, because the service
+     * re-runs the pass once the settle time is up.
+     */
+    private fun settlingField(untracked: List<Int>, settling: Set<Int>): String {
+        val ids = untracked.filter { it in settling }
+        return if (ids.isEmpty()) "" else " settling=$ids"
+    }
+
+    /**
+     * ` gone=[N]`: in `cover=` but in neither `DisplayManager`'s list nor accessibility's — the detach
+     * frame. Measured the same day: on removal one line still read `cover=[67]` (and so `sat=false`),
+     * clean 26 ms later. Annotated rather than filtered, because a dead id that **stays** in the cover
+     * set is a real defect (the kick-to-home loop [DisplayHolds.retain] guards against), and this field
+     * is what would show it.
+     */
+    private fun goneField(displays: List<Display>, cover: Set<Int>): String {
+        val present = displays.map { it.id }.toSet()
+        val gone = order(cover.filter { it !in present })
+        return if (gone.isEmpty()) "" else " gone=$gone"
+    }
+
+    /**
+     * When each enumerated display first appeared, so a display can be called *settling* rather than
+     * blind for its first [settleMs].
+     *
+     * Displays present on the first [observe] count as long-settled: they were there before the service
+     * started, and a monitor that is blind from boot must read `untracked=` on the very first line, not
+     * hide behind this.
+     */
+    class Arrivals(private val settleMs: Long = SETTLE_MS) {
+        private val firstSeenMs = HashMap<Int, Long>()
+        private var primed = false
+
+        /** Feed this pass's enumerated ids; returns the ones still inside their settle time. */
+        fun observe(enumerated: Set<Int>, nowMs: Long): Set<Int> {
+            firstSeenMs.keys.retainAll(enumerated)     // a re-plugged display settles again
+            for (id in enumerated) firstSeenMs.getOrPut(id) { if (primed) nowMs else Long.MIN_VALUE }
+            primed = true
+            return firstSeenMs.filterValues { it != Long.MIN_VALUE && nowMs - it < settleMs }.keys
+        }
+    }
+
+    /**
+     * How long a new display is "settling". The measured transient was 22 ms; 250 is an order of
+     * magnitude over it and still far under anything a person would read as a delay.
+     */
+    const val SETTLE_MS: Long = 250
 
     /** The per-display field group, shared by [blocks] and [line] so the two can never disagree. */
     private fun fields(d: Display): String = buildString {

@@ -62,6 +62,15 @@ fun formatClockIn(now: LocalDateTime, ms: Long): String = formatClock(now.plusNa
 fun formatLogicalDay(day: LocalDate): String =
     DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault()).format(day)
 
+/**
+ * The day the lock key was made, as the Lock tab states it: `12 Jul`, with the year only when it is not
+ * this one (`12 Jul 2025`) — a key is meant to outlive the year it was made in.
+ */
+fun formatKeySetDay(day: LocalDate, today: LocalDate): String {
+    val pattern = if (day.year == today.year) "d MMM" else "d MMM yyyy"
+    return DateTimeFormatter.ofPattern(pattern, Locale.getDefault()).format(day)
+}
+
 /** When today's budgets come back: the 4am reset, as a clock reading. */
 fun formatResetHour(): String = formatHm(DayBoundary.DEFAULT_RESET_HOUR * 60)
 

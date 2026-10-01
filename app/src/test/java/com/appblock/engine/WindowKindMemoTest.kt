@@ -1,5 +1,6 @@
 package com.appblock.engine
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -98,5 +99,72 @@ class WindowKindMemoTest {
         val m = memo()
         m.note("com.example.divider", 5, APPLICATION)    // TYPE_SPLIT_SCREEN_DIVIDER
         assertTrue(m.isSystemOnly("com.example.divider"))
+    }
+
+    // ---- saved across restarts (0.10.2) ----
+
+    /** BITE. The reason for saving: a fresh memo restored from yesterday's knows the volume panel. */
+    @Test fun `a restored memo already knows the volume panel`() {
+        val before = memo().apply { note(systemui, SYSTEM, APPLICATION) }
+        val after = memo().apply { restore(before.snapshot()) }
+        assertTrue(after.isSystemOnly(systemui))
+    }
+
+    /**
+     * GUARD. A saved system sighting must not mute a package this lifetime has seen as an application —
+     * restore runs after connect, and events may already have been noted.
+     */
+    @Test fun `a saved system sighting cannot mute a live application`() {
+        val saved = memo().apply { note(launcher, SYSTEM, APPLICATION) }.snapshot()
+        val m = memo().apply { note(launcher, APPLICATION, APPLICATION) }
+        m.restore(saved)
+        assertFalse(m.isSystemOnly(launcher))
+    }
+
+    /** GUARD. And the other way: saved application evidence vetoes a live system sighting. */
+    @Test fun `a saved application sighting vetoes a live system sighting`() {
+        val saved = memo().apply { note(launcher, APPLICATION, APPLICATION) }.snapshot()
+        val m = memo().apply { note(launcher, SYSTEM, APPLICATION) }
+        m.restore(saved)
+        assertFalse(m.isSystemOnly(launcher))
+        m.note(launcher, SYSTEM, APPLICATION)
+        assertFalse("and it stays vetoed after the restore", m.isSystemOnly(launcher))
+    }
+
+    /** GUARD. A snapshot that breaks the invariant (hand-edited, or older code) is repaired on load. */
+    @Test fun `restore repairs a snapshot that lists a package in both sets`() {
+        val m = memo()
+        m.restore(WindowKindMemo.Snapshot(application = setOf(launcher), systemOnly = setOf(launcher, systemui)))
+        assertFalse(m.isSystemOnly(launcher))
+        assertTrue(m.isSystemOnly(systemui))
+    }
+
+    /** GUARD. An empty copy (first run, cleared data, unreadable prefs) restores to exactly a new memo. */
+    @Test fun `restoring nothing changes nothing`() {
+        val m = memo()
+        m.restore(WindowKindMemo.Snapshot(emptySet(), emptySet()))
+        assertFalse(m.isSystemOnly(systemui))
+        assertEquals(WindowKindMemo.Snapshot(emptySet(), emptySet()), m.snapshot())
+    }
+
+    // ---- note() reports change, so saving stays off the per-event path ----
+
+    @Test fun `note reports only what is new`() {
+        val m = memo()
+        assertTrue("first chrome sighting", m.note(systemui, SYSTEM, APPLICATION))
+        assertFalse("same again", m.note(systemui, SYSTEM, APPLICATION))
+        assertFalse("unreadable", m.note(systemui, null, APPLICATION))
+        assertTrue("first application sighting", m.note(launcher, APPLICATION, APPLICATION))
+        assertFalse("same again", m.note(launcher, APPLICATION, APPLICATION))
+        assertFalse("chrome after application teaches nothing", m.note(launcher, SYSTEM, APPLICATION))
+    }
+
+    /** BITE. Promotion from system-only to application is a change, or it would never be saved. */
+    @Test fun `promotion from chrome to application is reported`() {
+        val m = memo()
+        m.note(launcher, SYSTEM, APPLICATION)
+        assertTrue(m.note(launcher, APPLICATION, APPLICATION))
+        assertEquals(setOf(launcher), m.snapshot().application)
+        assertEquals(emptySet<String>(), m.snapshot().systemOnly)
     }
 }
