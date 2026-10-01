@@ -8,6 +8,8 @@ import com.appblock.engine.DurableSettings
 import com.appblock.engine.ExceptionManager
 import com.appblock.engine.RuleSource
 import com.appblock.engine.RuleStore
+import com.appblock.engine.SeedFile
+import com.appblock.security.BlocklistStore
 
 /**
  * The durable rule set the running app enforces. Reads [BuildConfig] (kept out of the Android-free
@@ -37,7 +39,26 @@ object ActiveRules {
     val exceptionWaitMs: Long =
         if (BuildConfig.FAST_CAPS) 60_000L else ExceptionManager.WAIT_MS
 
-    fun ruleStore(context: Context): RuleStore = PrefsRuleStore(context, seed)
+    /**
+     * The gitignored seed file, as compiled into this build — sites and extra apps a fresh install
+     * should come up with ([SeedFile]).
+     *
+     * `BuildConfig.SEED` is filled by **release** builds only and is empty everywhere else (see
+     * `app/build.gradle.kts`). That keeps the unit tests — which run the debug variant — identical
+     * on a laptop that has a `seed.txt` and on CI, which never does; and it keeps the `debugFast`
+     * QA build what it is, the way [DefaultRules.seededOff] does. Lines that don't parse are dropped
+     * here; `SeedFileTest` is what reports them.
+     */
+    val seedFile: SeedFile.Seed = SeedFile.parse(BuildConfig.SEED)
+
+    fun ruleStore(context: Context): RuleStore = PrefsRuleStore(context, seed, seedFile.apps)
+
+    /**
+     * The website blocklist with this build's seed domains applied. Applying is idempotent and
+     * add-once ([BlocklistStore.applySeed]), so every caller can go through here.
+     */
+    fun blocklistStore(context: Context): BlocklistStore =
+        BlocklistStore(context).also { it.applySeed(seedFile.sites) }
 
     /**
      * A live view of the persisted rules for [com.appblock.engine.BudgetCoordinator] (re-read each pass).

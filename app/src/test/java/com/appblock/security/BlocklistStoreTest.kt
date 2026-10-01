@@ -89,4 +89,50 @@ class BlocklistStoreTest {
         store.add("reddit.com")
         assertNotNull(store.sites().single().addedAtMillis)
     }
+
+    // ---- the seed file's sites (engine/SeedFile.kt): add once, never re-add, never remove ----
+
+    @Test fun `a seed adds its domains, normalized`() {
+        assertEquals(listOf("instagram.com", "weshop.ai"), store.applySeed(listOf("instagram.com", "https://www.weshop.ai/x")))
+        assertEquals(listOf("instagram.com", "weshop.ai"), store.domains())
+    }
+
+    @Test fun `applying the same seed again adds nothing`() {
+        store.applySeed(listOf("instagram.com"))
+        assertEquals(emptyList<String>(), store.applySeed(listOf("instagram.com")))
+        assertEquals(listOf("instagram.com"), store.domains())
+    }
+
+    /** Re-adding on every launch would let the file quietly overrule a 72-hour gated removal. */
+    @Test fun `a seeded domain removed through a window stays removed`() {
+        store.applySeed(listOf("instagram.com"))
+        store.removeIfAuthorized("instagram.com", authorized = true)
+        store.applySeed(listOf("instagram.com"))
+        assertTrue(BlocklistStore(app).also { it.applySeed(listOf("instagram.com")) }.domains().isEmpty())
+    }
+
+    /** A seed never removes: a domain missing from the file is simply not the file's business. */
+    @Test fun `a seed leaves hand-added domains alone`() {
+        store.add("reddit.com")
+        store.applySeed(listOf("instagram.com"))
+        assertEquals(listOf("instagram.com", "reddit.com"), store.domains())
+    }
+
+    @Test fun `a seed does not re-date a domain already blocked by hand`() {
+        app.getSharedPreferences("appblock_blocklist", 0).edit()
+            .putStringSet("domains", setOf("instagram.com")).commit()
+        BlocklistStore(app).applySeed(listOf("instagram.com"))
+        assertNull(BlocklistStore(app).sites().single().addedAtMillis)
+    }
+
+    @Test fun `a later seed line is applied without bringing back a removed one`() {
+        store.applySeed(listOf("instagram.com"))
+        store.removeIfAuthorized("instagram.com", authorized = true)
+        assertEquals(listOf("weshop.ai"), store.applySeed(listOf("instagram.com", "weshop.ai")))
+        assertEquals(listOf("weshop.ai"), store.domains())
+    }
+
+    @Test fun `non-domains in a seed are skipped`() {
+        assertEquals(listOf("instagram.com"), store.applySeed(listOf("cat videos", "instagram.com")))
+    }
 }

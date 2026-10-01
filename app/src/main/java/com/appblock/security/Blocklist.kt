@@ -5,8 +5,8 @@ import com.appblock.engine.DomainMatcher
 
 /**
  * The private website blocklist (CONSTRAINTS.md §2). Domains are entered on-device and stored
- * app-private — **never in the repo** (no committed seed file), so the list of what the user blocks
- * stays personal. Clearing app data wipes it, the same accepted friction-only limit as the rest of the
+ * app-private — **never in the repo**, so the list of what the user blocks stays personal. The one
+ * other source is the gitignored build-time seed ([applySeed]), which also never reaches the repo. Clearing app data wipes it, the same accepted friction-only limit as the rest of the
  * durable state (CONSTRAINTS §8).
  *
  * Asymmetric by design: [add] is instant (tightening). [remove] is gated — the caller must hold an
@@ -54,6 +54,27 @@ class BlocklistStore(context: Context) {
     }
 
     /**
+     * Adds each seed-file domain ([com.appblock.engine.SeedFile]) not yet applied on this install,
+     * then records it as applied. Returns the domains that were new to the record.
+     *
+     * **Add once, never re-add.** A seeded domain later removed through a websites window stays
+     * removed — re-adding it on every launch would let the file quietly overrule a 72-hour gated
+     * decision. And it never removes: a domain missing from the seed is simply not the seed's
+     * business. So applying a seed can only ever tighten, which is the direction that is free.
+     *
+     * A domain already on the list (added by hand) keeps its original date, via [add].
+     */
+    fun applySeed(seedDomains: Collection<String>): List<String> {
+        if (seedDomains.isEmpty()) return emptyList()
+        val applied = prefs.getStringSet(KEY_SEEDED, emptySet()).orEmpty()
+        val fresh = seedDomains.mapNotNull { DomainMatcher.normalizeDomain(it) }.distinct().filter { it !in applied }
+        if (fresh.isEmpty()) return emptyList()
+        fresh.forEach { add(it) }
+        prefs.edit().putStringSet(KEY_SEEDED, HashSet(applied + fresh)).apply()
+        return fresh
+    }
+
+    /**
      * Remove a domain — only succeeds when a websites unlock window is open ([authorized]). Returns
      * true if it was authorized and the domain was present. Loosening the blocklist any other way is
      * refused, mirroring the gated rule edits (CONSTRAINTS §6).
@@ -87,6 +108,9 @@ class BlocklistStore(context: Context) {
          * as undated rather than as a decode failure.
          */
         const val KEY_ADDED_PREFIX = "added_"
+
+        /** Seed domains already applied once — see [applySeed]. */
+        const val KEY_SEEDED = "seed_applied"
     }
 }
 

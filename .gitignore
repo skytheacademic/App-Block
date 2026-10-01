@@ -16,3 +16,6 @@ build/
 *.jks
 *.keystore
 keystore.properties
+
+# Private build-time seed (engine/SeedFile.kt) - personal blocklist, never committed (CONSTRAINTS §2)
+seed.txt

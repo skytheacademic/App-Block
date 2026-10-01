@@ -249,7 +249,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             exceptionWaitMs = ActiveRules.exceptionWaitMs,
         )
         unlockController = DurableUnlockController(this)
-        blocklistStore = BlocklistStore(this)
+        blocklistStore = ActiveRules.blocklistStore(this)
         witnessStore = SignalWitnessStore(this)
         omniboxWitnessStore = OmniboxWitnessStore(this)
         clockSettingsWatch?.stop()

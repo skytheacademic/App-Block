@@ -19,6 +19,17 @@ val keystoreProps = Properties().apply {
     if (f.exists()) FileInputStream(f).use { load(it) }
 }
 
+// The private seed (engine/SeedFile.kt): blocked sites + extra apps a fresh install comes up with.
+// Gitignored like the keystore — CONSTRAINTS §2 keeps the blocklist out of this public repo — and
+// absent on CI and every fresh clone, where it reads as empty and the build is exactly as before.
+// Compiled into the APK and never read on the phone from anywhere writable: that is the line between
+// this and the runtime import ConfigExport refuses. Release builds only (see `release` below).
+val seedText: String = rootProject.file("seed.txt").let { if (it.exists()) it.readText() else "" }
+
+/** [s] as a Java string literal, for buildConfigField. */
+fun javaString(s: String): String =
+    "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\r", "").replace("\n", "\\n") + "\""
+
 android {
     namespace = "com.appblock"
     compileSdk = 36
@@ -36,6 +47,12 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 12 / 0.10.0: the seed file (`engine/SeedFile.kt`). A gitignored `seed.txt` at the repo root
+        // — blocked sites and picker-style apps — compiled into release builds only, so a reinstall
+        // comes up with them instead of a config rebuilt from screenshots (the 2026-08-04 request).
+        // Each line applies once per install: added if absent, never re-added after a gated removal,
+        // never overwriting, never removing — so installing a build that carries it only tightens.
+        //
         // 11 / 0.9.1: the gesture's twin of the button list. The 0.9.0 phone session (2026-09-10)
         // verified the button guard across two restarts — no tab after either, and the button key's
         // last write after boot is ours — and the same restarts showed `accessibility_gesture_targets`
@@ -105,11 +122,14 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 11
-        versionName = "0.9.1"
+        versionCode = 12
+        versionName = "0.10.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
+        // Empty for debug + debugFast on purpose: unit tests run the debug variant and must not change
+        // with whether this laptop has a seed.txt. Only `release` carries it.
+        buildConfigField("String", "SEED", "\"\"")
     }
 
     signingConfigs {
@@ -139,6 +159,7 @@ android {
         release {
             // R8 on: smaller APK, and stripped metadata makes on-device bypass tinkering harder.
             isMinifyEnabled = true
+            buildConfigField("String", "SEED", javaString(seedText))
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
