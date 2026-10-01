@@ -79,12 +79,23 @@ class LockStore(context: Context) {
      * — the Create button is simply not shown once a key exists — and a store that would happily
      * overwrite the verifier is a store one stray code path away from a free re-key.
      */
-    fun setKey(generated: GeneratedKey): Boolean {
+    fun setKey(generated: GeneratedKey, nowMs: Long = System.currentTimeMillis()): Boolean {
         if (isConfigured()) return false
         val keyHash = KeyAuthority.create(generated.code, generated.salt, Sha256Hasher())
-        prefs.edit().putString(KEY_HASH, EngineCodec.encodeKeyHash(keyHash)).apply()
+        prefs.edit()
+            .putString(KEY_HASH, EngineCodec.encodeKeyHash(keyHash))
+            .putLong(KEY_SET_AT, nowMs)
+            .apply()
         return true
     }
+
+    /**
+     * Wall-clock time the key was created, for the Lock tab's `Key set 12 Jul`. Null for a key created
+     * before 0.10.2, which never recorded it — the row then reads plain `Key set`, as it always did.
+     * Display only: nothing decides anything from it, so a wrong clock costs a wrong date and no more.
+     */
+    fun keySetAtMs(): Long? =
+        if (isConfigured() && prefs.contains(KEY_SET_AT)) prefs.getLong(KEY_SET_AT, 0L) else null
 
     /** True iff [code] matches the stored key. False when no key is configured. */
     fun verify(code: String): Boolean {
@@ -95,5 +106,6 @@ class LockStore(context: Context) {
     private companion object {
         const val PREFS = "appblock_lock"
         const val KEY_HASH = "durable_key_hash"
+        const val KEY_SET_AT = "durable_key_set_at"
     }
 }

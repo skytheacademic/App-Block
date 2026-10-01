@@ -262,6 +262,7 @@
     <string name="lock_accept_one">Accept one change</string>
     <string name="lock_protection">protection</string>
     <string name="lock_key_set">Key set</string>
+    <string name="lock_key_set_on">Key set %1$s</string>
     <string name="lock_key_missing">No key set</string>
     <string name="lock_key_hash_only">hash only</string>
     <string name="lock_saved">Saved.</string>

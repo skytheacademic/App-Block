@@ -1,6 +1,7 @@
 package com.appblock
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -12,6 +13,7 @@ import androidx.compose.runtime.mutableStateOf
 import com.appblock.service.ShortcutTargetGuard
 import com.appblock.service.Watchdog
 import com.appblock.ui.AppRoot
+import com.appblock.ui.AppTab
 import com.appblock.ui.theme.AppBlockTheme
 import com.appblock.util.accessibilitySettingsIntent
 import com.appblock.util.areNotificationsEnabled
@@ -43,6 +45,8 @@ class MainActivity : ComponentActivity() {
     // over adb. Only chooses which of two true sentences the shortcut row prints; see
     // ShortcutTargetGuard for why a laptop is the whole mechanism.
     private val shortcutSelfClearing = mutableStateOf(false)
+    // A tab a notification asked for (see [lockTabIntent]); AppRoot switches to it and clears it.
+    private val requestedTab = mutableStateOf<AppTab?>(null)
 
     // The watchdog's "blocking died" notification needs this on Android 13+; a denial just means no
     // nag — which the Lock tab now says out loud. Re-read on the result so the row flips at once.
@@ -53,6 +57,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Only on a fresh start: a recreated activity (rotation) still carries the launching intent,
+        // and re-reading it would yank the user back to Lock from whatever tab they had moved to.
+        if (savedInstanceState == null) requestedTab.value = tabFrom(intent)
         Watchdog.schedule(this)
         if (Build.VERSION.SDK_INT >= 33) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -67,6 +74,8 @@ class MainActivity : ComponentActivity() {
                     notificationsEnabled = notificationsEnabled.value,
                     shortcutClaimed = shortcutClaimed.value,
                     shortcutSelfClearing = shortcutSelfClearing.value,
+                    requestedTab = requestedTab.value,
+                    onRequestedTabShown = { requestedTab.value = null },
                     onOpenAccessibility = { startActivity(accessibilitySettingsIntent()) },
                     onOpenOverlay = { startActivity(overlayPermissionIntent(this)) },
                     onOpenDateSettings = { startActivity(Intent(Settings.ACTION_DATE_SETTINGS)) },
@@ -76,6 +85,13 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /** The app was already open and a notification was tapped — see [lockTabIntent]'s flags. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        tabFrom(intent)?.let { requestedTab.value = it }
     }
 
     override fun onResume() {
@@ -114,5 +130,28 @@ class MainActivity : ComponentActivity() {
         } else {
             startActivity(notificationSettingsIntent(this))
         }
+    }
+
+    companion object {
+        /** Names an [AppTab] to open on. Only [lockTabIntent] sets it; anything else is ignored. */
+        const val EXTRA_OPEN_TAB = "com.appblock.extra.OPEN_TAB"
+
+        /** The tab an intent asks for, or null — an unknown or missing name opens the app as usual. */
+        fun tabFrom(intent: Intent?): AppTab? =
+            intent?.getStringExtra(EXTRA_OPEN_TAB)?.let { name -> AppTab.entries.firstOrNull { it.name == name } }
+
+        /**
+         * Opens the app on the Lock tab. For the notifications whose subject lives there: the watchdog's
+         * "blocking is off" (the protection list) and "change window open" (the window itself). They used
+         * to open a bare MainActivity and rely on AppRoot guessing the tab from the unlock state, which
+         * lands on Today for a watchdog nag — the one tab that does not show what is wrong.
+         *
+         * CLEAR_TOP + SINGLE_TOP so a tap while the app is open reuses that screen ([onNewIntent]) rather
+         * than stacking a second copy of it.
+         */
+        fun lockTabIntent(context: Context): Intent =
+            Intent(context, MainActivity::class.java)
+                .putExtra(EXTRA_OPEN_TAB, AppTab.LOCK.name)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     }
 }

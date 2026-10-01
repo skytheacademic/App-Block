@@ -42,8 +42,23 @@ package com.appblock.engine
  * removed the moment it is seen as an application. Without the second half, a launcher that happened to
  * be sampled as system chrome once would be muted forever — turning a nuisance into the lockout this
  * class is built to avoid.
+ *
+ * ## Why it is saved (0.10.2)
+ *
+ * In memory only, the memo started empty after every install, update and reboot, and until the volume
+ * panel had been seen once *with nothing blocked*, a press over a block dropped the overlay. Measured
+ * 2026-10-01 on the S25: **3 of 16 presses cold, 0 of 24 once learned.** The block screen is most likely
+ * to be up right after a reboot, which is exactly when the memo used to know nothing.
+ *
+ * So the service saves [snapshot] whenever [note] learns something and [restore]s it on connect. Saving
+ * cannot loosen anything, because [restore] keeps the safety property above: it **merges** with what is
+ * already known and re-applies "application outranks system" across both, so a saved system sighting
+ * can never mute a package seen as an application in this lifetime, or vice versa.
  */
 class WindowKindMemo {
+
+    /** What is worth keeping across a restart: both sets, because the application set is what vetoes. */
+    data class Snapshot(val application: Set<String>, val systemOnly: Set<String>)
 
     private val application = HashSet<String>()
     private val systemOnly = HashSet<String>()
@@ -54,15 +69,36 @@ class WindowKindMemo {
      *
      * [applicationType] is `AccessibilityWindowInfo.TYPE_APPLICATION`, passed in so this class stays
      * free of Android imports and testable on the JVM.
+     *
+     * Returns true when either set changed — the caller's cue to save. Almost every event teaches
+     * nothing new, so this keeps the save off the per-event path.
      */
-    fun note(packageName: String, windowType: Int?, applicationType: Int) {
-        if (windowType == null) return
-        if (windowType == applicationType) {
-            application.add(packageName)
-            systemOnly.remove(packageName)
+    fun note(packageName: String, windowType: Int?, applicationType: Int): Boolean {
+        if (windowType == null) return false
+        return if (windowType == applicationType) {
+            val added = application.add(packageName)
+            systemOnly.remove(packageName) || added
         } else if (packageName !in application) {
             systemOnly.add(packageName)
+        } else {
+            false
         }
+    }
+
+    /** Both sets, copied — what the service saves. */
+    fun snapshot(): Snapshot = Snapshot(application.toSet(), systemOnly.toSet())
+
+    /**
+     * Merge a saved [Snapshot] into what this lifetime has already learned.
+     *
+     * A merge, not a replace, because the service may have noted events before the saved copy was
+     * read. Application evidence from **either** side clears system evidence from **either** side,
+     * which is the same rule [note] applies one sighting at a time.
+     */
+    fun restore(saved: Snapshot) {
+        application.addAll(saved.application)
+        systemOnly.addAll(saved.systemOnly)
+        systemOnly.removeAll(application)
     }
 
     /**

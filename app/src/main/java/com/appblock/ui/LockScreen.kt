@@ -85,6 +85,8 @@ fun LockScreen(
     looseningCount: Int,
     protection: List<ProtectionItem>,
     keyConfigured: Boolean,
+    /** `12 Jul` — when the key was made; null when that was never recorded (keys before 0.10.2). */
+    keySetDay: String?,
     onCreateKey: () -> Unit,
     onStartWindow: () -> Unit,
     onCancelWindow: () -> Unit,
@@ -171,7 +173,8 @@ fun LockScreen(
                 Spacer(Modifier.width(11.dp))
                 Text(
                     text = if (keyConfigured) {
-                        stringResource(R.string.lock_key_set)
+                        keySetDay?.let { stringResource(R.string.lock_key_set_on, it) }
+                            ?: stringResource(R.string.lock_key_set)
                     } else {
                         stringResource(R.string.lock_key_missing)
                     },

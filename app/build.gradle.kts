@@ -47,6 +47,12 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 18 / 0.10.2: desk polish, no phone check yet. The volume-panel memo (WindowKindMemo) is saved
+        // and restored, so a volume press over a block right after a reboot or update no longer drops
+        // the overlay (3/16 presses cold on 0.10.1). The Lock tab says when the key was made, and the
+        // watchdog and change-window notifications open on Lock. The display census marks a just-plugged
+        // display `settling=` and a just-unplugged one `gone=` instead of reading as a failure.
+        //
         // 17 / 0.10.1: the block lands faster. Owner, 2026-10-01: a blocked app is visible before the
         // block screen. Measured with 10 adb launches of a blocked app per build: the overlay's first
         // frame at ~210 ms after launch, the app's own at ~60. Two causes, two fixes:
@@ -131,8 +137,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 17
-        versionName = "0.10.1"
+        versionCode = 18
+        versionName = "0.10.2"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

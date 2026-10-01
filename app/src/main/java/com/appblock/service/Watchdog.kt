@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -170,7 +169,7 @@ object Watchdog {
         val openApp = PendingIntent.getActivity(
             context,
             0,
-            Intent(context, MainActivity::class.java),
+            MainActivity.lockTabIntent(context),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val text = context.getString(
