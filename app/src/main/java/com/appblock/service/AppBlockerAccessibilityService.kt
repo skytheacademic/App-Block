@@ -35,6 +35,7 @@ import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
 import com.appblock.engine.AddressWatch
 import com.appblock.engine.AppTargets
+import com.appblock.engine.AutoExit
 import com.appblock.engine.BlockFacts
 import com.appblock.engine.BlockReason
 import com.appblock.engine.BrowserPolicy
@@ -84,7 +85,9 @@ import com.appblock.util.overlayAppOpAllows
  *     omnibox URL is matched against the private blocklist; any *other* browser is blocked outright.
  *
  * The decision itself is the pure engine's; this class maps it to the overlay. If the overlay can't draw
- * (permission revoked mid-session), blocking falls back to kicking the user Home every tick.
+ * (permission revoked mid-session), blocking falls back to kicking the user Home every tick. A block
+ * screen that did draw takes its own Close exit [AutoExit.DEFAULT_DWELL_MS] after it went up, so a
+ * blocked app ends at the home screen untouched ([autoExit]).
  *
  * Still the weak tier: force-stop / uninstall defeat it — that's what the watchdog notification and the
  * optional Device Owner tier are for (see STATUS.md).
@@ -203,6 +206,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * does not count as moving on.
      */
     private val holds = DisplayHolds<Foreground>()
+
+    /** Each covered display's countdown to its automatic exit — see [AutoExit] and [runAutoExits]. */
+    private val autoExit = AutoExit()
+    private val autoExitRunnable = Runnable { runCatching { runAutoExits() } }
 
     /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
     private val windowKinds = WindowKindMemo()
@@ -543,6 +550,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         for ((id, read) in effective) {
             if (id in coveredNow && read.blockable) holds.seed(id, read, read.holdPackages, now)
         }
+        scheduleAutoExits(now)
         diagnoseDisplays()
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
@@ -1680,7 +1688,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Leave whatever was blocked, when the user taps the overlay's exit.
+     * Leave whatever was blocked on [displayId]: the Close button's exit, and the automatic one.
      *
      * An app block means "leave this app" → Home. A blocked *site* means "leave this page", and getting
      * that right took two attempts on hardware (Gate D, 2026-07-24):
@@ -1696,11 +1704,64 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * So steer the browser to [NEUTRAL_URL] instead. It's a destination no redirect can bounce off,
      * it needs no network and no third-party page, and it leaves the tab in a state that won't
      * re-block on the next launch. Falls back to Home if the browser refuses the intent.
+     *
+     * ⚠️ **Where to steer is read before the overlay comes down.** [DisplayOverlays.hideOn] drops the
+     * attachment record, and the steering lives in that record. Close used to hide first and ask second,
+     * so from the multi-display change (0.7.0) until 0.11.0 `contentOn` always answered null and a blocked
+     * site's Close went Home — the lock-out loop above, back through a reordering.
+     *
+     * The overlay still comes down **before** the exit, as it always has: behind an opaque overlay the
+     * browser's tree is pruned, so the occlusion hold would keep a steered tab covered for as long as the
+     * browser stayed in front. Only the user leaving the browser releases that hold, and a steer never
+     * does.
+     *
+     * [aimed] is the automatic exit's: with no tap there is no input focus on [displayId] to carry the
+     * global HOME there, so a display that is not the active one gets a HOME intent of its own instead
+     * ([AutoExit.globalHomeLands]). Close passes false and keeps its global HOME, which the tap has
+     * already aimed.
      */
-    private fun exitOverlay(displayId: Int) {
+    private fun exitOverlay(displayId: Int, aimed: Boolean) {
         val pkg = overlays.contentOn(displayId)?.exitBrowserPkg
+        // Per display, never global: tearing down every overlay on one exit would hand back a repeatable
+        // free window on the other display.
+        overlays.hideOn(displayId)
         if (pkg != null && navigateToNeutral(pkg, displayId)) return
-        performGlobalAction(GLOBAL_ACTION_HOME)
+        if (!aimed || AutoExit.globalHomeLands(displayId, lastActiveDisplayId)) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        } else {
+            launchHomeOn(displayId)
+        }
+    }
+
+    /**
+     * Start each newly covered display's dwell, forget the uncovered ones', and wake for the next due.
+     *
+     * Called at the end of every [pump], which is the only place coverage changes on purpose; Close and a
+     * platform detach change it too, and the next [runAutoExits] reads that from [DisplayOverlays.covered]
+     * rather than trusting the last pass.
+     */
+    private fun scheduleAutoExits(nowMs: Long) {
+        autoExit.observe(overlays.covered(), nowMs)
+        handler.removeCallbacks(autoExitRunnable)
+        autoExit.delayUntilNext(nowMs)?.let { handler.postDelayed(autoExitRunnable, it) }
+    }
+
+    /**
+     * Take the exit on every display whose block screen has been up for the dwell.
+     *
+     * Coverage is re-read first, so a block screen that was closed by hand or lifted by the engine since
+     * the last pass is never exited a second time. If an exit does not land, the overlay is already
+     * down, the blocked app is still on screen, and the window change that removal fires brings the next
+     * pass, which covers it again and starts a fresh dwell.
+     */
+    private fun runAutoExits() {
+        val now = SystemClock.elapsedRealtime()
+        autoExit.observe(overlays.covered(), now)
+        for (id in autoExit.due(now)) {
+            autoExit.fired(id)
+            exitOverlay(id, aimed = true)
+        }
+        scheduleAutoExits(now)
     }
 
     /**
@@ -1799,10 +1860,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 view.findViewById<TextView>(R.id.block_message).text = content.message
                 writeFactRows(view, content.facts)
                 view.findViewById<Button>(R.id.block_close).setOnClickListener {
-                    // Per display, never global: tearing down every overlay on one Close would hand
-                    // back a repeatable free window on the other display.
-                    overlays.hideOn(displayId)
-                    exitOverlay(displayId)
+                    exitOverlay(displayId, aimed = false)
                 }
                 // The only channel that can tell us the window went away without us asking, and the
                 // reason `overlays.covered()` is a fact rather than a memory of one. Registered at
@@ -1928,6 +1986,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         displayListener = null
         stopTicking()
         handler.removeCallbacks(pumpRunnable)
+        handler.removeCallbacks(autoExitRunnable)
         handler.removeCallbacks(settleRecheck)
         overlays.removeAll()
         super.onDestroy()
