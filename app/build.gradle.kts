@@ -47,6 +47,15 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 19 / 0.11.0: a block bounces to the home screen and then shows why. The block screen still
+        // covers the instant a blocked thing appears, then sends Home at once with itself still up (the
+        // same as pressing Home on it, so the app never shows), and the reason and the two fact rows are
+        // left on the home screen as a small card for 4 s or until tapped (engine/AutoExit.kt,
+        // overlay_reason_card.xml). A blocked site is steered to the blank page first, then Home. On a
+        // DeX monitor without input focus the Home is aimed at that display. Also fixes Close on a
+        // blocked site, which had been going Home instead of steering the tab since 0.7.0 (the steer was
+        // read after the overlay record was dropped). No phone check yet.
+        //
         // 18 / 0.10.2: desk polish, no phone check yet. The volume-panel memo (WindowKindMemo) is saved
         // and restored, so a volume press over a block right after a reboot or update no longer drops
         // the overlay (3/16 presses cold on 0.10.1). The Lock tab says when the key was made, and the
@@ -137,8 +146,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 18
-        versionName = "0.10.2"
+        versionCode = 19
+        versionName = "0.11.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

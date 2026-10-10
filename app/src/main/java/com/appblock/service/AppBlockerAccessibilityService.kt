@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.WindowManager
@@ -35,6 +36,7 @@ import com.appblock.data.SignalWitnessStore
 import com.appblock.engine.Access
 import com.appblock.engine.AddressWatch
 import com.appblock.engine.AppTargets
+import com.appblock.engine.AutoExit
 import com.appblock.engine.BlockFacts
 import com.appblock.engine.BlockReason
 import com.appblock.engine.BrowserPolicy
@@ -84,7 +86,9 @@ import com.appblock.util.overlayAppOpAllows
  *     omnibox URL is matched against the private blocklist; any *other* browser is blocked outright.
  *
  * The decision itself is the pure engine's; this class maps it to the overlay. If the overlay can't draw
- * (permission revoked mid-session), blocking falls back to kicking the user Home every tick.
+ * (permission revoked mid-session), blocking falls back to kicking the user Home every tick. A block
+ * screen that did draw sends the user Home as soon as it is up and leaves the reason behind as a small
+ * card on the home screen ([autoExit], [showReasonCard]).
  *
  * Still the weak tier: force-stop / uninstall defeat it — that's what the watchdog notification and the
  * optional Device Owner tier are for (see STATUS.md).
@@ -203,6 +207,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * does not count as moving on.
      */
     private val holds = DisplayHolds<Foreground>()
+
+    /** Which covered displays have been sent Home, and when — see [AutoExit] and [runAutoExits]. */
+    private val autoExit = AutoExit()
+    private val autoExitRunnable = Runnable { runCatching { runAutoExits() } }
+
+    /** The reason card on each display — see [showReasonCard]. */
+    private val reasonCards = HashMap<Int, ReasonCard>()
 
     /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
     private val windowKinds = WindowKindMemo()
@@ -543,6 +554,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         for ((id, read) in effective) {
             if (id in coveredNow && read.blockable) holds.seed(id, read, read.holdPackages, now)
         }
+        scheduleAutoExits(now)
         diagnoseDisplays()
         if (decision.target != null || surfaceAppVisible || browserVisible) startTicking() else stopTicking()
     }
@@ -1680,7 +1692,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Leave whatever was blocked, when the user taps the overlay's exit.
+     * Leave whatever was blocked, when the user taps the overlay's Close.
      *
      * An app block means "leave this app" → Home. A blocked *site* means "leave this page", and getting
      * that right took two attempts on hardware (Gate D, 2026-07-24):
@@ -1696,12 +1708,144 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * So steer the browser to [NEUTRAL_URL] instead. It's a destination no redirect can bounce off,
      * it needs no network and no third-party page, and it leaves the tab in a state that won't
      * re-block on the next launch. Falls back to Home if the browser refuses the intent.
+     *
+     * ⚠️ **Where to steer is read before the overlay comes down.** [DisplayOverlays.hideOn] drops the
+     * attachment record, and the steering lives in that record. Close used to hide first and ask second,
+     * so from the multi-display change (0.7.0) until 0.11.0 `contentOn` always answered null and a blocked
+     * site's Close went Home — the lock-out loop above, back through a reordering.
+     *
+     * The overlay comes down **before** the steer, as it always has: behind an opaque overlay the
+     * browser's tree is pruned, so the occlusion hold would keep a steered tab covered for as long as the
+     * browser stayed in front. Only the user leaving the browser releases that hold, and a steer alone
+     * never does. (The automatic exit can leave it up, because it always follows with Home — see
+     * [autoExitOverlay].)
      */
     private fun exitOverlay(displayId: Int) {
         val pkg = overlays.contentOn(displayId)?.exitBrowserPkg
+        // Per display, never global: tearing down every overlay on one Close would hand back a
+        // repeatable free window on the other display.
+        overlays.hideOn(displayId)
         if (pkg != null && navigateToNeutral(pkg, displayId)) return
         performGlobalAction(GLOBAL_ACTION_HOME)
     }
+
+    /**
+     * The automatic exit: send [displayId] Home **with its block screen still up**, then show why.
+     *
+     * Leaving the overlay up is the point. Home behind the overlay is the same as the user pressing Home
+     * on it, the path Gate F measured releasing 5/5: the launcher's window event is a package the hold
+     * is not about, so the next pass drops the overlay. Taking it down first, as Close does, would show
+     * the blocked app, tappable, for the length of the Home animation.
+     *
+     * A blocked site is steered to [NEUTRAL_URL] **and then** sent Home. The steer still matters (Home
+     * alone leaves the blocked page in the tab, which re-blocks on the next launch), and the Home is what
+     * releases the hold, which a steer alone never does — the reason Close has to hide first and this
+     * does not. If the browser comes back in front of the launcher anyway, the block screen is still up
+     * over a blank tab and [AutoExit]'s retry sends it Home again.
+     *
+     * Home is aimed: an exit with no tap carries no input focus to [displayId], so a display that is not
+     * the active one gets a HOME intent of its own ([AutoExit.globalHomeLands]).
+     */
+    private fun autoExitOverlay(displayId: Int) {
+        val content = overlays.contentOn(displayId) ?: return
+        content.exitBrowserPkg?.let { navigateToNeutral(it, displayId) }
+        val global = AutoExit.globalHomeLands(displayId, lastActiveDisplayId)
+        if (global) performGlobalAction(GLOBAL_ACTION_HOME) else launchHomeOn(displayId)
+        showReasonCard(displayId, content)
+        if (BuildConfig.DEBUG || BuildConfig.FAST_CAPS) {
+            android.util.Log.d(
+                EXIT_TAG,
+                "exit d=$displayId key=${content.key} steer=${content.exitBrowserPkg} " +
+                    "home=${if (global) "global" else "aimed"} active=$lastActiveDisplayId",
+            )
+        }
+    }
+
+    /**
+     * Note each newly covered display, forget the uncovered ones, and wake for the next exit due.
+     *
+     * Called at the end of every [pump], which is the only place coverage changes on purpose; Close and a
+     * platform detach change it too, and [runAutoExits] reads that from [DisplayOverlays.covered] rather
+     * than trusting the last pass.
+     */
+    private fun scheduleAutoExits(nowMs: Long) {
+        autoExit.observe(overlays.covered(), nowMs)
+        handler.removeCallbacks(autoExitRunnable)
+        autoExit.delayUntilNext(nowMs)?.let { handler.postDelayed(autoExitRunnable, it) }
+    }
+
+    /**
+     * Send Home every display whose block screen is due: each new one at once, and any still up
+     * [AutoExit.DEFAULT_RETRY_MS] after its last exit.
+     *
+     * Posted rather than run inside [pump], so the overlay that pass just added is queued to draw before
+     * the Home goes out. Coverage is re-read first, so a block screen that came down since that pass is
+     * never exited a second time.
+     */
+    private fun runAutoExits() {
+        val now = SystemClock.elapsedRealtime()
+        autoExit.observe(overlays.covered(), now)
+        for (id in autoExit.due(now)) {
+            autoExit.fired(id, now)
+            autoExitOverlay(id)
+        }
+        scheduleAutoExits(now)
+    }
+
+    /** One display's reason card, the window manager that added it, and its own timeout. */
+    private class ReasonCard(val windowManager: WindowManager, val view: View, val dismiss: Runnable)
+
+    /**
+     * The reason, left on the home screen after an automatic exit: the block screen's message and its
+     * two fact rows, as a card at the bottom of [displayId] for [REASON_CARD_MS] or until it is tapped.
+     *
+     * It is a courtesy, never a barrier, so it is built to stay out of the way of the blocker and the
+     * user alike:
+     *  - **Not focusable, not touch-modal.** Keys and Back go to the launcher, and a touch anywhere off
+     *    the card reaches the launcher as if the card were not there. Tapping the card dismisses it.
+     *  - **Not part of [overlays].** It never counts as coverage, so nothing in [DisplayCoverage] or the
+     *    occlusion hold can mistake it for a block screen, and its window events are our own package's,
+     *    which [noteForegroundPackage] already ignores.
+     *  - **Best effort.** If it cannot be drawn, nothing else changes; the exit has already happened.
+     *
+     * One per display: a newer exit replaces the card rather than stacking another under it.
+     */
+    private fun showReasonCard(displayId: Int, content: DisplayOverlays.Content<FactRows>) {
+        hideReasonCard(displayId)
+        val wm =
+            (if (displayId == DisplayCensus.DEFAULT_DISPLAY) windowManager else secondaryWindowManager(displayId))
+                ?: return
+        val view = inflateOn(displayId, R.layout.overlay_reason_card) ?: return
+        runCatching {
+            view.findViewById<TextView>(R.id.block_message).text = content.message
+            writeFactRows(view, content.facts)
+        }
+        view.setOnClickListener { hideReasonCard(displayId) }
+        if (!runCatching { wm.addView(view, reasonCardParams()) }.isSuccess) return
+        val dismiss = Runnable { if (reasonCards[displayId]?.view === view) hideReasonCard(displayId) }
+        reasonCards[displayId] = ReasonCard(wm, view, dismiss)
+        handler.postDelayed(dismiss, REASON_CARD_MS)
+    }
+
+    private fun hideReasonCard(displayId: Int) {
+        reasonCards.remove(displayId)?.let { card ->
+            handler.removeCallbacks(card.dismiss)
+            runCatching { card.windowManager.removeView(card.view) }
+        }
+    }
+
+    /**
+     * The reason card's window: full width, as tall as its text, at the bottom of the screen. Translucent
+     * so its rounded corners show the launcher, and kept clear of the navigation bar by the platform's own
+     * default insets for an overlay window.
+     */
+    private fun reasonCardParams() = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+        PixelFormat.TRANSLUCENT,
+    ).apply { gravity = Gravity.BOTTOM }
 
     /**
      * Point [pkg] at [NEUTRAL_URL] **on [displayId]**; false if it wouldn't take the intent (caller
@@ -1785,25 +1929,12 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * But a render nicety is never traded for a missing overlay: if the display context throws, this
      * falls back to the service context and still produces a view.
      */
-    // InflateParams: the inflated view has no parent by design — it is handed to WindowManager.
-    @SuppressLint("InflateParams")
-    private fun inflateOverlay(displayId: Int, content: DisplayOverlays.Content<FactRows>): View? {
-        val context =
-            if (displayId == DisplayCensus.DEFAULT_DISPLAY) this
-            else runCatching { displayManager.getDisplay(displayId)?.let(::createDisplayContext) }
-                .getOrNull() ?: this
-        return runCatching { LayoutInflater.from(context).inflate(R.layout.overlay_block, null) }
-            .recoverCatching { LayoutInflater.from(this).inflate(R.layout.overlay_block, null) }
-            .getOrNull()
+    private fun inflateOverlay(displayId: Int, content: DisplayOverlays.Content<FactRows>): View? =
+        inflateOn(displayId, R.layout.overlay_block)
             ?.also { view ->
                 view.findViewById<TextView>(R.id.block_message).text = content.message
                 writeFactRows(view, content.facts)
-                view.findViewById<Button>(R.id.block_close).setOnClickListener {
-                    // Per display, never global: tearing down every overlay on one Close would hand
-                    // back a repeatable free window on the other display.
-                    overlays.hideOn(displayId)
-                    exitOverlay(displayId)
-                }
+                view.findViewById<Button>(R.id.block_close).setOnClickListener { exitOverlay(displayId) }
                 // The only channel that can tell us the window went away without us asking, and the
                 // reason `overlays.covered()` is a fact rather than a memory of one. Registered at
                 // inflate so it is in place before `addView` — a listener added after the add would
@@ -1816,6 +1947,18 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                     override fun onViewDetachedFromWindow(v: View) = overlays.noteDetached(displayId, v)
                 })
             }
+
+    /** Inflate [layout] for [displayId] with that display's own context — see [inflateOverlay]. */
+    // InflateParams: the inflated view has no parent by design — it is handed to WindowManager.
+    @SuppressLint("InflateParams")
+    private fun inflateOn(displayId: Int, layout: Int): View? {
+        val context =
+            if (displayId == DisplayCensus.DEFAULT_DISPLAY) this
+            else runCatching { displayManager.getDisplay(displayId)?.let(::createDisplayContext) }
+                .getOrNull() ?: this
+        return runCatching { LayoutInflater.from(context).inflate(layout, null) }
+            .recoverCatching { LayoutInflater.from(this).inflate(layout, null) }
+            .getOrNull()
     }
 
     /** The overlay's explanation, matched to why the engine blocked a budgeted target. */
@@ -1928,7 +2071,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         displayListener = null
         stopTicking()
         handler.removeCallbacks(pumpRunnable)
+        handler.removeCallbacks(autoExitRunnable)
         handler.removeCallbacks(settleRecheck)
+        reasonCards.keys.toList().forEach(::hideReasonCard)
         overlays.removeAll()
         super.onDestroy()
     }
@@ -1987,6 +2132,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         /** Per-display census — see [diagnoseDisplays]. Its own tag so `-s AppBlockDsp` isolates it. */
         private const val DSP_TAG = "AppBlockDsp"
         private const val EVT_TAG = "AppBlockEvt"
+        /** One line per automatic exit — see [autoExitOverlay]. `adb logcat -s AppBlockExit`. */
+        private const val EXIT_TAG = "AppBlockExit"
+        /** How long the reason card stays on the home screen unless tapped — see [showReasonCard]. */
+        private const val REASON_CARD_MS = 4_000L
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
          *  as a VIEW intent and lands on a blank page. No network, no third-party site, and nothing a
          *  redirect can bounce off. See [exitOverlay]. */
