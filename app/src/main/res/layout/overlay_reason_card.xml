@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The reason card: what the block screen said, left on the home screen after the automatic exit sends
+  the user there. The block screen covers for a moment and leaves; this is where the reason is read.
+
+  The same words as overlay_block, smaller: "Blocked", the reason line, the accent rule and the two
+  fact rows (when it lifts on its own, the way through). It shares five of that layout's six ids
+  (block_message and the four fact TextViews) so the service binds both with the same code. There is
+  no Close: a tap anywhere on the card dismisses it, and it leaves by itself after a few seconds.
+
+  The outer frame is the margin between the card and the screen edges (hence UselessParent: a window
+  has no layout margins, so the frame's padding is what makes them). It is transparent and part of
+  the window, so a tap in it dismisses the card too rather than reaching the launcher.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="UselessParent"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingBottom="16dp"
+    android:clickable="true"
+    android:focusable="false">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/bg_reason_card"
+        android:paddingStart="20dp"
+        android:paddingEnd="20dp"
+        android:paddingTop="18dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/block_title"
+            android:textColor="@color/lamp_text"
+            android:textSize="22sp"
+            android:fontFamily="@font/inter_medium"
+            android:letterSpacing="-0.02"
+            android:includeFontPadding="false" />
+
+        <TextView
+            android:id="@+id/block_message"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/block_message"
+            android:textColor="@color/lamp_neutral_400"
+            android:textSize="14sp"
+            android:fontFamily="@font/inter_regular" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="14dp"
+            android:layout_marginBottom="2dp"
+            android:background="@drawable/block_rule" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="9dp"
+            android:paddingBottom="9dp">
+
+            <TextView
+                android:id="@+id/block_fact_when_label"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/block_fact_when_resets"
+                android:textColor="@color/lamp_neutral_500"
+                android:textSize="12.5sp"
+                android:fontFamily="@font/inter_regular" />
+
+            <TextView
+                android:id="@+id/block_fact_when_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/block_fact_no_hours"
+                android:textColor="@color/lamp_text"
+                android:textSize="12.5sp"
+                android:fontFamily="@font/inter_regular"
+                android:fontFeatureSettings="tnum" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/lamp_row_rule" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingTop="9dp"
+            android:paddingBottom="9dp">
+
+            <TextView
+                android:id="@+id/block_fact_route_label"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/block_fact_route_more_time"
+                android:textColor="@color/lamp_neutral_500"
+                android:textSize="12.5sp"
+                android:fontFamily="@font/inter_regular" />
+
+            <TextView
+                android:id="@+id/block_fact_route_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/block_fact_not_from_phone"
+                android:textColor="@color/lamp_neutral_400"
+                android:textSize="12.5sp"
+                android:fontFamily="@font/inter_regular" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

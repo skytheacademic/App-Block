@@ -47,12 +47,14 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
-        // 22 / 0.11.0: the block screen leaves on its own. Three seconds after it goes up it takes the
-        // Close button's exit by itself (engine/AutoExit.kt), so a blocked app ends at the home screen
-        // without a tap: Home for an app, the blank page for a blocked site. On a DeX monitor without
-        // input focus the Home is aimed at that display, since the global one would kick the phone.
-        // Also fixes Close on a blocked site, which had been going Home instead of steering the tab
-        // since 0.7.0 (the steer was read after the overlay record was dropped). No phone check yet.
+        // 22 / 0.11.0: a block bounces to the home screen and then shows why. The block screen still
+        // covers the instant a blocked thing appears, then sends Home at once with itself still up (the
+        // same as pressing Home on it, so the app never shows), and the reason and the two fact rows are
+        // left on the home screen as a small card for 4 s or until tapped (engine/AutoExit.kt,
+        // overlay_reason_card.xml). A blocked site is steered to the blank page first, then Home. On a
+        // DeX monitor without input focus the Home is aimed at that display. Also fixes Close on a
+        // blocked site, which had been going Home instead of steering the tab since 0.7.0 (the steer was
+        // read after the overlay record was dropped). No phone check yet.
         //
         // 21 / 0.10.5: the wireless-debugging screen is no longer bounced (owner decision, 2026-10-30),
         // so adb can pair over Wi-Fi with no cable. Shizuku stays always-blocked.

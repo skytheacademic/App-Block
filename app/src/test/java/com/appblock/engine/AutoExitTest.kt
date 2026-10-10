@@ -7,110 +7,112 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The block screen's automatic exit.
+ * The block screen's automatic exit: Home as soon as it is up, again only if it is still up later.
  *
  * The two directions this fails:
- *  - **Exits too early or too often** → the block screen comes down before it can be read, or a display
- *    that keeps coming back is kicked on every pass instead of once per dwell.
- *  - **Never exits** → the block screen sits there until Close is tapped, which is the behaviour this
- *    replaces. A timer that a pass can keep resetting is the quiet version of this one.
+ *  - **Exits too often** → a pass runs on every window event and Home's own transition fires a burst of
+ *    them, so "exit whenever covered" presses Home a dozen times per block and re-shows the reason card
+ *    each time.
+ *  - **Never exits again** → a Home that did not land leaves the block screen sitting there until Close
+ *    is tapped, which is the behaviour this replaces.
  */
 class AutoExitTest {
 
     private val phone = 0
     private val monitor = 3
-    private val dwell = 3_000L
+    private val retry = 3_000L
 
-    private fun autoExit() = AutoExit(dwell)
+    private fun autoExit() = AutoExit(retry)
 
-    @Test fun `nothing is due before the dwell is up`() {
+    @Test fun `a new block screen is due at once`() {
         val a = autoExit()
         a.observe(setOf(phone), 1_000)
-        assertEquals(emptyList<Int>(), a.due(1_000))
+        assertEquals(listOf(phone), a.due(1_000))
+        assertEquals(0L, a.delayUntilNext(1_000))
+    }
+
+    /** The burst of events from Home's own transition must not press Home again. */
+    @Test fun `passes after the exit do not exit again before the retry`() {
+        val a = autoExit()
+        a.observe(setOf(phone), 1_000)
+        a.fired(phone, 1_000)
+        a.observe(setOf(phone), 1_050)
+        a.observe(setOf(phone), 1_400)
+        assertEquals(emptyList<Int>(), a.due(1_400))
         assertEquals(emptyList<Int>(), a.due(3_999))
     }
 
-    @Test fun `a block screen is due exactly when the dwell is up`() {
+    /** The Home did not land: the block screen is still up, so it is sent again. */
+    @Test fun `a block screen still up after the retry interval is due again`() {
         val a = autoExit()
         a.observe(setOf(phone), 1_000)
-        assertEquals(listOf(phone), a.due(4_000))
-    }
-
-    /** The pump runs every few hundred ms while a block is up; each pass must not restart the clock. */
-    @Test fun `passes while the block screen stays up do not restart its dwell`() {
-        val a = autoExit()
-        a.observe(setOf(phone), 1_000)
+        a.fired(phone, 1_000)
         a.observe(setOf(phone), 2_000)
-        a.observe(setOf(phone), 3_500)
         assertEquals(listOf(phone), a.due(4_000))
+        a.fired(phone, 4_000)
+        assertEquals(emptyList<Int>(), a.due(5_000))
+        assertEquals(listOf(phone), a.due(7_000))
     }
 
-    /** Close, a platform detach, or the engine lifting the block: the next block screen is a new one. */
-    @Test fun `a display that stops being covered forgets its dwell`() {
+    @Test fun `the wake-up after an exit is for the retry`() {
         val a = autoExit()
         a.observe(setOf(phone), 1_000)
-        a.observe(emptySet(), 2_000)
-        a.observe(setOf(phone), 3_000)
-        assertEquals(emptyList<Int>(), a.due(4_000))
-        assertEquals(listOf(phone), a.due(6_000))
+        a.fired(phone, 1_000)
+        assertEquals(2_500L, a.delayUntilNext(1_500))
+        assertEquals(0L, a.delayUntilNext(9_000))
+    }
+
+    /** The exit landed and the block screen came down; reopening the app is a new block screen. */
+    @Test fun `a block screen that came down is forgotten and the next one exits at once`() {
+        val a = autoExit()
+        a.observe(setOf(phone), 1_000)
+        a.fired(phone, 1_000)
+        a.observe(emptySet(), 1_800)
+        assertNull(a.delayUntilNext(1_800))
+        a.observe(setOf(phone), 2_000)
+        assertEquals(listOf(phone), a.due(2_000))
     }
 
     @Test fun `an uncovered display is never due`() {
         val a = autoExit()
         a.observe(setOf(phone), 1_000)
-        a.observe(emptySet(), 2_000)
+        a.observe(emptySet(), 1_100)
         assertEquals(emptyList<Int>(), a.due(10_000))
         assertNull(a.delayUntilNext(10_000))
     }
 
-    /** The exit did not land and the block screen came straight back: once per dwell, not every pass. */
-    @Test fun `a fired display is timed afresh if its block screen comes back`() {
+    /** A Close tap or the engine lifting the block before the posted exit ran: nothing to exit. */
+    @Test fun `firing a display that is no longer covered records nothing`() {
         val a = autoExit()
         a.observe(setOf(phone), 1_000)
-        assertEquals(listOf(phone), a.due(4_000))
-        a.fired(phone)
-        a.observe(setOf(phone), 4_100)
-        assertEquals(emptyList<Int>(), a.due(4_200))
-        assertEquals(listOf(phone), a.due(7_100))
+        a.observe(emptySet(), 1_010)
+        a.fired(phone, 1_020)
+        assertEquals(emptySet<Int>(), a.tracking)
     }
 
-    /** Each display has its own clock: the monitor's newer block screen is not cut short by the phone's. */
-    @Test fun `each display keeps its own dwell`() {
+    /** Each display has its own record: the phone's exit does not hold back the monitor's. */
+    @Test fun `each display exits on its own record`() {
         val a = autoExit()
         a.observe(setOf(phone), 1_000)
-        a.observe(setOf(phone, monitor), 2_500)
+        a.fired(phone, 1_000)
+        a.observe(setOf(phone, monitor), 1_500)
+        assertEquals(listOf(monitor), a.due(1_500))
+        a.fired(monitor, 1_500)
         assertEquals(listOf(phone), a.due(4_000))
-        a.fired(phone)
-        assertEquals(listOf(monitor), a.due(5_500))
+        assertEquals(listOf(phone, monitor), a.due(4_500))
     }
 
     @Test fun `due displays come default display first`() {
         val a = autoExit()
         a.observe(setOf(monitor, phone), 1_000)
-        assertEquals(listOf(phone, monitor), a.due(4_000))
+        assertEquals(listOf(phone, monitor), a.due(1_000))
     }
 
-    @Test fun `the wake-up is for the earliest dwell and never negative`() {
-        val a = autoExit()
-        assertNull(a.delayUntilNext(0))
-        a.observe(setOf(phone), 1_000)
-        a.observe(setOf(phone, monitor), 2_000)
-        assertEquals(2_500L, a.delayUntilNext(1_500))
-        assertEquals(0L, a.delayUntilNext(9_000))
-    }
-
-    @Test fun `timing lists the displays whose dwell is running`() {
+    @Test fun `tracking lists the covered displays`() {
         val a = autoExit()
         a.observe(setOf(phone, monitor), 1_000)
-        a.fired(monitor)
-        assertEquals(setOf(phone), a.timing)
-    }
-
-    @Test fun `a zero dwell exits on the first pass`() {
-        val a = AutoExit(0)
-        a.observe(setOf(phone), 1_000)
-        assertEquals(listOf(phone), a.due(1_000))
-        assertEquals(0L, a.delayUntilNext(1_000))
+        a.observe(setOf(phone), 1_100)
+        assertEquals(setOf(phone), a.tracking)
     }
 
     // ---- globalHomeLands ----
