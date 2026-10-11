@@ -533,8 +533,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val coveredOnEntry = overlays.covered()
         val raw = scanDisplays()
         holds.retain(raw.keys + enumeratedDisplayIds())
-        val effective =
-            holds.effective(raw, Foreground::blockable, Foreground::holdPackages, coveredOnEntry, now)
+        val effective = holds.effective(
+            raw, Foreground::blockable, Foreground::holdPackages, coveredOnEntry, now, Foreground::subsumes,
+        )
         diagnose(raw, effective)
         refreshForeground(mergeForegrounds(effective))
         val decision = coordinator.tick()
@@ -1007,6 +1008,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
          * used inline, named so [DisplayHolds.effective] can take it as `Foreground::blockable`.
          */
         val blockable: Boolean get() = target != null || webBlock != null
+
+        /**
+         * Does this read still carry every cause [held] did? A covered read that does not is partly
+         * pruned and must not replace the hold — see [DisplayHolds.effective]. The case that made this
+         * necessary: Instagram behind our overlay still reads as `ig_app` (whole-app hours) after the
+         * reel pager has been pruned away, which used to re-arm the hold without `ig_reels_explore`.
+         */
+        fun subsumes(held: Foreground): Boolean =
+            targets.containsAll(held.targets) && (held.webBlock == null || webBlock != null)
 
         /**
          * Every package whose presence on screen justifies keeping this block up — what

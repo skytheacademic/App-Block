@@ -47,6 +47,12 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 19 / 0.10.3: the Reels block stops blinking. Measured 2026-10-11 on a diagnostic build: the
+        // overlay went up and came down ~50 ms later, 18 times in 7 s, because the pruned Instagram read
+        // behind it still carried `ig_app` (whole-app hours) and so re-armed the occlusion hold without
+        // `ig_reels_explore`. A covered read may now add causes to the hold but never remove them
+        // (`DisplayHolds.effective`'s `subsumes`); Home still releases.
+        //
         // 18 / 0.10.2: desk polish, no phone check yet. The volume-panel memo (WindowKindMemo) is saved
         // and restored, so a volume press over a block right after a reboot or update no longer drops
         // the overlay (3/16 presses cold on 0.10.1). The Lock tab says when the key was made, and the
@@ -137,8 +143,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 18
-        versionName = "0.10.2"
+        versionCode = 19
+        versionName = "0.10.3"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

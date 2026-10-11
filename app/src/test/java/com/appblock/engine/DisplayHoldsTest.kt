@@ -349,4 +349,80 @@ class DisplayHoldsTest {
         val out = h.effective(emptyMap(), blockable, bothPanes, setOf(monitor), 1_000)
         assertNull(out[monitor])
     }
+
+    // ---- a covered read may add strictness, never remove it (2026-10-11) ----
+    //
+    // Reads here are "+"-joined causes: "hours+reels" is Instagram with its whole-app hours target AND
+    // the reels surface target; "hours" is the same window after the overlay pruned the reel pager away.
+    // Both are blockable, which is exactly why the old fold re-armed on the weaker one.
+    //
+    // Mutation these BITE against (M2): drop the `subsumes` check, i.e. today's 0.10.2 fold.
+
+    private val subsumes: (String, String) -> Boolean =
+        { raw, held -> raw.split('+').containsAll(held.split('+')) }
+
+    /** BITE. The measured blink: a pruned "hours" read must not replace a held "hours+reels". */
+    @Test fun `a covered read that lost a cause does not replace the hold`() {
+        val h = holds()
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        h.effective(mapOf(phone to "hours+reels"), blockable, justifiedBy, setOf(phone), 0, subsumes)
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        val out = h.effective(mapOf(phone to "hours"), blockable, justifiedBy, setOf(phone), 60, subsumes)
+        assertEquals("hours+reels", out[phone])
+    }
+
+    /** BITE. And it keeps holding on later pruned reads — the blink repeated every ~400 ms. */
+    @Test fun `the hold survives repeated pruned reads`() {
+        val h = holds()
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        h.effective(mapOf(phone to "hours+reels"), blockable, justifiedBy, setOf(phone), 0, subsumes)
+        for (t in 1..20) {
+            h.noteForegroundEvent(phone, INSTAGRAM)
+            val out = h.effective(mapOf(phone to "hours"), blockable, justifiedBy, setOf(phone), t * 400L, subsumes)
+            assertEquals("pass $t", "hours+reels", out[phone])
+        }
+    }
+
+    /** GUARD. The exit survives: Home names the launcher, the hold releases, the read is believed. */
+    @Test fun `a weaker covered read still releases when the user moved on`() {
+        val h = holds()
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        h.effective(mapOf(phone to "hours+reels"), blockable, justifiedBy, setOf(phone), 0, subsumes)
+        h.noteForegroundEvent(phone, LAUNCHER)
+        val out = h.effective(mapOf(phone to "hours"), blockable, justifiedBy, setOf(phone), 60, subsumes)
+        assertEquals("hours", out[phone])
+        // ...and the hold re-armed on what it was given, so the next pruned read is judged against that.
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        val next = h.effective(emptyMap(), blockable, justifiedBy, setOf(phone), 120, subsumes)
+        assertEquals("hours", next[phone])
+    }
+
+    /** GUARD. A stronger covered read still re-arms — adding strictness is always allowed. */
+    @Test fun `a covered read that adds a cause re-arms the hold`() {
+        val h = holds()
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        h.effective(mapOf(phone to "hours"), blockable, justifiedBy, setOf(phone), 0, subsumes)
+        val out = h.effective(mapOf(phone to "hours+reels"), blockable, justifiedBy, setOf(phone), 60, subsumes)
+        assertEquals("hours+reels", out[phone])
+        val pruned = h.effective(mapOf(phone to "hours"), blockable, justifiedBy, setOf(phone), 120, subsumes)
+        assertEquals("hours+reels", pruned[phone])
+    }
+
+    /** GUARD. Uncovered displays are untouched: the user really did leave the reel. */
+    @Test fun `an uncovered display believes its read`() {
+        val h = holds()
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        h.effective(mapOf(phone to "hours+reels"), blockable, justifiedBy, setOf(phone), 0, subsumes)
+        val out = h.effective(mapOf(phone to "hours"), blockable, justifiedBy, emptySet(), 60, subsumes)
+        assertEquals("hours", out[phone])
+    }
+
+    /** GUARD. Without a `subsumes`, the fold is byte-for-byte the old one. */
+    @Test fun `the default subsumes keeps the old re-arm behaviour`() {
+        val h = holds()
+        h.noteForegroundEvent(phone, INSTAGRAM)
+        h.effective(mapOf(phone to "hours+reels"), blockable, justifiedBy, setOf(phone), 0)
+        val out = h.effective(mapOf(phone to "hours"), blockable, justifiedBy, setOf(phone), 60)
+        assertEquals("hours", out[phone])
+    }
 }
