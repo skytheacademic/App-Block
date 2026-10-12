@@ -106,6 +106,9 @@ class OcclusionHold<T : Any>(
     /** Whether anything is currently held — for the caller's "seed me once" check and diagnostics. */
     val isArmed: Boolean get() = held != null
 
+    /** The held read itself, so [DisplayHolds] can ask whether a covered read would weaken it. */
+    val heldValue: T? get() = held
+
     /** True while the timeout backstop is still load-bearing, i.e. before [noteForegroundEvent]. */
     val backstopArmed: Boolean get() = !foregroundEventSeen
 

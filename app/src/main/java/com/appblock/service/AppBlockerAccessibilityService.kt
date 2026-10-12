@@ -533,8 +533,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val coveredOnEntry = overlays.covered()
         val raw = scanDisplays()
         holds.retain(raw.keys + enumeratedDisplayIds())
-        val effective =
-            holds.effective(raw, Foreground::blockable, Foreground::holdPackages, coveredOnEntry, now)
+        val effective = holds.effective(
+            raw, Foreground::blockable, Foreground::holdPackages, coveredOnEntry, now, Foreground::subsumes,
+        )
         diagnose(raw, effective)
         refreshForeground(mergeForegrounds(effective))
         val decision = coordinator.tick()
@@ -1009,6 +1010,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val blockable: Boolean get() = target != null || webBlock != null
 
         /**
+         * Does this read still carry every cause [held] did? A covered read that does not is partly
+         * pruned and must not replace the hold — see [DisplayHolds.effective]. The case that made this
+         * necessary: Instagram behind our overlay still reads as `ig_app` (whole-app hours) after the
+         * reel pager has been pruned away, which used to re-arm the hold without `ig_reels_explore`.
+         */
+        fun subsumes(held: Foreground): Boolean =
+            targets.containsAll(held.targets) && (held.webBlock == null || webBlock != null)
+
+        /**
          * Every package whose presence on screen justifies keeping this block up — what
          * [DisplayHolds.effective] arms the occlusion hold with.
          *
@@ -1447,7 +1457,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val node = stack.removeLast()
                 walked++
                 idOf(node)?.let { id ->
-                    if (id in InstagramSurface.SIGNAL_IDS) found.add(id)
+                    // An unreadable visibility counts as visible: a read that throws must not become
+                    // a free reel (fail closed).
+                    if (id in InstagramSurface.SIGNAL_IDS &&
+                        InstagramSurface.counts(id, runCatching { node.isVisibleToUser }.getOrDefault(true))
+                    ) {
+                        found.add(id)
+                    }
                 }
                 if (found.size == SIGNAL_COUNT) break   // seen everything the rule needs
                 stack.addAll(childrenOf(node))

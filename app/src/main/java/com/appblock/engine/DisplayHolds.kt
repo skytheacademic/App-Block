@@ -92,6 +92,23 @@ class DisplayHolds<T : Any>(
      * `sustain(...) ?: read`. The caller sets `surfaceAppVisible` / `browserVisible` from these and uses
      * them to keep the 5-second tick alive; dropping non-blockable reads would stop the heartbeat for an
      * under-cap Instagram feed — a single-display fail-open introduced by a multi-display change.
+     *
+     * ## A covered read may add strictness, never remove it — [subsumes]
+     *
+     * `subsumes(raw, held)` answers *"does this read still carry every cause the held one did?"*. When a
+     * covered display's read is blockable but does **not** subsume the hold, it is treated like a pruned
+     * read — the hold is sustained (moved-on test and all) — instead of re-arming on the weaker read.
+     *
+     * 🔴 **Measured 2026-10-11 (0.10.2, Instagram 450, cap spent):** the Reels block went up and came down
+     * ~50 ms later, 18 times in 7 s — the reel visible ~90 % of the time. Behind the overlay Instagram's
+     * window was still listed, pruned to 11–81 nodes with no `clips_viewer_view_pager`, but it still
+     * carried `ig_app` — Instagram's whole-app hours target, present on every Instagram screen. So the
+     * pruned read *looked* blockable, re-armed the hold on `[ig_app]`, dropped `ig_reels_explore`, and the
+     * engine (hours open) allowed it. "A blockable covered read is a real read" stopped being true the day
+     * Instagram became a whole-app target as well as a surface one.
+     *
+     * The default keeps the old behaviour (every blockable read re-arms) for callers whose reads cannot
+     * be partially pruned.
      */
     fun effective(
         reads: Map<Int, T>,
@@ -99,6 +116,7 @@ class DisplayHolds<T : Any>(
         justifiedBy: (T) -> Set<String>,
         covered: Set<Int>,
         nowMs: Long,
+        subsumes: (raw: T, held: T) -> Boolean = { _, _ -> true },
     ): Map<Int, T> {
         val ids = DisplayCensus.order(reads.keys + holds.keys)
         val out = LinkedHashMap<Int, T>(ids.size)
@@ -111,6 +129,16 @@ class DisplayHolds<T : Any>(
                 continue
             }
             if (raw != null && blockable(raw)) {
+                // Blockable but weaker than what we hold: a partly pruned read, not a real one. Sustain,
+                // so the moved-on test still runs; if that releases, fall through and arm on the read.
+                val held = holds[id]?.heldValue
+                if (held != null && !subsumes(raw, held)) {
+                    val sustained = holds[id]?.sustain(lastPackage[id], nowMs)
+                    if (sustained != null) {
+                        out[id] = sustained
+                        continue
+                    }
+                }
                 // A real read got through the pruning: re-arm on it and restart the countdown.
                 // Armed on what the READ says is on screen, never on `lastPackage` — the event stream's
                 // most recent name is one of possibly several live apps, and picking it made the hold
