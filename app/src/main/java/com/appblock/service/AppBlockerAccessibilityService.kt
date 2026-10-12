@@ -1457,7 +1457,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val node = stack.removeLast()
                 walked++
                 idOf(node)?.let { id ->
-                    if (id in InstagramSurface.SIGNAL_IDS) found.add(id)
+                    // An unreadable visibility counts as visible: a read that throws must not become
+                    // a free reel (fail closed).
+                    if (id in InstagramSurface.SIGNAL_IDS &&
+                        InstagramSurface.counts(id, runCatching { node.isVisibleToUser }.getOrDefault(true))
+                    ) {
+                        found.add(id)
+                    }
                 }
                 if (found.size == SIGNAL_COUNT) break   // seen everything the rule needs
                 stack.addAll(childrenOf(node))

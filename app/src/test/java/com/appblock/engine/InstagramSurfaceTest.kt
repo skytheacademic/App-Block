@@ -266,5 +266,24 @@ class InstagramSurfaceTest {
         assertNull(InstagramSurface.targetForWindows(listOf(exploreGridWindow)))
     }
 
+    // --- Visibility (2026-10-11): the player Instagram parks off-screen after you leave Reels ---
+
+    /** BITE. The measured over-block: `isVisibleToUser=false`, bounds off the right edge, on the feed. */
+    @Test fun `an off-screen reel player does not count`() {
+        assertEquals(false, InstagramSurface.counts(pager, visibleToUser = false))
+    }
+
+    /** GUARD. A reel on screen still counts. */
+    @Test fun `an on-screen reel player counts`() {
+        assertEquals(true, InstagramSurface.counts(pager, visibleToUser = true))
+    }
+
+    /** GUARD. Only the pager is filtered — the exemption and the Explore pair are unchanged. */
+    @Test fun `visibility filters only the pager`() {
+        for (id in InstagramSurface.SIGNAL_IDS - pager) {
+            assertEquals(id, true, InstagramSurface.counts(id, visibleToUser = false))
+        }
+    }
+
     private fun clip(name: String) = "${InstagramSurface.PACKAGE}:id/$name"
 }

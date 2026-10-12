@@ -47,6 +47,11 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 20 / 0.10.4: 0.10.3 + the over-block it exposed. Instagram parks the reel player off-screen
+        // (isVisibleToUser=false, bounds at x=1080) after you leave Reels; counted, it blocked the home
+        // feed, and 0.10.3's hold kept that block up until Home. The pager now counts only when visible
+        // (`InstagramSurface.counts`). 0.10.3 was installed on the phone, hence the bump.
+        //
         // 19 / 0.10.3: the Reels block stops blinking. Measured 2026-10-11 on a diagnostic build: the
         // overlay went up and came down ~50 ms later, 18 times in 7 s, because the pruned Instagram read
         // behind it still carried `ig_app` (whole-app hours) and so re-armed the occlusion hold without
@@ -143,8 +148,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 19
-        versionName = "0.10.3"
+        versionCode = 20
+        versionName = "0.10.4"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

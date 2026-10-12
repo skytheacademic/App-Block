@@ -126,6 +126,21 @@ object InstagramSurface {
     val WITNESSED_IDS: Set<String> = setOf(REEL_PAGER, EXPLORE_ACTION_BAR)
 
     /**
+     * Whether a sighting of [id] counts, given whether Android says the node is visible to the user.
+     *
+     * Only [REEL_PAGER] is filtered. 🔴 **Measured 2026-10-11 (Instagram 450):** after leaving the Reels
+     * tab, Instagram keeps the reel player in its tree, parked off the right edge
+     * (`bounds=Rect(1080, 97 - 1080, 2163)`, `isVisibleToUser=false`). Counted, that blocked the home
+     * feed — and since 0.10.3's hold no longer lets a covered read drop a cause, the false block stayed
+     * up until Home instead of blinking off.
+     *
+     * The other ids are deliberately left alone. [DM_SENDER] exempts, so filtering it is the strict
+     * direction but would change which DM reels are free — a separate decision. [CONTEXT_MENU] and
+     * [EXPLORE_ACTION_BAR] only ever add strictness, and nothing has been measured against them.
+     */
+    fun counts(id: String, visibleToUser: Boolean): Boolean = id != REEL_PAGER || visibleToUser
+
+    /**
      * The budgeted [Target] for the Instagram surface described by [resourceIds] (the set of
      * `viewIdResourceName`s visible in the Instagram window), or null when the surface is free.
      */
