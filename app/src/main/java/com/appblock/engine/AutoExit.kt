@@ -1,8 +1,8 @@
 package com.appblock.engine
 
 /**
- * When each display's block screen sends the user Home by itself: **as soon as it is up**, and again
- * every [retryMs] for as long as it stays up.
+ * When each display's block screen sends the user Home by itself: [settleMs] after it goes up, and
+ * again every [retryMs] for as long as it stays up.
  *
  * ## The order this serves
  *
@@ -15,6 +15,15 @@ package com.appblock.engine
  *
  * That replaced a 3-second dwell on the block screen, which is how 0.11.0 was first written and never
  * released. Owner, 2026-10-10: bounce to the home screen and then show the reason.
+ *
+ * ## Why the first exit waits (measured 2026-10-30)
+ *
+ * Detection can beat the blocked app's opening animation. Home sent inside it cancels the animation, the
+ * launcher never lost the screen, and it posts **no window event**, so the hold never releases: the
+ * launcher on top, the block screen stuck over it, and a second Home changing nothing because Home on a
+ * launcher already in front is silent. On the S25 FE, Instagram: cover up 210–360 ms after the launch
+ * stuck every time, 430–500 ms never did. [settleMs] keeps Home clear of the animation, at the price of
+ * the block screen being on show for that long.
  *
  * ## Why a retry, and why not every pass
  *
@@ -36,42 +45,61 @@ package com.appblock.engine
  * Times are a monotonic clock (`SystemClock.elapsedRealtime`), never the wall clock — the tamper guard
  * exists because the wall clock is the one input the user can set.
  */
-class AutoExit(private val retryMs: Long = DEFAULT_RETRY_MS) {
+class AutoExit(
+    private val retryMs: Long = DEFAULT_RETRY_MS,
+    private val settleMs: Long = DEFAULT_SETTLE_MS,
+) {
 
     /** Covered displays → when their exit was last taken, or null while it has not been taken yet. */
     private val exitedAt = LinkedHashMap<Int, Long?>()
+
+    /** Covered displays → when they were first seen covered. */
+    private val coveredAt = HashMap<Int, Long>()
 
     /** Covered displays this class is tracking — diagnostics. */
     val tracking: Set<Int> get() = exitedAt.keys.toSet()
 
     /**
-     * Reconcile with what is covered **now**: a newly covered display is due at once, a display no
+     * Reconcile with what is covered **now**: a newly covered display is due [settleMs] on, a display no
      * longer covered is forgotten, and one still covered keeps its record.
      */
     fun observe(covered: Set<Int>, nowMs: Long) {
         exitedAt.keys.retainAll(covered)
+        coveredAt.keys.retainAll(covered)
         for (id in DisplayCensus.order(covered)) {
-            if (id !in exitedAt) exitedAt[id] = null
+            if (id !in exitedAt) {
+                exitedAt[id] = null
+                coveredAt[id] = nowMs
+            }
         }
     }
 
     /**
-     * The displays to exit now, default display first: every block screen not yet exited, and every one
-     * still up [retryMs] after its last exit.
+     * The displays to exit now, default display first: every block screen up for [settleMs] and not yet
+     * exited, and every one still up [retryMs] after its last exit.
      */
     fun due(nowMs: Long): List<Int> =
-        DisplayCensus.order(exitedAt.filterValues { it == null || nowMs - it >= retryMs }.keys)
+        DisplayCensus.order(exitedAt.keys.filter { nextAt(it) <= nowMs })
 
     /** How long until the next display is [due], or null when nothing is covered. Never negative. */
     fun delayUntilNext(nowMs: Long): Long? =
-        exitedAt.values.minOfOrNull { at -> if (at == null) 0L else (at + retryMs - nowMs).coerceAtLeast(0L) }
+        exitedAt.keys.minOfOrNull { (nextAt(it) - nowMs).coerceAtLeast(0L) }
+
+    /** Whether [displayId]'s exit has been taken for the block screen up now. */
+    fun hasExited(displayId: Int): Boolean = exitedAt[displayId] != null
 
     /** [displayId]'s exit was just taken at [nowMs]; it is not due again until [retryMs] later. */
     fun fired(displayId: Int, nowMs: Long) {
         if (displayId in exitedAt) exitedAt[displayId] = nowMs
     }
 
+    private fun nextAt(displayId: Int): Long =
+        exitedAt[displayId]?.let { it + retryMs } ?: (coveredAt.getValue(displayId) + settleMs)
+
     companion object {
+        /** How long a block screen stays up before its first exit. See the class doc. */
+        const val DEFAULT_SETTLE_MS = 600L
+
         /**
          * How long a block screen may stay up after its exit before the exit is sent again. The exit
          * normally clears it in a few hundred ms; this only matters when it did not land.

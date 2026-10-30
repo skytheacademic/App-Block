@@ -1761,13 +1761,15 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      *
      * Home is aimed: an exit with no tap carries no input focus to [displayId], so a display that is not
      * the active one gets a HOME intent of its own ([AutoExit.globalHomeLands]).
+     *
+     * [showCard] is false on a retry: the block screen is still up and already says why.
      */
-    private fun autoExitOverlay(displayId: Int) {
+    private fun autoExitOverlay(displayId: Int, showCard: Boolean) {
         val content = overlays.contentOn(displayId) ?: return
         content.exitBrowserPkg?.let { navigateToNeutral(it, displayId) }
         val global = AutoExit.globalHomeLands(displayId, lastActiveDisplayId)
         if (global) performGlobalAction(GLOBAL_ACTION_HOME) else launchHomeOn(displayId)
-        showReasonCard(displayId, content)
+        if (showCard) showReasonCard(displayId, content)
         if (BuildConfig.DEBUG || BuildConfig.FAST_CAPS) {
             android.util.Log.d(
                 EXIT_TAG,
@@ -1791,19 +1793,19 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Send Home every display whose block screen is due: each new one at once, and any still up
-     * [AutoExit.DEFAULT_RETRY_MS] after its last exit.
+     * Send Home every display whose block screen is due: each new one once it has settled, and any still
+     * up [AutoExit.DEFAULT_RETRY_MS] after its last exit.
      *
-     * Posted rather than run inside [pump], so the overlay that pass just added is queued to draw before
-     * the Home goes out. Coverage is re-read first, so a block screen that came down since that pass is
+     * Coverage is re-read first, so a block screen that came down since that pass is
      * never exited a second time.
      */
     private fun runAutoExits() {
         val now = SystemClock.elapsedRealtime()
         autoExit.observe(overlays.covered(), now)
         for (id in autoExit.due(now)) {
+            val retry = autoExit.hasExited(id)
             autoExit.fired(id, now)
-            autoExitOverlay(id)
+            autoExitOverlay(id, showCard = !retry)
         }
         scheduleAutoExits(now)
     }

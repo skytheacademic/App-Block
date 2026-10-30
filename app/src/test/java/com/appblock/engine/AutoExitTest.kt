@@ -22,7 +22,7 @@ class AutoExitTest {
     private val monitor = 3
     private val retry = 3_000L
 
-    private fun autoExit() = AutoExit(retry)
+    private fun autoExit() = AutoExit(retry, settleMs = 0)
 
     @Test fun `a new block screen is due at once`() {
         val a = autoExit()
@@ -136,5 +136,45 @@ class AutoExitTest {
     /** The phone is blocked while the user types on the monitor: aim at the phone, leave the monitor be. */
     @Test fun `the phone's block screen gets its own home while the monitor has focus`() {
         assertFalse(AutoExit.globalHomeLands(phone, monitor))
+    }
+
+    /** BITE, measured 2026-10-30: Home inside the app's opening animation leaves the launcher silent. */
+    @Test fun `the first exit waits for the opening animation to settle`() {
+        val a = AutoExit(retry, settleMs = 600)
+        a.observe(setOf(0), 1_000)
+        assertEquals(emptyList<Int>(), a.due(1_000))
+        assertEquals(600L, a.delayUntilNext(1_000))
+        assertEquals(emptyList<Int>(), a.due(1_599))
+        assertEquals(listOf(0), a.due(1_600))
+    }
+
+    /** GUARD. A later pass must not push the first exit back, or a busy screen would never leave. */
+    @Test fun `later passes do not restart the settle wait`() {
+        val a = AutoExit(retry, settleMs = 600)
+        a.observe(setOf(0), 1_000)
+        a.observe(setOf(0), 1_500)
+        assertEquals(100L, a.delayUntilNext(1_500))
+    }
+
+    /** GUARD. A new block screen settles afresh. */
+    @Test fun `a display covered again settles again`() {
+        val a = AutoExit(retry, settleMs = 600)
+        a.observe(setOf(0), 1_000)
+        a.observe(emptySet(), 1_100)
+        a.observe(setOf(0), 2_000)
+        assertEquals(emptyList<Int>(), a.due(2_500))
+        assertEquals(listOf(0), a.due(2_600))
+    }
+
+    /** GUARD. The service drops the card on a retry by this. */
+    @Test fun `hasExited is false until the first exit and resets with the block screen`() {
+        val a = AutoExit(retry, settleMs = 0)
+        a.observe(setOf(0), 0)
+        assertEquals(false, a.hasExited(0))
+        a.fired(0, 0)
+        assertEquals(true, a.hasExited(0))
+        a.observe(emptySet(), 100)
+        a.observe(setOf(0), 200)
+        assertEquals(false, a.hasExited(0))
     }
 }
