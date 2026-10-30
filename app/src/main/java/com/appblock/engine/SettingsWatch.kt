@@ -213,38 +213,6 @@ object SettingsWatch {
         "deactivate",
     )
 
-    /**
-     * Text identifying Android's **wireless debugging** screen, which is watched with no reference to
-     * the app's label at all (B-10). Pairing adb to the phone *from* the phone is what lets Shizuku
-     * hand adb-level power to an ordinary app — an escape that needs no computer and, once paired, is
-     * reusable forever. Nothing on that screen names App-Block, so the label match can never see it.
-     *
-     * This is friction on the *setup* path, not a lock: the toggle itself sits on the Developer options
-     * list and can be flipped without opening this screen. Pairing cannot, and pairing is the step that
-     * has to happen at least once.
-     */
-    val bypassMarkers: List<String> = listOf("wireless debugging", "pair device with")
-
-    /**
-     * Text that proves the screen is the Developer options **list** rather than the wireless-debugging
-     * screen itself — the list carries a "Wireless debugging" row and would otherwise match.
-     *
-     * Developer options must stay reachable: USB debugging lives there, and adb from the computer is
-     * one of only two ways back in if this app ever needs repairing (the other is safe mode). Walling
-     * that off would be the overlay-permission trap again, one level up.
-     *
-     * **`developer options` is the load-bearing one; `usb debugging` is the one that failed.** The
-     * exclusion was originally the USB-debugging *row*, which made the guard a co-visibility bet: at
-     * Gate F, scrolling until `Wireless debugging` was visible and every row containing "usb
-     * debugging" had left the top bounced Developer options, 2/2 (the only thing holding it open one
-     * scroll earlier was the unrelated `Revoke USB debugging authorizations`). The screen's own name
-     * cannot scroll away — a collapsing toolbar shrinks its title into the app bar rather than
-     * dropping it — so it anchors the exclusion at every scroll position. The row is kept beside it
-     * because this is the one guard where a false *negative* is cheap (one bypass screen is friction
-     * on a setup step) and a false positive is expensive (it walls off an escape valve).
-     */
-    val bypassExclusions: List<String> = listOf("developer options", "usb debugging")
-
     val watchedPackages: Set<String> = settingsPackages + installerPackages
 
     fun isWatched(packageName: String?): Boolean = packageName in watchedPackages
@@ -287,10 +255,6 @@ object SettingsWatch {
 
     private fun Iterable<CharSequence>.anyContains(needles: List<String>): Boolean =
         any { text -> needles.any { text.contains(it, ignoreCase = true) } }
-
-    /** True when these texts are the wireless-debugging screen and not the Developer options list. */
-    private fun isBypassScreen(texts: List<CharSequence>): Boolean =
-        texts.anyContains(bypassMarkers) && !texts.anyContains(bypassExclusions)
 
     /**
      * True when the screen described by ([packageName], [screen]) is about App-Block and the watch is
@@ -352,7 +316,7 @@ object SettingsWatch {
         if (!isWatched(pkg)) return false
 
         // A blank label would make the substring test match every screen, so it disables the label
-        // rules — but not the label-independent bypass rule, which never consults it.
+        // rules.
         val readable = selfLabel.isNotBlank()
         val titleNamesUs = readable && screen.titles.any { it.contains(selfLabel, ignoreCase = true) }
         val namesUs = readable && screen.texts.any { it.contains(selfLabel, ignoreCase = true) }
@@ -366,8 +330,7 @@ object SettingsWatch {
             // Rule 3 — the accessibility-button picker. Stands down with the rest of the tier: a
             // change window is the sanctioned way to switch the service off, and the picker is one
             // more way of doing that.
-            if (checkableNamesUs) return true
-            return isBypassScreen(screen.texts)
+            return checkableNamesUs
         }
         // Installer tier — armed through an open window, which is what makes uninstall cost more than
         // the shortest wait in the system. Title position is no help here: the uninstall and update

@@ -47,6 +47,9 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 21 / 0.10.5: the wireless-debugging screen is no longer bounced (owner decision, 2026-10-30),
+        // so adb can pair over Wi-Fi with no cable. Shizuku stays always-blocked.
+        //
         // 20 / 0.10.4: 0.10.3 + the over-block it exposed. Instagram parks the reel player off-screen
         // (isVisibleToUser=false, bounds at x=1080) after you leave Reels; counted, it blocked the home
         // feed, and 0.10.3's hold kept that block up until Home. The pager now counts only when visible
@@ -148,8 +151,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 20
-        versionName = "0.10.4"
+        versionCode = 21
+        versionName = "0.10.5"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
