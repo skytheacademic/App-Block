@@ -554,7 +554,7 @@ class SettingsWatchTest {
         assertFalse(bounce(screen = titled("SIM manager", "SIM manager", "Deactivate eSIM", "Add eSIM")))
     }
 
-    // ---- B-10: the wireless-debugging screen, which never names us ----
+    // ---- Wireless debugging and Developer options stay free ----
 
     private val wirelessDebugging = titled(
         "Wireless debugging",
@@ -572,54 +572,21 @@ class SettingsWatchTest {
     )
 
     /**
-     * Pairing adb to the phone *from* the phone is what lets Shizuku hand adb-level power to an
-     * ordinary app — no computer needed, and reusable forever once paired. Nothing on the screen
-     * mentions App-Block, so the label match can never see it; this rule doesn't consult the label.
+     * Owner decision 2026-10-30: the wireless-debugging screen is no longer guarded, so adb can be
+     * paired over Wi-Fi with no cable. Shizuku itself stays always-blocked.
      */
-    @Test fun `bounces the wireless debugging screen even though it never names the app`() {
-        assertTrue(bounce(screen = wirelessDebugging))
-        assertTrue(bounce(screen = screen("Pair device with QR code", "Cancel")))
+    @Test fun `does not bounce the wireless debugging screen or its pairing dialog`() {
+        assertFalse(bounce(screen = wirelessDebugging))
+        assertFalse(bounce(screen = screen("Pair device with QR code", "Cancel")))
+        assertFalse(bounce(screen = screen("Pair with device", "Wi-Fi pairing code", "Cancel")))
     }
 
     /**
-     * And must not take Developer options with it. USB debugging lives there, and adb from the
-     * computer is one of only two ways back in if the app ever needs repairing — walling it off would
-     * be the overlay-permission trap again, one level up.
+     * USB debugging lives here, and adb from the computer is one of only two ways back in if the app
+     * ever needs repairing — walling it off would be the overlay-permission trap again, one level up.
      */
     @Test fun `does not bounce the developer options list`() {
         assertFalse(bounce(screen = developerOptions))
-    }
-
-    /**
-     * 🐛 **The B-10 defect, and the regression test for it.** The exclusion used to be the USB-debugging
-     * *row*, which made the guard a co-visibility bet: scroll until `Wireless debugging` is on screen
-     * and every row containing "usb debugging" has left the top, and Developer options bounced (2/2 on
-     * hardware). The screen's own name can't scroll away, so it anchors the exclusion instead.
-     */
-    @Test fun `developer options survives being scrolled past every usb-debugging row`() {
-        val scrolled = titled(
-            "Developer options",
-            "Developer options",
-            "Wireless debugging", "Debug mode when Wi‑Fi is connected",
-            "Stay awake", "Bug report shortcut", "Verify apps over USB",
-        )
-        assertFalse(bounce(screen = scrolled))
-        // The old exclusion is gone from this screen entirely — that is what used to fire the bug.
-        assertFalse(scrolled.texts.any { it.contains("usb debugging", ignoreCase = true) })
-    }
-
-    @Test fun `the wireless debugging rule does not depend on the label being readable`() {
-        assertTrue(SettingsWatch.shouldBounce("com.android.settings", wirelessDebugging, "", false))
-    }
-
-    @Test fun `the wireless debugging rule is settings-tier, so a window and repair mode stand it down`() {
-        assertFalse(bounce(screen = wirelessDebugging, windowOpen = true))
-        assertFalse(bounce(screen = wirelessDebugging, repairMode = true))
-        assertFalse(bounce(screen = wirelessDebugging, setupIncomplete = true))
-    }
-
-    @Test fun `the installer tier ignores bypass markers`() {
-        assertFalse(bounce(pkg = installer, screen = wirelessDebugging))
     }
 
     // ---- N-2 on hardware (cable session 2026-08-29) ----
