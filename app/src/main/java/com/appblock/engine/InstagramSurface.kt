@@ -87,6 +87,19 @@ object InstagramSurface {
     const val EXPLORE_ACTION_BAR = "${PREFIX}explore_action_bar"
 
     /**
+     * The magnifying-glass tab in the bottom bar: `isSelected` says the Explore page is the open tab, and
+     * its top edge is the top of the tab bar. Read for [ExploreWall] only, so it is not in [SIGNAL_IDS].
+     * If Instagram renames it the wall stops appearing and the grid is simply free again.
+     */
+    const val SEARCH_TAB = "${PREFIX}search_tab"
+
+    /**
+     * The Explore grid's thumbnails, on IG 450 (2026-10-11): a reel is an `image_preview`, a carousel a
+     * `grid_card_layout_container`. Either one is the grid being on screen, as opposed to the search page.
+     */
+    val GRID_ITEM_IDS: Set<String> = setOf("${PREFIX}image_preview", "${PREFIX}grid_card_layout_container")
+
+    /**
      * The only resource-ids the on-device scan needs to look for, instead of collecting the whole
      * (large) Instagram tree.
      *
