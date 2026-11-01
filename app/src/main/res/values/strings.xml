@@ -10,8 +10,6 @@
     <string name="block_message_bypass_tool">This app can hand adb-level control to other apps, which is enough to switch App-Block off. It is blocked permanently and can\'t be unblocked from the phone.</string>
     <!-- The wall over Instagram's Explore grid. See overlay_explore_wall.xml. -->
     <string name="explore_wall_title">Explore is closed</string>
-    <string name="explore_wall_count">%1$d</string>
-    <string name="explore_wall_wait">Today\'s Reels and Explore time is used up.</string>
     <string name="explore_wall_search">Search still works. Tap it to find someone.</string>
     <string name="block_message_budget">You\'ve used up today\'s time for %1$s. It resets at 4am.</string>
     <string name="block_message_schedule">%1$s is outside its allowed hours right now. It opens again in its next window.</string>

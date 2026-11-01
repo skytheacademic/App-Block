@@ -3,11 +3,10 @@
   The wall over Instagram's Explore grid while the Reels + Explore pool is spent: see
   com.appblock.engine.ExploreWall. Same deep ground as the block screen, because it is the same
   argument, but it is a panel inside Instagram rather than a room of its own: the window is sized to
-  stop at the tab bar and, after the countdown, to start under the search bar.
+  start under the search bar and stop at the tab bar.
 
   Clickable, so a touch on the panel stops here instead of opening a thumbnail. There is no Close: the
-  way past it is Instagram's own search bar. The contract with service/ is two ids, explore_wall_count
-  (hidden once the countdown ends) and explore_wall_hint.
+  way past it is Instagram's own search bar.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
@@ -22,18 +21,6 @@
     android:padding="28dp">
 
     <TextView
-        android:id="@+id/explore_wall_count"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginBottom="14dp"
-        android:text="@string/explore_wall_count"
-        android:textColor="@color/lamp_accent"
-        android:textSize="60sp"
-        android:fontFamily="@font/inter_medium"
-        android:fontFeatureSettings="tnum"
-        android:includeFontPadding="false" />
-
-    <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/explore_wall_title"
@@ -44,11 +31,10 @@
         android:includeFontPadding="false" />
 
     <TextView
-        android:id="@+id/explore_wall_hint"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
-        android:text="@string/explore_wall_wait"
+        android:text="@string/explore_wall_search"
         android:textColor="@color/lamp_neutral_400"
         android:textSize="15sp"
         android:fontFamily="@font/inter_regular" />

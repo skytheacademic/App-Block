@@ -1894,9 +1894,9 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val mayStand = !blockUp && !instagramGone &&
             (exploreWall.up || read?.searchTabSelected == true) && reelsExploreClosed()
         if (!mayStand) exploreWall.reset()
-        val phase = if (mayStand) exploreWall.observe(read, nowMs) else ExploreWall.Phase.None
-        diagnoseExploreWall(phase, read)
-        renderExploreWall(displayId, phase)
+        val panel = if (mayStand) exploreWall.observe(read, nowMs) else null
+        diagnoseExploreWall(panel, read)
+        renderExploreWall(displayId, panel)
         handler.removeCallbacks(exploreWallRunnable)
         exploreWall.delayUntilNext(nowMs)?.let { handler.postDelayed(exploreWallRunnable, it) }
     }
@@ -1905,30 +1905,16 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun reelsExploreClosed(): Boolean =
         coordinator.snapshot().any { it.target == Target.INSTAGRAM_REELS_EXPLORE && it.access == Access.BLOCK }
 
-    private fun renderExploreWall(displayId: Int?, phase: ExploreWall.Phase) {
-        val (top, bottom) = when (phase) {
-            ExploreWall.Phase.None -> return hideExploreWall()
-            is ExploreWall.Phase.Counting -> 0 to phase.bottom
-            is ExploreWall.Phase.Open -> phase.top to phase.bottom
-        }
+    private fun renderExploreWall(displayId: Int?, panel: ExploreWall.Panel?) {
+        val (top, bottom) = panel ?: return hideExploreWall()
         val target = displayId ?: exploreWallView?.displayId ?: return
         if (exploreWallView?.displayId != target) hideExploreWall()
         val wall = exploreWallView ?: showExploreWall(target, top, bottom) ?: return
+        if (wall.top == top && wall.bottom == bottom) return
         runCatching {
-            val count = wall.view.findViewById<TextView>(R.id.explore_wall_count)
-            val hint = wall.view.findViewById<TextView>(R.id.explore_wall_hint)
-            if (phase is ExploreWall.Phase.Counting) {
-                count.text = getString(R.string.explore_wall_count, phase.secondsLeft)
-                hint.setText(R.string.explore_wall_wait)
-            } else {
-                count.visibility = View.GONE
-                hint.setText(R.string.explore_wall_search)
-            }
-            if (wall.top != top || wall.bottom != bottom) {
-                wall.windowManager.updateViewLayout(wall.view, exploreWallParams(top, bottom))
-                wall.top = top
-                wall.bottom = bottom
-            }
+            wall.windowManager.updateViewLayout(wall.view, exploreWallParams(top, bottom))
+            wall.top = top
+            wall.bottom = bottom
         }
     }
 
@@ -1986,10 +1972,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * phone: `adb logcat -s AppBlockWall` on the search page is what shows whether [ExploreWall]'s
      * `typing` and `bar` signals tell it from the grid.
      */
-    private fun diagnoseExploreWall(phase: ExploreWall.Phase, read: ExploreWall.Read?) {
+    private fun diagnoseExploreWall(panel: ExploreWall.Panel?, read: ExploreWall.Read?) {
         if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
-        if (phase == ExploreWall.Phase.None && read?.searchTabSelected != true) return
-        val line = "phase=$phase read=$read"
+        if (panel == null && read?.searchTabSelected != true) return
+        val line = "panel=$panel read=$read"
         if (line == lastWallDiagLine) return
         lastWallDiagLine = line
         android.util.Log.d(WALL_TAG, line)

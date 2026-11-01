@@ -1,6 +1,6 @@
 package com.appblock.engine
 
-import com.appblock.engine.ExploreWall.Phase
+import com.appblock.engine.ExploreWall.Panel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -19,6 +19,7 @@ class ExploreWallTest {
 
     private val bar = 255
     private val tabs = 2163
+    private val covered = Panel(bar, tabs)
 
     private val grid = ExploreWall.Read(
         searchTabSelected = true,
@@ -29,123 +30,109 @@ class ExploreWallTest {
         typing = false,
     )
 
-    /** What the wall itself does to the read: nodes under it go quiet, the tab bar does not. */
-    private val underWall = grid.copy(barVisible = false, barBottom = null, gridVisible = false)
+    /** What the wall itself does to the read: the thumbnails go quiet, the bar and the tabs do not. */
+    private val underWall = grid.copy(gridVisible = false)
 
-    private fun wall() = ExploreWall(countdownMs = 5_000, releaseMs = 300)
+    /** The search page where it keeps the tab bar. On IG 452 it reads as null instead. */
+    private val searchPage = grid.copy(barVisible = false, barBottom = null, gridVisible = false)
 
-    @Test fun `the grid starts the countdown at 5`() {
-        assertEquals(Phase.Counting(5, tabs), wall().observe(grid, 1_000))
-    }
+    private fun wall() = ExploreWall(releaseMs = 300)
 
-    @Test fun `the countdown runs 5 4 3 2 1`() {
-        val w = wall()
-        w.observe(grid, 0)
-        val shown = listOf(0L, 999L, 1_000L, 2_500L, 3_999L, 4_999L)
-            .map { (w.observe(underWall, it) as Phase.Counting).secondsLeft }
-        assertEquals(listOf(5, 5, 4, 3, 2, 1), shown)
-    }
-
-    @Test fun `at zero the search bar is uncovered and the grid stays covered`() {
-        val w = wall()
-        w.observe(grid, 0)
-        assertEquals(Phase.Open(bar, tabs), w.observe(grid.copy(gridVisible = false), 5_000))
+    /** The search bar is the way past, so it is never covered, not even on the first frame. */
+    @Test fun `the first sighting of the grid covers everything under the search bar`() {
+        assertEquals(covered, wall().observe(grid, 1_000))
     }
 
     /** With no input the wall stays: only a change on screen takes it down. */
-    @Test fun `the open wall stays for as long as the grid is there`() {
+    @Test fun `the wall stays for as long as the page is there`() {
         val w = wall()
         w.observe(grid, 0)
-        assertEquals(Phase.Open(bar, tabs), w.observe(grid, 600_000))
+        assertEquals(covered, w.observe(underWall, 600_000))
     }
 
     @Test fun `the search page keyboard takes the wall down at once`() {
         val w = wall()
         w.observe(grid, 0)
-        w.observe(grid, 5_000)
-        assertEquals(Phase.None, w.observe(grid.copy(typing = true), 5_100))
+        assertNull(w.observe(underWall.copy(typing = true), 100))
+    }
+
+    /** IG 452: no tab bar on the search page, so every scan there is a null read. */
+    @Test fun `the search page having no tab bar takes the wall down`() {
+        val w = wall()
+        w.observe(grid, 0)
+        assertEquals(covered, w.observe(null, 100))
+        assertNull(w.observe(null, 400))
     }
 
     @Test fun `the action bar leaving takes the wall down`() {
         val w = wall()
         w.observe(grid, 0)
-        w.observe(grid, 5_000)
-        val searchPage = grid.copy(barVisible = false, barBottom = null, gridVisible = false)
-        w.observe(searchPage, 5_100)
-        assertEquals(Phase.None, w.observe(searchPage, 5_400))
+        w.observe(searchPage, 100)
+        assertNull(w.observe(searchPage, 400))
     }
 
-    /** The tabs stay usable throughout, including during the countdown. */
-    @Test fun `another tab takes the wall down at once, even mid-countdown`() {
+    /** The tabs stay usable throughout. */
+    @Test fun `another tab takes the wall down at once`() {
         val w = wall()
         w.observe(grid, 0)
-        assertEquals(Phase.None, w.observe(underWall.copy(searchTabSelected = false), 2_000))
+        assertNull(w.observe(underWall.copy(searchTabSelected = false), 2_000))
     }
 
     /** The bypass a "search was tapped" latch would open. */
-    @Test fun `returning from search to the grid starts again from 5`() {
+    @Test fun `returning from search to the grid puts the wall straight back`() {
         val w = wall()
         w.observe(grid, 0)
-        w.observe(grid, 5_000)
-        w.observe(grid.copy(typing = true), 5_100)
-        assertEquals(Phase.Counting(5, tabs), w.observe(grid, 9_000))
+        w.observe(underWall.copy(typing = true), 100)
+        assertEquals(covered, w.observe(grid, 9_000))
     }
 
-    @Test fun `the search bar under the wall does not end the countdown`() {
+    @Test fun `a bad read shorter than the release time does not disturb the wall`() {
         val w = wall()
         w.observe(grid, 0)
-        assertEquals(Phase.Counting(4, tabs), w.observe(underWall, 1_000))
-        assertEquals(Phase.Counting(1, tabs), w.observe(underWall, 4_500))
-    }
-
-    @Test fun `one bad read does not disturb the countdown`() {
-        val w = wall()
-        w.observe(grid, 0)
-        assertEquals(Phase.Counting(3, tabs), w.observe(null, 2_000))
-        assertEquals(Phase.Counting(3, tabs), w.observe(underWall, 2_200))
-        assertEquals(Phase.Counting(3, tabs), w.observe(null, 2_400))
-        assertEquals(Phase.Counting(3, tabs), w.observe(null, 2_500))
+        assertEquals(covered, w.observe(null, 2_000))
+        assertEquals(covered, w.observe(underWall, 2_200))
+        assertEquals(covered, w.observe(null, 2_400))
+        assertEquals(covered, w.observe(null, 2_500))
     }
 
     @Test fun `a read missing for the release time takes the wall down`() {
         val w = wall()
         w.observe(grid, 0)
         w.observe(null, 2_000)
-        assertEquals(Phase.None, w.observe(null, 2_300))
+        assertNull(w.observe(null, 2_300))
     }
 
     @Test fun `the wall does not start without a grid`() {
-        assertEquals(Phase.None, wall().observe(null, 0))
-        assertEquals(Phase.None, wall().observe(grid.copy(searchTabSelected = false), 0))
-        assertEquals(Phase.None, wall().observe(grid.copy(barVisible = false), 0))
-        assertEquals(Phase.None, wall().observe(grid.copy(typing = true), 0))
+        assertNull(wall().observe(null, 0))
+        assertNull(wall().observe(grid.copy(searchTabSelected = false), 0))
+        assertNull(wall().observe(grid.copy(barVisible = false), 0))
+        assertNull(wall().observe(grid.copy(typing = true), 0))
     }
 
     /** Search results may keep the action bar; they do not have the thumbnails. */
     @Test fun `the wall does not start on a page without thumbnails`() {
-        assertEquals(Phase.None, wall().observe(grid.copy(gridVisible = false), 0))
+        assertNull(wall().observe(underWall, 0))
     }
 
     @Test fun `the wall does not start without its edges`() {
-        assertEquals(Phase.None, wall().observe(grid.copy(barBottom = null), 0))
-        assertEquals(Phase.None, wall().observe(grid.copy(searchTabTop = null), 0))
-        assertEquals(Phase.None, wall().observe(grid.copy(barBottom = tabs), 0))
+        assertNull(wall().observe(grid.copy(barBottom = null), 0))
+        assertNull(wall().observe(grid.copy(searchTabTop = null), 0))
+        assertNull(wall().observe(grid.copy(barBottom = tabs), 0))
     }
 
-    @Test fun `the search bar edge follows the bar while it is visible`() {
+    @Test fun `the edges follow the bar and the tabs`() {
         val w = wall()
-        w.observe(grid.copy(barBottom = 200), 0)
-        assertEquals(Phase.Open(bar, tabs), w.observe(grid, 5_000))
+        w.observe(grid.copy(barBottom = 200, searchTabTop = 2_000), 0)
+        assertEquals(covered, w.observe(underWall, 100))
     }
 
-    @Test fun `the wake-up lands on the next second`() {
+    @Test fun `an edge missing from a read keeps its last value`() {
         val w = wall()
-        w.observe(grid, 1_000)
-        assertEquals(1_000L, w.delayUntilNext(1_000))
-        assertEquals(250L, w.delayUntilNext(2_750))
+        w.observe(grid, 0)
+        assertEquals(covered, w.observe(underWall.copy(barBottom = null, searchTabTop = null), 100))
     }
 
-    @Test fun `the wake-up comes sooner for a pending release`() {
+    @Test fun `the wake-up comes for a pending release`() {
         val w = wall()
         w.observe(grid, 0)
         w.observe(null, 1_100)
@@ -153,10 +140,9 @@ class ExploreWallTest {
         assertEquals(100L, w.delayUntilNext(1_300))
     }
 
-    @Test fun `an open wall has nothing to wake for`() {
+    @Test fun `a standing wall has nothing to wake for`() {
         val w = wall()
         w.observe(grid, 0)
-        w.observe(grid, 5_000)
         assertNull(w.delayUntilNext(5_000))
     }
 
@@ -167,6 +153,6 @@ class ExploreWallTest {
         assertTrue(w.up)
         w.reset()
         assertFalse(w.up)
-        assertEquals(Phase.Counting(5, tabs), w.observe(grid, 60_000))
+        assertEquals(covered, w.observe(grid, 60_000))
     }
 }

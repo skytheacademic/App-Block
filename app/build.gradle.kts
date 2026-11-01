@@ -47,6 +47,9 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 24 / 0.12.1: the Explore wall without its countdown. The grid is covered from the first frame
+        // and the search bar never is. Owner's call 2026-10-31, after seeing 0.12.0 on the phone.
+        //
         // 23 / 0.12.0: the Explore wall (engine/ExploreWall.kt). With the Reels + Explore pool spent, a
         // panel covers the Explore grid and the search bar for 5 s, then only the grid until search is
         // tapped. The bottom tabs stay usable. A tightening of CONSTRAINTS §1, owner's call 2026-10-31.
@@ -164,8 +167,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 23
-        versionName = "0.12.0"
+        versionCode = 24
+        versionName = "0.12.1"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")
