@@ -47,6 +47,17 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 25 / 0.12.2: the wall goes up at once. On 0.12.1 the grid sat uncovered for seconds on arrival:
+        // the content throttle dropped the event of the page settling, leaving only the 5 s tick. The
+        // last event of a burst is now kept, and a page still loading is looked at every 100 ms.
+        //
+        // 24 / 0.12.1: the Explore wall without its countdown. The grid is covered from the first frame
+        // and the search bar never is. Owner's call 2026-10-31, after seeing 0.12.0 on the phone.
+        //
+        // 23 / 0.12.0: the Explore wall (engine/ExploreWall.kt). With the Reels + Explore pool spent, a
+        // panel covers the Explore grid and the search bar for 5 s, then only the grid until search is
+        // tapped. The bottom tabs stay usable. A tightening of CONSTRAINTS §1, owner's call 2026-10-31.
+        //
         // 22 / 0.11.0: a block bounces to the home screen and then shows why. The block screen still
         // covers the instant a blocked thing appears, then sends Home at once with itself still up (the
         // same as pressing Home on it, so the app never shows), and the reason and the two fact rows are
@@ -160,8 +171,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 22
-        versionName = "0.11.0"
+        versionCode = 25
+        versionName = "0.12.2"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

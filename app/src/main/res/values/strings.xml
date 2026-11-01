@@ -8,6 +8,9 @@
     <string name="block_title">Blocked</string>
     <string name="block_message">You chose to block this app. Take a breath and go back.</string>
     <string name="block_message_bypass_tool">This app can hand adb-level control to other apps, which is enough to switch App-Block off. It is blocked permanently and can\'t be unblocked from the phone.</string>
+    <!-- The wall over Instagram's Explore grid. See overlay_explore_wall.xml. -->
+    <string name="explore_wall_title">Explore is closed</string>
+    <string name="explore_wall_search">Search still works. Tap it to find someone.</string>
     <string name="block_message_budget">You\'ve used up today\'s time for %1$s. It resets at 4am.</string>
     <string name="block_message_schedule">%1$s is outside its allowed hours right now. It opens again in its next window.</string>
     <string name="block_message_tamper">Clock tampering detected. Everything stays blocked until BOTH automatic date &amp; time AND automatic time zone are back on in Settings.</string>

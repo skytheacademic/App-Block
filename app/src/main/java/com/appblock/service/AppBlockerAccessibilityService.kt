@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
@@ -48,6 +49,7 @@ import com.appblock.engine.DisplayCoverage
 import com.appblock.engine.DisplayHolds
 import com.appblock.engine.DisplayOverlays
 import com.appblock.engine.DomainMatcher
+import com.appblock.engine.ExploreWall
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.OverlayRepairWatch
 import com.appblock.engine.RuleSource
@@ -154,6 +156,16 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var browserVisible = false
     private var lastBounceToastElapsedMs = 0L
     private var lastContentPumpElapsedMs = 0L
+    /**
+     * The last content event of a burst, kept instead of dropped by the throttle. That event is the page
+     * settling, and nothing else comes after it until the next tick, [TICK_MS] away.
+     */
+    private var contentTrailPending = false
+    private val contentTrail = Runnable {
+        contentTrailPending = false
+        lastContentPumpElapsedMs = SystemClock.elapsedRealtime()
+        requestPump()
+    }
     private var browserCache: Set<String> = emptySet()
     private var browserCacheAtMs = 0L
     /** Last line emitted by [diagnose], so debug logging only fires when the resolved state changes. */
@@ -214,6 +226,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
 
     /** The reason card on each display — see [showReasonCard]. */
     private val reasonCards = HashMap<Int, ReasonCard>()
+
+    /** The panel over Instagram's Explore grid — see [ExploreWall] and [updateExploreWall]. */
+    private val exploreWall = ExploreWall()
+    private var exploreWallView: ExploreWallView? = null
+    private val exploreWallRunnable = Runnable { requestPump() }
+    /** Last line emitted by [diagnoseExploreWall] — same once-per-distinct-state rule as [lastDiagLine]. */
+    private var lastWallDiagLine: String? = null
 
     /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
     private val windowKinds = WindowKindMemo()
@@ -415,9 +434,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val pkg = event.packageName?.toString()
         if (pkg == InstagramSurface.PACKAGE || (pkg != null && BrowserTargets.isAllowlisted(pkg))) {
             val now = SystemClock.elapsedRealtime()
-            if (now - lastContentPumpElapsedMs >= CONTENT_THROTTLE_MS) {
+            val wait = lastContentPumpElapsedMs + CONTENT_THROTTLE_MS - now
+            if (wait <= 0) {
                 lastContentPumpElapsedMs = now
                 requestPump()
+            } else if (!contentTrailPending) {
+                contentTrailPending = true
+                handler.postDelayed(contentTrail, wait)
             }
         }
     }
@@ -551,6 +574,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         refreshForeground(mergeForegrounds(effective))
         val decision = coordinator.tick()
         applyDecision(decision, effective)
+        updateExploreWall(effective, now)
         val coveredNow = overlays.covered()
         for ((id, read) in effective) {
             if (id in coveredNow && read.blockable) holds.seed(id, read, read.holdPackages, now)
@@ -1007,6 +1031,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
          * not a package.
          */
         val budgetedPackages: Set<String> = emptySet(),
+        /** Instagram's tab bar and Explore page on this display — see [updateExploreWall]. */
+        val exploreRead: ExploreWall.Read? = null,
     ) {
         /**
          * "Is anything limited on screen?" — the question every existing caller was really asking of
@@ -1190,7 +1216,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         }
         // One signal set per Instagram window, sharing this DISPLAY's node budget so a cheap popup
         // cannot starve the walk of the window that actually matters.
-        val perWindowSignals = collectInstagramSignals(instagramRoots)
+        val probe = ExploreProbe()
+        val perWindowSignals = collectInstagramSignals(instagramRoots, probe)
         // Union — for the canary and the log only, and accumulated across displays by the caller. The
         // *decision* is per-window within this display (see below).
         perWindowSignals.forEach { allSignals.addAll(it) }
@@ -1228,6 +1255,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 webHost,
                 browserPkg,
                 budgeted,
+                probe.read(),
             ),
             topPackage = onScreenPackages.firstOrNull(),
         )
@@ -1445,7 +1473,10 @@ class AppBlockerAccessibilityService : AccessibilityService() {
      * signal came from is load-bearing: [InstagramSurface.targetForWindows] exempts a reel only when
      * the DM sender field shares a window with the pager. Flattening here would throw that away.
      */
-    private fun collectInstagramSignals(roots: List<AccessibilityNodeInfo>): List<Set<String>> {
+    private fun collectInstagramSignals(
+        roots: List<AccessibilityNodeInfo>,
+        probe: ExploreProbe,
+    ): List<Set<String>> {
         // Accumulated across displays within one pass, and reset at the start of scanDisplays() — this
         // is now called once per display, so clobbering would report only the last one.
         lastIgWindowCount += roots.size
@@ -1468,6 +1499,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             while (stack.isNotEmpty() && budget-- > 0) {
                 val node = stack.removeLast()
                 walked++
+                probe.note(node)
                 idOf(node)?.let { id ->
                     // An unreadable visibility counts as visible: a read that throws must not become
                     // a free reel (fail closed).
@@ -1508,6 +1540,45 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             lastSignalConfirmElapsedMs[id] = now
             runCatching { witnessStore.confirm(id, clock.wallClockMs()) }
         }
+    }
+
+    /**
+     * What the Instagram walk saw of the Explore page, across that display's Instagram windows. Rides
+     * the same walk as the signals, so the wall costs no second walk of the tree.
+     */
+    private inner class ExploreProbe {
+        private var tabSeen = false
+        private var tabSelected = false
+        private var tabTop: Int? = null
+        private var barVisible = false
+        private var barBottom: Int? = null
+        private var gridVisible = false
+        private var typing = false
+
+        fun note(node: AccessibilityNodeInfo) {
+            runCatching {
+                if (node.isEditable && node.isFocused) typing = true
+                when (val id = idOf(node)) {
+                    InstagramSurface.SEARCH_TAB -> {
+                        tabSeen = true
+                        tabSelected = node.isSelected
+                        tabTop = boundsOf(node).top
+                    }
+                    InstagramSurface.EXPLORE_ACTION_BAR -> if (node.isVisibleToUser) {
+                        barVisible = true
+                        barBottom = boundsOf(node).bottom
+                    }
+                    else -> if (id in InstagramSurface.GRID_ITEM_IDS && node.isVisibleToUser) gridVisible = true
+                }
+            }
+        }
+
+        /** Null without the tab bar: nothing was seen that could say which page Instagram is on. */
+        fun read(): ExploreWall.Read? =
+            if (tabSeen) ExploreWall.Read(tabSelected, tabTop, barVisible, barBottom, gridVisible, typing)
+            else null
+
+        private fun boundsOf(node: AccessibilityNodeInfo) = Rect().also { node.getBoundsInScreen(it) }
     }
 
     /** [node]'s resource-id, or null if the node died under us mid-walk. */
@@ -1810,6 +1881,120 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         scheduleAutoExits(now)
     }
 
+    /** The Explore wall's window: what added it, and the edges it was last laid out with. */
+    private class ExploreWallView(
+        val displayId: Int,
+        val windowManager: WindowManager,
+        val view: View,
+        var top: Int,
+        var bottom: Int,
+    )
+
+    /**
+     * Put the wall over Instagram's Explore grid while the Reels + Explore pool is spent, and keep it in
+     * step with what is on screen. [ExploreWall] decides; this only draws it.
+     *
+     * It gives way to anything stronger: with a block screen up anywhere, or Instagram gone, it comes
+     * down at once rather than after the release grace. The wall shows on one display, the first with
+     * the grid on it, because it is a nudge and not a block, and a second wall on DeX is not worth a map.
+     *
+     * The status is read only on the Explore tab or with the wall up, so the feed costs nothing here.
+     */
+    private fun updateExploreWall(reads: Map<Int, Foreground>, nowMs: Long) {
+        val displayId = DisplayCensus.order(reads.keys).firstOrNull { reads[it]?.exploreRead != null }
+        val read = displayId?.let { reads[it]?.exploreRead }
+        val blockUp = lastCover.isNotEmpty()
+        val instagramGone = reads.values.none { it.instagramVisible }
+        val mayStand = !blockUp && !instagramGone &&
+            (exploreWall.up || read?.searchTabSelected == true) && reelsExploreClosed()
+        if (!mayStand) exploreWall.reset()
+        val panel = if (mayStand) exploreWall.observe(read, nowMs) else null
+        diagnoseExploreWall(panel, read)
+        renderExploreWall(displayId, panel)
+        handler.removeCallbacks(exploreWallRunnable)
+        exploreWall.delayUntilNext(nowMs)?.let { handler.postDelayed(exploreWallRunnable, it) }
+    }
+
+    /** Whether the Reels + Explore pool is closed right now, exceptions and tampering included. */
+    private fun reelsExploreClosed(): Boolean =
+        coordinator.snapshot().any { it.target == Target.INSTAGRAM_REELS_EXPLORE && it.access == Access.BLOCK }
+
+    private fun renderExploreWall(displayId: Int?, panel: ExploreWall.Panel?) {
+        val (top, bottom) = panel ?: return hideExploreWall()
+        val target = displayId ?: exploreWallView?.displayId ?: return
+        if (exploreWallView?.displayId != target) hideExploreWall()
+        val wall = exploreWallView ?: showExploreWall(target, top, bottom) ?: return
+        if (wall.top == top && wall.bottom == bottom) return
+        runCatching {
+            wall.windowManager.updateViewLayout(wall.view, exploreWallParams(top, bottom))
+            wall.top = top
+            wall.bottom = bottom
+        }
+    }
+
+    private fun showExploreWall(displayId: Int, top: Int, bottom: Int): ExploreWallView? {
+        val wm =
+            (if (displayId == DisplayCensus.DEFAULT_DISPLAY) windowManager else secondaryWindowManager(displayId))
+                ?: return null
+        val view = inflateOn(displayId, R.layout.overlay_explore_wall) ?: return null
+        // A window taken down underneath us is put back by the next pass, like a block screen is.
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                if (exploreWallView?.view === v) exploreWallView = null
+            }
+        })
+        if (!runCatching { wm.addView(view, exploreWallParams(top, bottom)) }.isSuccess) return null
+        return ExploreWallView(displayId, wm, view, top, bottom).also { exploreWallView = it }
+    }
+
+    private fun hideExploreWall() {
+        exploreWallView?.let { wall ->
+            exploreWallView = null
+            runCatching { wall.windowManager.removeView(wall.view) }
+        }
+    }
+
+    /**
+     * The wall's window, placed in the same screen coordinates the accessibility bounds are in.
+     *
+     *  - **Not focusable, not touch-modal.** The keyboard and Back belong to Instagram, and a touch off
+     *    the panel reaches the search bar and the tabs. [overlayParams] is the opposite on purpose,
+     *    because that one is a barrier and this one has a door.
+     *  - **`fitInsetsTypes = 0`.** The default would push the window clear of the status bar and put
+     *    every edge ~100 px off the bar it is meant to meet.
+     */
+    private fun exploreWallParams(top: Int, bottom: Int) = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.MATCH_PARENT,
+        bottom - top,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.OPAQUE,
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        y = top
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            fitInsetsTypes = 0
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+        }
+    }
+
+    /**
+     * The wall's reads, on QA builds only, once per distinct state. Written for the first test on the
+     * phone: `adb logcat -s AppBlockWall` on the search page is what shows whether [ExploreWall]'s
+     * `typing` and `bar` signals tell it from the grid.
+     */
+    private fun diagnoseExploreWall(panel: ExploreWall.Panel?, read: ExploreWall.Read?) {
+        if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        if (panel == null && read?.searchTabSelected != true) return
+        val line = "panel=$panel read=$read"
+        if (line == lastWallDiagLine) return
+        lastWallDiagLine = line
+        android.util.Log.d(WALL_TAG, line)
+    }
+
     /** One display's reason card, the window manager that added it, and its own timeout. */
     private class ReasonCard(val windowManager: WindowManager, val view: View, val dismiss: Runnable)
 
@@ -2089,8 +2274,11 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         displayListener = null
         stopTicking()
         handler.removeCallbacks(pumpRunnable)
+        handler.removeCallbacks(contentTrail)
         handler.removeCallbacks(autoExitRunnable)
         handler.removeCallbacks(settleRecheck)
+        handler.removeCallbacks(exploreWallRunnable)
+        hideExploreWall()
         reasonCards.keys.toList().forEach(::hideReasonCard)
         overlays.removeAll()
         super.onDestroy()
@@ -2152,6 +2340,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val EVT_TAG = "AppBlockEvt"
         /** One line per automatic exit — see [autoExitOverlay]. `adb logcat -s AppBlockExit`. */
         private const val EXIT_TAG = "AppBlockExit"
+        /** The Explore wall — see [diagnoseExploreWall]. `adb logcat -s AppBlockWall`. */
+        private const val WALL_TAG = "AppBlockWall"
         /** How long the reason card stays on the home screen unless tapped — see [showReasonCard]. */
         private const val REASON_CARD_MS = 4_000L
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
