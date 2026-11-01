@@ -36,7 +36,7 @@ class ExploreWallTest {
     /** The search page where it keeps the tab bar. On IG 452 it reads as null instead. */
     private val searchPage = grid.copy(barVisible = false, barBottom = null, gridVisible = false)
 
-    private fun wall() = ExploreWall(releaseMs = 300)
+    private fun wall() = ExploreWall(releaseMs = 300, armRetryMs = 100)
 
     /** The search bar is the way past, so it is never covered, not even on the first frame. */
     @Test fun `the first sighting of the grid covers everything under the search bar`() {
@@ -138,6 +138,40 @@ class ExploreWallTest {
         w.observe(null, 1_100)
         assertEquals(300L, w.delayUntilNext(1_100))
         assertEquals(100L, w.delayUntilNext(1_300))
+    }
+
+    /** A settled page sends no events: without this the next look is the 5 s tick, grid showing. */
+    @Test fun `the Explore page still loading is looked at again soon`() {
+        val w = wall()
+        assertNull(w.observe(underWall, 0))
+        assertEquals(100L, w.delayUntilNext(0))
+        assertEquals(covered, w.observe(grid, 100))
+        assertNull(w.delayUntilNext(100))
+    }
+
+    /** A profile opened from search has this tab selected and no action bar, for as long as it is open. */
+    @Test fun `a page of this tab that is not Explore is left alone`() {
+        val w = wall()
+        assertNull(w.observe(searchPage, 0))
+        assertNull(w.delayUntilNext(0))
+    }
+
+    @Test fun `no retry on another tab or while typing or with no read`() {
+        val w = wall()
+        w.observe(underWall.copy(searchTabSelected = false), 0)
+        assertNull(w.delayUntilNext(0))
+        w.observe(underWall.copy(typing = true), 0)
+        assertNull(w.delayUntilNext(0))
+        w.observe(underWall, 0)
+        w.observe(null, 100)
+        assertNull(w.delayUntilNext(100))
+    }
+
+    @Test fun `reset stops the retry`() {
+        val w = wall()
+        w.observe(underWall, 0)
+        w.reset()
+        assertNull(w.delayUntilNext(0))
     }
 
     @Test fun `a standing wall has nothing to wake for`() {

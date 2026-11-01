@@ -156,6 +156,16 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var browserVisible = false
     private var lastBounceToastElapsedMs = 0L
     private var lastContentPumpElapsedMs = 0L
+    /**
+     * The last content event of a burst, kept instead of dropped by the throttle. That event is the page
+     * settling, and nothing else comes after it until the next tick, [TICK_MS] away.
+     */
+    private var contentTrailPending = false
+    private val contentTrail = Runnable {
+        contentTrailPending = false
+        lastContentPumpElapsedMs = SystemClock.elapsedRealtime()
+        requestPump()
+    }
     private var browserCache: Set<String> = emptySet()
     private var browserCacheAtMs = 0L
     /** Last line emitted by [diagnose], so debug logging only fires when the resolved state changes. */
@@ -424,9 +434,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val pkg = event.packageName?.toString()
         if (pkg == InstagramSurface.PACKAGE || (pkg != null && BrowserTargets.isAllowlisted(pkg))) {
             val now = SystemClock.elapsedRealtime()
-            if (now - lastContentPumpElapsedMs >= CONTENT_THROTTLE_MS) {
+            val wait = lastContentPumpElapsedMs + CONTENT_THROTTLE_MS - now
+            if (wait <= 0) {
                 lastContentPumpElapsedMs = now
                 requestPump()
+            } else if (!contentTrailPending) {
+                contentTrailPending = true
+                handler.postDelayed(contentTrail, wait)
             }
         }
     }
@@ -2260,6 +2274,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         displayListener = null
         stopTicking()
         handler.removeCallbacks(pumpRunnable)
+        handler.removeCallbacks(contentTrail)
         handler.removeCallbacks(autoExitRunnable)
         handler.removeCallbacks(settleRecheck)
         handler.removeCallbacks(exploreWallRunnable)

@@ -34,10 +34,18 @@ package com.appblock.engine
  * the wall drops after [releaseMs]. [Read.typing] and the action bar leaving are the fallbacks for a
  * version that keeps the tab bar. `adb logcat -s AppBlockWall` prints each read on a QA build.
  *
+ * ## How it goes up
+ *
+ * A settled page sends no accessibility events, so a page caught still loading would otherwise wait for
+ * the next tick, up to 5 s of free grid (seen on the phone, 2026-10-31). So while the Explore page is on
+ * screen without its thumbnails, [delayUntilNext] asks to look again every [armRetryMs]. Only there: a
+ * profile opened from search also has this tab selected, and can stay open for as long as it likes.
+ *
  * Times are `SystemClock.elapsedRealtime`, like every other timer the user could otherwise reset.
  */
 class ExploreWall(
     private val releaseMs: Long = DEFAULT_RELEASE_MS,
+    private val armRetryMs: Long = DEFAULT_ARM_RETRY_MS,
 ) {
 
     /** What one scan found on Instagram's Explore page. Pixels are screen coordinates. */
@@ -61,6 +69,7 @@ class ExploreWall(
 
     private var panel: Panel? = null
     private var missingSince: Long? = null
+    private var loading = false
 
     /** Whether the wall is up. */
     val up: Boolean get() = panel != null
@@ -73,7 +82,10 @@ class ExploreWall(
     fun observe(read: Read?, nowMs: Long): Panel? {
         val standing = panel
         when {
-            standing == null -> panel = read?.let(::arm)
+            standing == null -> {
+                panel = read?.let(::arm)
+                loading = panel == null && read != null && onExplore(read)
+            }
             read != null && gone(read) -> reset()
             read != null && read.barVisible -> {
                 missingSince = null
@@ -88,21 +100,25 @@ class ExploreWall(
     }
 
     /** How long until [observe] could answer differently with the same input, or null if it never will. */
-    fun delayUntilNext(nowMs: Long): Long? = missingSince?.let { (it + releaseMs - nowMs).coerceAtLeast(0L) }
+    fun delayUntilNext(nowMs: Long): Long? =
+        if (loading) armRetryMs else missingSince?.let { (it + releaseMs - nowMs).coerceAtLeast(0L) }
 
     /** Forget everything, so the wall only comes back on the next sighting of the grid. */
     fun reset() {
         panel = null
         missingSince = null
+        loading = false
     }
 
     /** The wall for the Explore grid, if it is actually on screen with somewhere to put the wall. */
     private fun arm(read: Read): Panel? {
         val top = read.barBottom ?: return null
         val bottom = read.searchTabTop ?: return null
-        val onGrid = read.searchTabSelected && read.barVisible && read.gridVisible && !read.typing
-        return if (onGrid && top < bottom) Panel(top, bottom) else null
+        return if (onExplore(read) && read.gridVisible && top < bottom) Panel(top, bottom) else null
     }
+
+    /** The Explore page, with or without its thumbnails yet. */
+    private fun onExplore(read: Read): Boolean = read.searchTabSelected && read.barVisible && !read.typing
 
     /** Definite evidence the user left: another tab, or the search page's keyboard. */
     private fun gone(read: Read): Boolean = !read.searchTabSelected || read.typing
@@ -110,5 +126,8 @@ class ExploreWall(
     companion object {
         /** Long enough to outlast one churned read, short enough not to linger after leaving. */
         const val DEFAULT_RELEASE_MS = 300L
+
+        /** Each look is a walk of Instagram's tree, so not every frame, but well under a noticed flash. */
+        const val DEFAULT_ARM_RETRY_MS = 100L
     }
 }
