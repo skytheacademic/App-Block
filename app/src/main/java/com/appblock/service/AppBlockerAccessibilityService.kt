@@ -195,6 +195,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private var lastCover: Set<Int> = emptySet()
     /** Per-display census of the last scan, for [diagnose] and [diagnoseDisplays]. */
     private var lastCensus: List<DisplayCensus.Display> = emptyList()
+    /** App windows on the last scan with no readable root/package — `opaque=` in [diagnose]. Log-only. */
+    private val lastOpaqueWindows = ArrayList<String>(2)
     /** Last time a [DisplayManager.DisplayListener] callback drove a pump — see [scheduleDisplayPump]. */
     private var lastDisplayPumpElapsedMs = 0L
     private var displayListener: DisplayManager.DisplayListener? = null
@@ -1104,6 +1106,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         lastIgWindowCount = 0
         lastIgNodeCount = 0
         lastOmniboxRead.clear()
+        lastOpaqueWindows.clear()
         val byDisplay = windowsByDisplay()
         val enumerated = enumeratedDisplayIds()
         lastActiveDisplayId = activeDisplayId(byDisplay)
@@ -1188,8 +1191,19 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             // the whole resolution to "nothing foreground" - silently doing that stops accrual AND the
             // 5s tick, which is exactly how a blocker fails open.
             runCatching {
-                val root = window.root ?: return@runCatching
-                val pkg = root.packageName?.toString() ?: return@runCatching
+                val root = window.root
+                val pkg = root?.packageName?.toString()
+                if (pkg == null) {
+                    // Secure Folder canary, log-only. An app window we were handed but cannot read is
+                    // the one shape a user-150 window could take if the system lists it and withholds
+                    // its tree; Samsung Internet in there (same package as user 0's, which IS blocked)
+                    // went unblocked on 2026-11-03. A non-empty `opaque=` names that case; an empty one
+                    // while the container browser is on screen means it is not listed at all.
+                    if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                        lastOpaqueWindows.add("d$displayId:${window.title ?: "?"}")
+                    }
+                    return@runCatching
+                }
                 onScreenPackages.add(pkg)
                 if (pkg == InstagramSurface.PACKAGE) instagramRoots.add(root)
                 if (BrowserTargets.isAllowlisted(pkg)) visibleBrowsers.add(pkg)
@@ -1374,6 +1388,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             "igWindows=$lastIgWindowCount igNodes=$lastIgNodeCount " +
             "igSignals=${signals?.map { it.substringAfterLast('/') }} " +
             "target=$target overlay=${default in overlays.covered()}$held$web" +
+            (if (lastOpaqueWindows.isEmpty()) "" else " opaque=$lastOpaqueWindows") +
             DisplayCensus.blocks(censusNow())
         if (line == lastDiagLine) return
         lastDiagLine = line
