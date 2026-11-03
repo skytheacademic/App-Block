@@ -36,6 +36,46 @@ object BrowserTargets {
 
     fun isWebApp(pkg: String): Boolean = pkg.startsWith(WEBAPK_PREFIX)
 
+    /**
+     * Browsers recognised by name, on top of the installed-browser probe — never instead of it.
+     *
+     * The probe asks *this* user's package manager, so it cannot see an app installed only in another
+     * profile. Found on hardware 2026-11-03: Samsung Internet was uninstalled from user 0 and present
+     * only in Secure Folder (user 150), whose window accessibility hands us like any other — so it read
+     * as "not a browser" and went unblocked on every site. Any browser installed only in the container
+     * has the same shape; this list catches the common ones. Never contains an [allowlist] entry.
+     */
+    val knownBrowsers: Set<String> = setOf(
+        "com.sec.android.app.sbrowser",       // Samsung Internet
+        "com.sec.android.app.sbrowser.beta",
+        "org.mozilla.firefox",
+        "org.mozilla.firefox_beta",
+        "org.mozilla.fenix",                  // Firefox Nightly
+        "org.mozilla.focus",
+        "org.mozilla.klar",
+        "org.torproject.torbrowser",
+        "com.microsoft.emmx",                 // Edge
+        "com.opera.browser",
+        "com.opera.mini.native",
+        "com.opera.gx",
+        "com.duckduckgo.mobile.android",
+        "com.vivaldi.browser",
+        "com.kiwibrowser.browser",
+        "com.ecosia.android",
+        "com.UCMobile.intl",
+        "com.mi.globalbrowser",
+        "com.yandex.browser",
+        "mark.via.gp",
+        "com.chrome.beta",                    // Chrome channels other than stable are not allowlisted
+        "com.chrome.dev",
+        "com.chrome.canary",
+        "org.chromium.chrome",
+        "com.brave.browser_beta",
+        "com.brave.browser_nightly",
+    )
+
+    fun isKnownBrowser(pkg: String): Boolean = pkg in knownBrowsers
+
     /** The omnibox EditText resource-id whose text is the current URL, for an allowlisted browser. */
     fun urlBarId(pkg: String): String = "$pkg:id/url_bar"
 

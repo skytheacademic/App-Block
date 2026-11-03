@@ -1208,7 +1208,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 if (pkg == InstagramSurface.PACKAGE) instagramRoots.add(root)
                 if (BrowserTargets.isAllowlisted(pkg)) visibleBrowsers.add(pkg)
                 if (webBlock == null &&
-                    (BrowserTargets.isAllowlisted(pkg) || BrowserTargets.isWebApp(pkg) || pkg in browsers)
+                    (BrowserTargets.isAllowlisted(pkg) || BrowserTargets.isWebApp(pkg) ||
+                        pkg in browsers || BrowserTargets.isKnownBrowser(pkg))
                 ) {
                     browserVisible = true
                     val read =

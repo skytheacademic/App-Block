@@ -47,7 +47,7 @@ object BrowserPolicy {
             Omnibox.Editing, Omnibox.Unknown -> null
             Omnibox.Unreadable -> WebBlock.UNREADABLE_ADDRESS
         }
-        isBrowser -> WebBlock.NON_ALLOWLISTED_BROWSER
+        isBrowser || BrowserTargets.isKnownBrowser(pkg) -> WebBlock.NON_ALLOWLISTED_BROWSER
         else -> null
     }
 }
