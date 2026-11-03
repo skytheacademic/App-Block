@@ -47,6 +47,19 @@ class BrowserPolicyTest {
         assertNull(decide("com.some.app", isBrowser = false))
     }
 
+    /**
+     * Found on hardware 2026-11-03: Samsung Internet installed only in Secure Folder is invisible to
+     * user 0's browser probe, so `isBrowser` is false for it — and it went unblocked on every site.
+     */
+    @Test fun `a known browser the probe cannot see is still blocked`() {
+        assertEquals(BrowserPolicy.WebBlock.NON_ALLOWLISTED_BROWSER, decide(samsung, isBrowser = false))
+        assertEquals(BrowserPolicy.WebBlock.NON_ALLOWLISTED_BROWSER, decide(firefox, isBrowser = false))
+    }
+
+    @Test fun `the known-browser list never overlaps the allowlist`() {
+        assertEquals(emptySet<String>(), BrowserTargets.knownBrowsers intersect BrowserTargets.allowlist)
+    }
+
     @Test fun `allowlist beats the isBrowser flag`() {
         // Even if the browser-set query somehow omitted Chrome, being allowlisted means URL-watch, not block.
         assertNull(decide(chrome, isBrowser = false, omnibox = Omnibox.Url("https://news.ycombinator.com")))
