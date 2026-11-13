@@ -100,6 +100,31 @@ object InstagramSurface {
     val GRID_ITEM_IDS: Set<String> = setOf("${PREFIX}image_preview", "${PREFIX}grid_card_layout_container")
 
     /**
+     * The Reels tab in the bottom bar, `[216,2163][432,2298]` in every saved dump from July to IG 450
+     * (2026-10-11). Read for [ReelsTabCover] only, so it is not in [SIGNAL_IDS]. If Instagram renames it
+     * the tile stops appearing and a tap on the tab meets the full Reels block, as before the tile.
+     */
+    const val CLIPS_TAB = "${PREFIX}clips_tab"
+
+    /**
+     * The other four tabs. One of them visible to the user, in the Reels tab's row, is what says the tab
+     * bar is really on screen: the Reels tab itself cannot say so once the tile covers it.
+     */
+    val OTHER_TAB_IDS: Set<String> = setOf(
+        "${PREFIX}feed_tab",
+        "${PREFIX}direct_tab",
+        SEARCH_TAB,
+        "${PREFIX}profile_tab",
+    )
+
+    /**
+     * Instagram's own bottom sheet (comments, share): `[0,978][1080,2298]` with comments open on IG 450,
+     * over the tab bar, which stays in the tree underneath. The tile must not sit on top of a sheet's
+     * composer, so a visible sheet across the tab row takes it down.
+     */
+    const val BOTTOM_SHEET = "${PREFIX}bottom_sheet_container"
+
+    /**
      * The only resource-ids the on-device scan needs to look for, instead of collecting the whole
      * (large) Instagram tree.
      *

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The tile over Instagram's Reels tab while the Reels + Explore pool is closed: see
+  com.appblock.engine.ReelsTabCover. The window is sized to the tab's own rectangle, so this only
+  fills it: the same deep ground as the block screen and the Explore wall, with a lock where the icon was.
+
+  Clickable, so a tap on the tile stops here instead of opening Reels. No text: the tab is about 216 by
+  135 px, and the Explore wall and block screen already say why.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="Overdraw"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/lamp_block_ground"
+    android:clickable="true"
+    android:focusable="false">
+
+    <ImageView
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_gravity="center"
+        android:src="@drawable/ic_ph_lock_simple"
+        android:contentDescription="@string/reels_tab_cover"
+        android:importantForAccessibility="yes"
+        android:tint="@color/lamp_neutral_400"
+        tools:ignore="UseAppTint" />
+</FrameLayout>
