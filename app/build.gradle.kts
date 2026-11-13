@@ -47,6 +47,10 @@ android {
         // predictive-back default costs nothing, no foreground services, and no runtime
         // registerReceiver calls.
         targetSdk = 36
+        // 28 / 0.13.0: the Reels tab is covered while the Reels + Explore pool is closed
+        // (engine/ReelsTabCover.kt): a tile over the tab, taps stop there, the other tabs untouched.
+        // Owner asked 2026-11-13. Not a block; the full Reels block stays behind it.
+        //
         // 25 / 0.12.2: the wall goes up at once. On 0.12.1 the grid sat uncovered for seconds on arrival:
         // the content throttle dropped the event of the page settling, leaving only the 5 s tick. The
         // last event of a burst is now kept, and a page still loading is looked at every 100 ms.
@@ -171,8 +175,8 @@ android {
         // channel. 3 / 0.3.0: audit Batch B. 2 / 0.2.0: Batch A. Bumped per batch so App info on the
         // phone says which build is installed; installs go in ascending order because a release build
         // can't be downgraded.
-        versionCode = 27
-        versionName = "0.12.4"
+        versionCode = 28
+        versionName = "0.13.0"
 
         // Real caps everywhere by default; only the debugFast variant flips this on.
         buildConfigField("boolean", "FAST_CAPS", "false")

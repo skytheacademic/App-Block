@@ -52,6 +52,7 @@ import com.appblock.engine.DomainMatcher
 import com.appblock.engine.ExploreWall
 import com.appblock.engine.InstagramSurface
 import com.appblock.engine.OverlayRepairWatch
+import com.appblock.engine.ReelsTabCover
 import com.appblock.engine.RuleSource
 import com.appblock.engine.Schedule
 import com.appblock.engine.ServiceLiveness
@@ -235,6 +236,13 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private val exploreWallRunnable = Runnable { requestPump() }
     /** Last line emitted by [diagnoseExploreWall] — same once-per-distinct-state rule as [lastDiagLine]. */
     private var lastWallDiagLine: String? = null
+
+    /** The tile over Instagram's Reels tab — see [ReelsTabCover] and [updateReelsTabCover]. */
+    private val reelsTabCover = ReelsTabCover()
+    private var reelsTabView: ReelsTabView? = null
+    private val reelsTabRunnable = Runnable { requestPump() }
+    /** Last line emitted by [diagnoseReelsTab] — once per distinct state, like [lastWallDiagLine]. */
+    private var lastTabDiagLine: String? = null
 
     /** Which packages own application windows and which are system chrome — see [WindowKindMemo]. */
     private val windowKinds = WindowKindMemo()
@@ -577,6 +585,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val decision = coordinator.tick()
         applyDecision(decision, effective)
         updateExploreWall(effective, now)
+        updateReelsTabCover(effective, now)
         val coveredNow = overlays.covered()
         for ((id, read) in effective) {
             if (id in coveredNow && read.blockable) holds.seed(id, read, read.holdPackages, now)
@@ -1035,6 +1044,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         val budgetedPackages: Set<String> = emptySet(),
         /** Instagram's tab bar and Explore page on this display — see [updateExploreWall]. */
         val exploreRead: ExploreWall.Read? = null,
+        /** Instagram's tab bar on this display — see [updateReelsTabCover]. */
+        val reelsTabRead: ReelsTabCover.Read? = null,
     ) {
         /**
          * "Is anything limited on screen?" — the question every existing caller was really asking of
@@ -1232,7 +1243,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         // One signal set per Instagram window, sharing this DISPLAY's node budget so a cheap popup
         // cannot starve the walk of the window that actually matters.
         val probe = ExploreProbe()
-        val perWindowSignals = collectInstagramSignals(instagramRoots, probe)
+        val tabProbe = ReelsTabProbe()
+        val perWindowSignals = collectInstagramSignals(instagramRoots, probe, tabProbe)
         // Union — for the canary and the log only, and accumulated across displays by the caller. The
         // *decision* is per-window within this display (see below).
         perWindowSignals.forEach { allSignals.addAll(it) }
@@ -1271,6 +1283,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 browserPkg,
                 budgeted,
                 probe.read(),
+                tabProbe.read(),
             ),
             topPackage = onScreenPackages.firstOrNull(),
         )
@@ -1492,6 +1505,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
     private fun collectInstagramSignals(
         roots: List<AccessibilityNodeInfo>,
         probe: ExploreProbe,
+        tabProbe: ReelsTabProbe,
     ): List<Set<String>> {
         // Accumulated across displays within one pass, and reset at the start of scanDisplays() — this
         // is now called once per display, so clobbering would report only the last one.
@@ -1516,6 +1530,7 @@ class AppBlockerAccessibilityService : AccessibilityService() {
                 val node = stack.removeLast()
                 walked++
                 probe.note(node)
+                tabProbe.note(node)
                 idOf(node)?.let { id ->
                     // An unreadable visibility counts as visible: a read that throws must not become
                     // a free reel (fail closed).
@@ -1595,6 +1610,46 @@ class AppBlockerAccessibilityService : AccessibilityService() {
             else null
 
         private fun boundsOf(node: AccessibilityNodeInfo) = Rect().also { node.getBoundsInScreen(it) }
+    }
+
+    /**
+     * What the Instagram walk saw of the tab bar, for [ReelsTabCover]. Rides the same walk as the signals.
+     *
+     * The Reels tab's bounds are taken whether or not it reads as visible, because the tile over it may
+     * make it read as not visible; the other tabs and the bottom sheet count only when visible.
+     */
+    private inner class ReelsTabProbe {
+        private var reelsTab: ReelsTabCover.Box? = null
+        private var reelsTabSelected = false
+        private var visibleTab: ReelsTabCover.Box? = null
+        private var sheet: ReelsTabCover.Box? = null
+
+        fun note(node: AccessibilityNodeInfo) {
+            runCatching {
+                when (idOf(node)) {
+                    InstagramSurface.CLIPS_TAB -> {
+                        reelsTab = boxOf(node)
+                        reelsTabSelected = node.isSelected
+                    }
+                    InstagramSurface.BOTTOM_SHEET -> if (node.isVisibleToUser) sheet = boxOf(node)
+                    in InstagramSurface.OTHER_TAB_IDS ->
+                        if (visibleTab == null && node.isVisibleToUser) visibleTab = boxOf(node)
+                }
+            }
+        }
+
+        /** Null when neither the Reels tab nor any visible tab was seen: nothing says the bar is there. */
+        fun read(): ReelsTabCover.Read? =
+            if (reelsTab != null || visibleTab != null) {
+                ReelsTabCover.Read(reelsTab, reelsTabSelected, visibleTab, sheet)
+            } else {
+                null
+            }
+
+        private fun boxOf(node: AccessibilityNodeInfo): ReelsTabCover.Box {
+            val r = Rect().also { node.getBoundsInScreen(it) }
+            return ReelsTabCover.Box(r.left, r.top, r.right, r.bottom)
+        }
     }
 
     /** [node]'s resource-id, or null if the node died under us mid-walk. */
@@ -2011,6 +2066,105 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         android.util.Log.d(WALL_TAG, line)
     }
 
+    /** The Reels-tab tile's window: what added it, and the rectangle it was last laid out with. */
+    private class ReelsTabView(
+        val displayId: Int,
+        val windowManager: WindowManager,
+        val view: View,
+        var box: ReelsTabCover.Box,
+    )
+
+    /**
+     * Cover Instagram's Reels tab while the Reels + Explore pool is closed. [ReelsTabCover] decides; this
+     * only draws it. Gives way at once to a block screen or to Instagram leaving, like the Explore wall,
+     * and shows on one display: the first with Instagram's tab bar on it.
+     */
+    private fun updateReelsTabCover(reads: Map<Int, Foreground>, nowMs: Long) {
+        val displayId = DisplayCensus.order(reads.keys).firstOrNull { reads[it]?.reelsTabRead != null }
+        val read = displayId?.let { reads[it]?.reelsTabRead }
+        val blockUp = lastCover.isNotEmpty()
+        val instagramGone = reads.values.none { it.instagramVisible }
+        val mayStand = !blockUp && !instagramGone && reelsExploreClosed()
+        if (!mayStand) reelsTabCover.reset()
+        val tile = if (mayStand) reelsTabCover.observe(read, nowMs) else null
+        diagnoseReelsTab(tile, read, mayStand)
+        renderReelsTab(displayId, tile)
+        handler.removeCallbacks(reelsTabRunnable)
+        reelsTabCover.delayUntilNext(nowMs)?.let { handler.postDelayed(reelsTabRunnable, it) }
+    }
+
+    private fun renderReelsTab(displayId: Int?, tile: ReelsTabCover.Box?) {
+        tile ?: return hideReelsTab()
+        val target = displayId ?: reelsTabView?.displayId ?: return
+        if (reelsTabView?.displayId != target) hideReelsTab()
+        val shown = reelsTabView ?: showReelsTab(target, tile) ?: return
+        if (shown.box == tile) return
+        runCatching {
+            shown.windowManager.updateViewLayout(shown.view, reelsTabParams(tile))
+            shown.box = tile
+        }
+    }
+
+    private fun showReelsTab(displayId: Int, tile: ReelsTabCover.Box): ReelsTabView? {
+        val wm =
+            (if (displayId == DisplayCensus.DEFAULT_DISPLAY) windowManager else secondaryWindowManager(displayId))
+                ?: return null
+        val view = inflateOn(displayId, R.layout.overlay_reels_tab) ?: return null
+        // A window taken down underneath us is put back by the next pass, like the Explore wall.
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) = Unit
+            override fun onViewDetachedFromWindow(v: View) {
+                if (reelsTabView?.view === v) reelsTabView = null
+            }
+        })
+        if (!runCatching { wm.addView(view, reelsTabParams(tile)) }.isSuccess) return null
+        return ReelsTabView(displayId, wm, view, tile).also { reelsTabView = it }
+    }
+
+    private fun hideReelsTab() {
+        reelsTabView?.let { shown ->
+            reelsTabView = null
+            runCatching { shown.windowManager.removeView(shown.view) }
+        }
+    }
+
+    /**
+     * The tile's window: exactly the Reels tab's rectangle, in the same screen coordinates the
+     * accessibility bounds are in. Same flags as [exploreWallParams] for the same reasons: a touch on the
+     * tile stops there, a touch anywhere else is Instagram's, and the keyboard and Back are never ours.
+     */
+    private fun reelsTabParams(tile: ReelsTabCover.Box) = WindowManager.LayoutParams(
+        tile.right - tile.left,
+        tile.bottom - tile.top,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.OPAQUE,
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        x = tile.left
+        y = tile.top
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            fitInsetsTypes = 0
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+        }
+    }
+
+    /**
+     * The tile's reads, on QA builds only, once per distinct state. `adb logcat -s AppBlockTab` is what
+     * shows, on the first phone test, whether the Reels tab drops out of the tree under the tile and
+     * which pages keep the bar in the tree while hiding it.
+     */
+    private fun diagnoseReelsTab(tile: ReelsTabCover.Box?, read: ReelsTabCover.Read?, mayStand: Boolean) {
+        if (!BuildConfig.DEBUG && !BuildConfig.FAST_CAPS) return
+        if (!mayStand && tile == null) return
+        val line = "tile=$tile read=$read"
+        if (line == lastTabDiagLine) return
+        lastTabDiagLine = line
+        android.util.Log.d(TAB_TAG, line)
+    }
+
     /** One display's reason card, the window manager that added it, and its own timeout. */
     private class ReasonCard(val windowManager: WindowManager, val view: View, val dismiss: Runnable)
 
@@ -2295,6 +2449,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         handler.removeCallbacks(settleRecheck)
         handler.removeCallbacks(exploreWallRunnable)
         hideExploreWall()
+        handler.removeCallbacks(reelsTabRunnable)
+        hideReelsTab()
         reasonCards.keys.toList().forEach(::hideReasonCard)
         overlays.removeAll()
         super.onDestroy()
@@ -2358,6 +2514,8 @@ class AppBlockerAccessibilityService : AccessibilityService() {
         private const val EXIT_TAG = "AppBlockExit"
         /** The Explore wall — see [diagnoseExploreWall]. `adb logcat -s AppBlockWall`. */
         private const val WALL_TAG = "AppBlockWall"
+        /** The Reels-tab tile — see [diagnoseReelsTab]. `adb logcat -s AppBlockTab`. */
+        private const val TAB_TAG = "AppBlockTab"
         /** How long the reason card stays on the home screen unless tapped — see [showReasonCard]. */
         private const val REASON_CARD_MS = 4_000L
         /** Where a blocked page's exit sends the browser — verified on-device that Chrome accepts it
